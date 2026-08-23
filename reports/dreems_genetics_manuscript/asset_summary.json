@@ -1,0 +1,12 @@
+{
+  "calibration": {
+    "verification_examples": 1024
+  },
+  "checkpoint_sha256": "f0b677d2cc028252002d15fac843ca7347b1b352eb2286a18bd202b724aa92b4",
+  "empirical_dataset_count": 15,
+  "h2h": {
+    "examples": 512,
+    "feems_protocol": "v2_joint_lambda_lambda_q_leave_one_observed_deme_out"
+  },
+  "source_commit": "bb1a9b5719a82c6c50e81809251fc21f67ff9c4c"
+}

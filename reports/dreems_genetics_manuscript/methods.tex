@@ -1,0 +1,482 @@
+\subsection{Model description}
+
+\paragraph{Migration as graph conductance.}
+We represent a habitat by a connected, undirected graph $G=(V,E)$ with
+$n=|V|$ nodes and $m=|E|$ edges. Let
+$B\in\mathbb{R}^{m\times n}$ be an incidence matrix under an arbitrary edge
+orientation. The target is a vector of relative edge log-conductances
+$\vect{\theta}\in\mathbb{R}^m$. Positive conductances
+$w_e=\exp(\theta_e)$ define the weighted graph Laplacian
+\begin{equation}
+    L(\vect{\theta})
+    =B^\mathsf{T}\operatorname{diag}\{\exp(\vect{\theta})\}B.
+    \label{eq:weighted-laplacian}
+\end{equation}
+The effective resistance between nodes $i$ and $j$ is
+\begin{equation}
+    R_{ij}(\vect{\theta})
+    =
+    (\vect e_i-\vect e_j)^\mathsf{T}
+    L(\vect{\theta})^+
+    (\vect e_i-\vect e_j),
+    \label{eq:effective-resistance}
+\end{equation}
+where $L^+$ is the inverse on the mean-zero subspace. Multiplying every
+conductance by the same constant changes the covariance scale but not the
+relative surface. We therefore center true and estimated log-conductances to
+have mean zero within each graph.
+
+The canonical input is a node-level covariance matrix, coordinates for the
+graph nodes, an undirected edge list, indices and sample counts for observed
+nodes, and an effective SNP count. The public interface also accepts a sample
+covariance matrix and sample coordinates, or genotypes and sample coordinates,
+and constructs this object. Geographic coordinates assign samples to the
+nearest node and determine normalized edge length. Environmental layers and a
+fitted \feems surface are not inputs.
+
+The model also predicts a centered node field
+$\eta_i=\log q_i-\operatorname{mean}_j\log q_j$, where $q_i$ is the local
+coalescence-rate coefficient used by the simulator. This nuisance output helps
+the network distinguish variation in within-deme drift from edge conductance,
+although the two remain statistically coupled.
+
+\paragraph{Covariance calculation and deme aggregation.}
+For a diploid genotype matrix $X$, with $s$ samples, $\ell$ SNPs, and entries
+encoded as 0, 1, or 2, we remove monomorphic variants and standardize each
+retained SNP across samples:
+\begin{equation}
+    Z_{al}
+    =\frac{X_{al}-\bar X_{\cdot l}}
+    {\operatorname{sd}(X_{\cdot l})},
+    \qquad
+    C=\ell^{-1}ZZ^\mathsf{T}.
+    \label{eq:sample-covariance}
+\end{equation}
+The sample standard deviation uses denominator $s-1$. Missing genotypes in
+the empirical analyses were mean-imputed after variant filtering. If $A$
+averages samples assigned to each observed node, the node-level covariance is
+$C_o=ACA^\mathsf{T}$.
+
+When a user supplies covariance directly, we symmetrize it and project small
+negative eigenvalues to zero before aggregation. The effective SNP count is
+retained because it controls sampling-precision features. Covariance input
+does not preserve linkage, allele-frequency spectra, or higher-order genotype
+information.
+
+\paragraph{Covariance score maps.}
+We retain the leading 20 eigenpairs of the observed-node covariance and form
+score maps
+\begin{equation}
+    U_k=\sqrt{\lambda_k}\vect v_k,
+    \qquad k=1,\ldots,20.
+    \label{eq:covariance-scores}
+\end{equation}
+Scores at unobserved nodes are zero, eigenvector signs are fixed
+deterministically, and unavailable components are zero-padded. These are
+eigenvectors of genetic covariance, not graph-Laplacian eigenvectors.
+
+\subsection{All-pairs linearized resistance initializer}
+
+The $o$ observed demes provide $o(o-1)/2$ pairwise dissimilarities
+\begin{equation}
+    D_{ij}=C_{o,ii}+C_{o,jj}-2C_{o,ij}.
+\end{equation}
+The initializer uses every observed pair. Its implementation batch size of
+256 limits working memory and does not subsample the data.
+
+We define a fixed baseline conductance
+$w_e^{(0)}=\operatorname{clip}(d_{\mathrm{med}}/d_e,0.25,4)$ from edge length.
+Sparse grounded solves give baseline resistances $R_{ij}^{(0)}$ and node
+potentials $\vect\phi_{ij}$ for unit current injected at $i$ and removed at
+$j$. The first-order sensitivity of log resistance to edge log-conductance is
+\begin{equation}
+    A_{(ij),e}
+    =
+    \left.
+    \frac{\partial\log R_{ij}}{\partial\theta_e}
+    \right|_{\vect\theta^{(0)}}
+    =-
+    \frac{w_e^{(0)}\{(B\vect\phi_{ij})_e\}^2}
+    {R_{ij}^{(0)}}.
+    \label{eq:resistance-sensitivity}
+\end{equation}
+Thus a pair contributes to each edge carrying baseline electrical flow between
+its endpoints.
+
+Let $\vect r$ be the centered difference between observed and baseline log
+dissimilarity. We accumulate $\vect g=A^\mathsf{T}\vect r$ and the diagonal
+information approximation $h_e=\sum_{i<j}A_{(ij),e}^2$ without materializing
+the dense sensitivity matrix. The update solves
+\begin{equation}
+    \left[
+      \operatorname{diag}(\vect h+\rho)+0.01L_E
+    \right]\vect\delta=\vect g,
+    \label{eq:linearized-initializer}
+\end{equation}
+where $L_E$ is the unweighted line-graph Laplacian and $\rho$ is 0.001 times
+the median positive diagonal information. We center and scale $\vect\delta$
+to unit standard deviation. The field and a numerical-validity indicator are
+the final two edge features. This is a one-step diagonal approximation. It is
+evidence for the network to denoise rather than a stand-alone inverse
+solution.
+
+\subsection{Fixed diffusion-band features}
+
+The spatial representation is unchanged by translating, rotating, reflecting,
+uniformly rescaling, or relabeling the same graph. The network receives no
+absolute coordinates or signed $x$/$y$ edge displacement. Coordinate slots
+retained for checkpoint-shape compatibility are fixed at zero. Edge length is
+divided by a graph-level reference length, endpoint sample-count and precision
+features use symmetric means and absolute differences, and support is routed
+over all shortest paths rather than one arbitrarily selected path.
+
+For the multiscale features, the reference edge weight is
+$a_e=\operatorname{clip}(d_{\mathrm{med}}/d_e,0.25,4)$. If $A_0$ and $D_0$
+are the corresponding adjacency and degree matrices, the fixed normalized
+Laplacian is
+\begin{equation}
+    L_0=I-D_0^{-1/2}A_0D_0^{-1/2}.
+\end{equation}
+This operator depends on graph topology and relative edge length, not on the
+unknown migration surface. For a node-signal matrix $S$, we compute
+$S_t=\exp(-tL_0)S$ at $t=(0.25,0.5,1,2,4)$ and form
+\begin{equation}
+ \begin{split}
+    \Psi_0(S)&=S-S_{0.25},\\
+    \Psi_k(S)&=S_{t_k}-S_{t_{k+1}},\quad k=1,\ldots,4,\\
+    \Psi_5(S)&=S_{4}.
+ \end{split}
+ \label{eq:diffusion-bands}
+\end{equation}
+The bands retain changes removed at successive diffusion scales and a final
+coarse component.
+
+The diffusion input contains 13 standardized node signals: the first eight
+covariance score maps, log sample count, a sampled-node indicator, total and
+within-deme covariance support, and the covariance diagonal. Six bands give
+78 node features. For each signal and band, we compute three symmetric edge
+summaries: absolute endpoint contrast, log one plus squared contrast, and mean
+endpoint absolute energy. These give 234 edge features. Base features add the
+full 20 covariance scores, sample and SNP precision, covariance support,
+normalized length, symmetric endpoint summaries, and shortest-path support.
+The final arrays have 109 node and 253 edge columns, including the two
+initializer columns. Training-corpus means and standard deviations normalize
+each column, with a standard-deviation floor of 0.2.
+
+\subsection{Graph neural network}
+
+Table~\ref{tab:model-setup} summarizes the model. We implemented it with
+Equinox and JAX \citep{jax2018,deepmind2020jax,equinox2021}. An affine GELU
+layer embeds node features in 128 dimensions. Ten residual edge-aware
+message-passing layers apply directed messages
+\begin{equation}
+    \vect m_{j\rightarrow i}^{(k)}
+    =
+    \vect h_j^{(k)}\odot
+    \operatorname{sigmoid}(W_g^{(k)}\vect x_{ij})
+    +\operatorname{GELU}(W_m^{(k)}\vect x_{ij}),
+    \label{eq:edge-message}
+\end{equation}
+followed by a residual node update using the mean incoming message. A
+three-layer context branch uses the same graph. No graph coarsening or pooling
+is present in the released architecture.
+
+For edge $(i,j)$, the decoder uses
+\begin{equation}
+    \vect u_{ij}
+    =
+    [\vect h_i+\vect h_j,
+      |\vect h_i-\vect h_j|,
+      \vect x_{ij}],
+\end{equation}
+which is symmetric in its endpoints. A query derived from $\vect u_{ij}$
+attends to keys and values from all context-node embeddings, giving every edge
+graph-wide context despite finite message-passing depth. Separate affine heads
+predict an edge mean $\mu_e$ and log variance $\ell_e$, with
+$\ell_e\in[-7,5]$, and analogous node-$q$ outputs. Edge means and node means
+are centered within each graph.
+
+The output family is a factorized normal distribution trained against
+simulated targets. It approximates the conditional distribution induced by
+the simulation corpus. It is not the result of variational inference for an
+explicit per-dataset likelihood, and it does not represent covariance among
+edge errors. We therefore call $\exp(\ell_e/2)$ the network predictive SD, not
+a posterior SD.
+
+\begin{table}[t]
+\centering
+\caption{Model and optimization settings for the production checkpoint.}
+\label{tab:model-setup}
+\small
+\input{tables/model_setup.tex}
+\end{table}
+
+\subsection{Graph-balanced training objective}
+
+Let $\theta_e^\star$ and $\eta_i^\star$ be centered simulation targets. The
+principal edge term is the graphwise heteroscedastic Gaussian negative
+log-likelihood
+\begin{equation}
+    \mathcal L_{\mathrm{edge}}
+    =\frac{1}{2m}\sum_{e=1}^m
+    \left[(\mu_e-\theta_e^\star)^2\exp(-\ell_e)+\ell_e\right].
+    \label{eq:edge-nll}
+\end{equation}
+The node-$q$ head uses the same form. The full loss is
+\begin{equation}
+ \begin{split}
+    \mathcal L={}&
+    \mathcal L_{\mathrm{edge}}
+    +0.5\mathcal L_{\mathrm{context}}
+    +0.5\mathcal L_q\\
+    &+0.25\mathcal L_{\mathrm{slope}}
+    +0.20\mathcal L_{\mathrm{corr}}
+    +0.35\mathcal L_{\mathrm{orientation}}.
+ \end{split}
+ \label{eq:total-loss}
+\end{equation}
+The context term is edge MSE from the auxiliary branch. The slope term is a
+Huber loss on the within-graph regression slope relative to one, the
+correlation term is $1-r$, and the orientation term penalizes failure to
+separate above- and below-mean target edges. Shape terms are disabled when the
+target's centered RMS is at most 0.05. Every component is reduced within each
+graph before averaging over the minibatch, so a graph contributes one weight
+regardless of its edge count. The training loss contains no resistance or
+covariance-forward term.
+
+\subsection{Synthetic training corpus}
+
+\paragraph{Graphs, surfaces, and sampling.}
+We generated 61,440 training examples, 1,024 validation examples, and 4,096
+held-out examples with disjoint random seeds. Table~\ref{tab:training-corpus}
+reports the realized training ranges. The corpus combines five graph families.
+
+The largest component contains 34,605 random global-landscape examples. We
+sample geographic windows over land between $55^\circ$S and $72^\circ$N from
+Natural Earth 50-m polygons \citep{naturalearth}, project each window to a
+local azimuthal-equidistant system, and place a hexagonal mesh over its full
+bounding box. Water nodes remain in the graph but cannot be sampled. Target
+sizes are 220, 450, 900, or 1,400 nodes. Conductance surfaces combine a random
+smooth field, habitat mismatch, edge length, water and coast penalties, and a
+randomly placed sinuous ridge. Coefficients, length scales, and final edge-log
+standard deviation vary among examples. A separate smooth field generates
+local $q$. Natural Earth and latent habitat variables generate targets and
+sampling designs; they are never supplied to \dreems.
+
+Another 12,256 examples use the $8\times12$ triangular lattice from \feems
+simulations, with homogeneous, barrier, and anisotropic surfaces and either
+full or approximately 20\% node sampling. A further 5,123 examples use land
+or synthetic-corridor graphs with wolf-like sampling paths. The remaining
+9,456 use masked grids and earth-like graphs with smooth, barrier,
+Gaussian-process, or constant surfaces. Across global-landscape and wolf-like
+examples, requested sampled-node fractions are 0.03, 0.05, 0.10, 0.25, or
+0.50, weighted toward the sparse values. Each sampled node contains one to
+eight diploid individuals, up to 384 total in those families. Other graph
+families extend the realized range to 1,200 samples.
+
+\begin{table}[t]
+\centering
+\caption{Realized production training corpus. Counts refer to graphs, not
+SNPs.}
+\label{tab:training-corpus}
+\small
+\input{tables/training_corpus.tex}
+\end{table}
+
+\paragraph{Structured-coalescent SNP simulation.}
+We wrote a Rust simulator for large stepping-stone models. Its state consists
+of ancestral lineages and their current demes. If deme $i$ contains $k_i$
+lineages, coalescence occurs there at total rate
+$q_i k_i(k_i-1)/2$; each lineage moves from $i$ to $j$ at the specified edge
+migration rate. Production rates are symmetric. Descendant sets are stored in
+one or more 128-bit words, and random draws use Rust \texttt{SmallRng}.
+
+For the production \texttt{conditioned\_random\_marker} scheme, we simulate a
+genealogy and select a branch proportional to branch length, which is the
+location distribution of a random infinite-sites mutation conditional on a
+mutation occurring on that genealogy. We retain a marker only when its sample
+allele frequency lies in $[0.05,0.95]$ and repeat until reaching the requested
+number. Within demes, derived and ancestral haplotypes are randomly paired
+without replacement to form diploid dosages. Accepted dosage columns are
+standardized and accumulated directly into
+Equation~\ref{eq:sample-covariance}; genotype matrices are not stored for the
+training corpus. Examples contain 2,000--10,000 accepted SNPs.
+
+We compared the Rust simulator with \texttt{msprime} on small graphs and with
+symmetry and closed-form checks for the symmetric island model
+\citep{baum2022efficient}. Tests compared allele counts, pairwise differences,
+and covariance summaries over replicates.
+
+\subsection{Optimization and checkpoint selection}
+
+We used Adam with learning rate $5\times10^{-5}$, minibatch size 8, and global
+gradient-norm clipping at one \citep{kingma2015adam}. Training sampled graphs
+repeatedly rather than making one pass through the corpus. We evaluated all
+1,024 validation graphs every 1,000 steps. After a 20,000-step warmup, early
+stopping required an improvement greater than $10^{-4}$ within 12 validation
+checks. The best graph-balanced validation loss was 0.15724 at step 29,000.
+Training stopped at step 41,000 and restored the step-29,000 parameters. The
+one-GPU run took 7,578.6 seconds (2.11 h), used 2,230.1 CPU-seconds, and reached
+5.35 GiB resident memory. The checkpoint SHA-256 is
+\texttt{f0b677d2cc028252002d15fac843ca7347b1b352eb2286a18bd202b724aa92b4}.
+
+\subsection{Fixed q-aware trust-region covariance refinement}
+
+The neural prediction is amortized and need not closely fit one dataset's
+covariance. The default pipeline therefore applies a fixed 50-step refinement
+without selecting a test-specific hyperparameter. Let
+$P_o=I_o-\vect1\vect1^\mathsf{T}/o$ and let $G_o(\vect\theta)$ be the
+observed-node submatrix of $L(\vect\theta)^+$. Define
+\begin{equation}
+    \bar C_o=P_oC_oP_o,
+    \qquad
+    \bar G_o(\vect\theta)=P_oG_o(\vect\theta)P_o.
+\end{equation}
+From the predicted node field we also form
+\begin{equation}
+    Q_o(\vect\eta)
+    =\operatorname{diag}
+      \left\{\frac{\exp(\eta_i)}{n_i}:i\text{ observed}\right\},
+    \qquad
+    \bar Q_o=P_oQ_oP_o,
+\end{equation}
+where $n_i$ is the number of samples at observed node $i$.
+
+At every edge update, nonnegative least squares fits global scales
+$\alpha,\beta\geq0$ for the migration and local-$q$ bases. The objective is
+\begin{equation}
+ \begin{split}
+    \mathcal J(\vect\theta)
+    ={}&
+    \frac{1}{2\binom{o}{2}}
+    \sum_{i<j}
+    \left\{
+      \bar C_{o,ij}
+      -\alpha\bar G_{o,ij}(\vect\theta)
+      -\beta\bar Q_{o,ij}
+    \right\}^2\\
+    &+\frac{10^{-4}}{2m}
+      \vect\theta^\mathsf{T}L_E\vect\theta.
+ \end{split}
+ \label{eq:refinement-objective}
+\end{equation}
+Analytic gradients through sparse grounded solves avoid constructing $L^+$.
+We use 50 Adam updates at learning rate 0.15. Edge batches of 256 control
+working memory only.
+
+The update remains in an uncertainty-scaled trust region around the neural
+mean $\vect\mu$:
+\begin{equation}
+    \left[
+      \frac{1}{m}\sum_{e=1}^m
+      \left\{
+        \frac{\theta_e-\mu_e}{\max(\sigma^{\mathrm{raw}}_e,0.25)}
+      \right\}^2
+    \right]^{1/2}
+    \leq0.5.
+    \label{eq:trust-region}
+\end{equation}
+The radius uses the raw neural SD because it was fixed before post-hoc
+calibration. The locked configuration has no Gaussian-prior penalty; its
+weight is zero. We therefore call the procedure constrained covariance
+refinement rather than MAP. Refinement changes the point estimate but not the
+reported predictive SD.
+
+\subsection{Synthetic head-to-head benchmark}
+
+\paragraph{Test examples.}
+We generated 512 independent global-landscape examples with new random seeds.
+Graphs contain 219--1,406 nodes (median 452) and 590--4,065 edges (median
+1,270). They contain 2--384 observed nodes (median 39), 5--384 diploid samples
+(median 135), and 2,003--9,996 accepted SNPs (median 5,811). The observed-node
+fraction ranges from 0.004 to 0.500 (median 0.049). We evaluate both the frozen
+neural mean and the fixed radius-0.5 refined mean.
+
+\paragraph{Documented \feems LOO cross-validation.}
+We pinned upstream \feems 2.0 at commit
+\texttt{aa890b0e8ef583dd657a6a696af591b732d1d8be}. Following its documented
+cross-validation notebook and source, each fold holds out all samples at one
+observed deme. Candidate fits use the remaining demes, and selection scores
+held-out allele-frequency prediction by L2 error. We jointly search ten
+migration-smoothness values logarithmically spaced from 100 to 0.001 and five
+$q$-smoothness values from 100 to 0.01. The selected pair is refit to all
+samples with node-specific $q$, unbounded log weights, and at most 15,000
+iterations. This gives \feems its documented leave-one-observed-deme-out,
+dataset-specific selector; \dreems uses one checkpoint and one prespecified
+refinement for every example. Both methods receive the same genotype matrix,
+sample locations, and graph.
+
+\paragraph{Accuracy and paired inference.}
+For each graph, we center estimates and true edge log-conductances and compute
+Pearson correlation and mean squared error (MSE). Each graph contributes one
+value, regardless of edge count. For paired contrasts, an advantage is
+\dreems correlation minus \feems correlation or \feems MSE minus \dreems MSE.
+We report the mean advantage, a two-sided 95\% Student-$t$ interval, the paired
+$t$-test $P$ value, and the fraction of examples won. Sampling strata are
+sparse ($\leq10\%$ of graph nodes observed), intermediate ($>10\%$ and
+$\leq25\%$), and dense ($>25\%$). Graph-size strata were fixed before
+summarization.
+
+For \dreems only, we also evaluate covariance fit by correlating observed
+off-diagonal centered covariance with $\alpha\bar G_o+\beta\bar Q_o$ and by
+its $R^2$ and MSE. Comparable covariance predictions were not retained in the
+completed synthetic \feems artifacts, so these values are diagnostic rather
+than a cross-method covariance comparison.
+
+\subsection{Runtime and resource accounting}
+
+Runtime includes model loading, feature construction, the neural forward pass,
+and refinement for \dreems, and all LOO folds plus the selected final refit for
+\feems. In 511 cases, \dreems used two CPU threads and \feems executed folds
+through a process pool of up to 16 workers. The remaining example had 384
+\feems folds, each represented as an independent Snakemake job
+\citep{koster2012snakemake}; we report its idealized compute critical path and
+aggregate worker use separately. These measurements describe the executed
+workflows, not hardware-normalized single-core benchmarks. Training and
+corpus-generation costs are not charged to an individual \dreems analysis.
+
+\subsection{Predictive-SD calibration and utility}
+
+We used three independent sets of 1,024 simulated graphs for calibration fit,
+model selection, and verification. Candidate calibrators left raw SDs
+unchanged, multiplied all SDs by one global scale, or applied additional
+sampling-density factors for fractions $\leq0.10$, 0.10--0.25, and $>0.25$.
+Parameters were fit by graph-balanced normal NLL, and the candidate with
+lowest NLL on the selection set was locked. The selected density calibrator
+had global multiplier 1.3117 and density factors 1.0753, 0.9951, and 1.9091.
+We then measured graph-balanced 50\%, 80\%, and 95\% marginal coverage on the
+verification set. The same locked calibration was used in the 512-example
+head-to-head benchmark.
+
+To ask whether uncertainty is useful beyond coverage, we correlated calibrated
+edge SD with absolute refined error, computed within-graph rank correlations,
+correlated graph-mean SD with graph MSE, and compared MSE across pooled SD
+quintiles. These are marginal diagnostics for a factorized predictor, not
+simultaneous coverage statements.
+
+\subsection{Empirical reanalyses}
+
+We applied the checkpoint without retraining to 15 public datasets that had
+georeferenced genotypes, covariance-like EEMS input, or an existing
+EEMS/\feems analysis. For raw genotypes we retained biallelic variants,
+required study-appropriate call rate, mean-imputed missing calls, and applied a
+common minor-allele-frequency threshold of 0.05. Exact source, filtering,
+graph construction, and SNP-count provenance is stored per dataset in the
+release manifest. Graphs contain 193--4,371 nodes and 539--12,829 edges;
+observed fractions range from 0.0066 to 0.2045.
+
+Published comparison panels were copied from the original papers or
+author-distributed EEMS output. They can differ from our reanalysis in input
+filtering, graph construction, regularization, method, and rendering. We use
+them only for a qualitative visual audit. Because true conductance fields are
+unknown in empirical data, no edgewise accuracy is reported.
+
+The North American gray-wolf data distributed with \feems received a separate
+same-graph analysis \citep{schweizer2016wolves,marcus2021feems}. The common-MAF
+filtered matrix contains 111 samples and 17,729 SNPs assigned to 94 of 1,207
+nodes on the packaged 3,458-edge graph. We compare neural and refined \dreems
+with \feems selected by its 94-fold joint LOO procedure. As descriptive
+diagnostics, we report off-diagonal covariance fit, correlation of each
+\dreems edge field with the \feems field, edge-field standard deviation, and
+mean centered edge log-conductance in a broad Hudson Bay bounding region. The
+last quantity is not a formal geographic hypothesis test.

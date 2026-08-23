@@ -1,0 +1,15 @@
+# Held-out posterior-SD calibration for the production training run.
+outdir: results/dreems_calibration
+checkpoint: results/dreems_production/model/checkpoint.best.dreems.zip
+raw_source_dir: results/dreems_production/raw
+raw_source_layout: packs
+raw_pack_size: 64
+
+# Test IDs 0-1023 are reserved for training-time early stopping. These three
+# ranges are disjoint from that split and from one another.
+fit_start: 1024
+fit_stop: 2048
+selection_start: 2048
+selection_stop: 3072
+verification_start: 3072
+verification_stop: 4096

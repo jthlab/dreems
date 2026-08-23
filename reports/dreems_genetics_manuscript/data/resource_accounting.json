@@ -1,0 +1,30 @@
+{
+  "atomized_example": {
+    "aggregate_cpu_seconds": 75948.03,
+    "critical_path_compute_seconds": 333.90000000000003,
+    "example": 295,
+    "final_cpu_seconds": 43.1,
+    "final_wall_seconds": 64.73,
+    "fold_cpu_sum_seconds": 75904.93,
+    "fold_wall_max_seconds": 269.17,
+    "fold_wall_sum_seconds": 83788.40000000001,
+    "folds": 384,
+    "peak_rss_mb": 850.71
+  },
+  "dreems_elapsed_median_seconds": 8.422801005886868,
+  "dreems_elapsed_p95_seconds": 25.7993404584704,
+  "dreems_prediction_median_seconds": 6.050891617313027,
+  "dreems_workers": 2,
+  "feems_elapsed_median_seconds": 151.59392012492754,
+  "feems_elapsed_p95_seconds": 1365.6264295314904,
+  "feems_workers": 16,
+  "note": "The 511 FEEMS elapsed times include LOO CV in a process pool and the final fit. Example 295 used one Snakemake job per fold and is reported separately.",
+  "paired_speedup_geometric_mean": 14.846736551977143,
+  "paired_speedup_median": 16.38985690903223,
+  "process_pool_cases": 511,
+  "training": {
+    "cpu_seconds": 2230.07,
+    "max_rss_mb": 5477.16,
+    "wall_seconds": 7578.56
+  }
+}

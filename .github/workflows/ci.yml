@@ -1,0 +1,166 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      DREEMS_REQUIRE_RUST: "0"
+      JAX_PLATFORMS: cpu
+      XLA_PYTHON_CLIENT_PREALLOCATE: "false"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+
+      - name: Install Python
+        run: uv python install
+
+      - name: Install locked CPU environment
+        run: uv sync --frozen --group dev --group workflow --group notebook
+
+      - name: Lint
+        run: |
+          uv run --no-sync ruff check src tests
+          uv run --no-sync ruff format --check src tests
+
+      - name: Test
+        run: uv run --no-sync pytest -q
+
+      - name: Dry-run training workflow
+        run: >-
+          uv run --no-sync snakemake
+          -s workflow/Snakefile
+          --configfile workflow/config.example.yaml
+          --profile workflow/profiles/local
+          --cores 1
+          -n
+
+      - name: Check workflow runners
+        run: bash -n workflow/run_great_lakes.sh workflow/run_maturin.sh
+
+      - name: Execute quickstart
+        run: >-
+          uv run --no-sync jupytext
+          --to ipynb
+          --execute
+          --output /tmp/dreems_quickstart.executed.ipynb
+          examples/dreems_quickstart.md
+
+      - name: Build wheel
+        run: uv build --wheel
+
+      - name: Test installed wheel and packaged checkpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv venv .wheel-venv --python 3.11
+          uv pip install --python .wheel-venv/bin/python dist/*.whl
+          cd /tmp
+          "$GITHUB_WORKSPACE/.wheel-venv/bin/dreems" --help >/dev/null
+          "$GITHUB_WORKSPACE/.wheel-venv/bin/python" - <<'PY'
+          import dreems
+          from importlib.metadata import distributions
+          from importlib.util import find_spec
+
+          installed = {dist.metadata["Name"].lower() for dist in distributions()}
+          unexpected_cuda = sorted(
+              name for name in installed if name.startswith(("jax-cuda", "nvidia-"))
+          )
+          assert not unexpected_cuda, unexpected_cuda
+          assert find_spec("dreems._island_sim") is None
+          model = dreems.load_model()
+          assert model.checkpoint.model["model_name"] == "dreems"
+          assert model.checkpoint.model["node_dim"] == 109
+          assert model.checkpoint.model["edge_dim"] == 253
+          print("wheel and packaged checkpoint are usable")
+          PY
+
+      - name: Verify clean checkout
+        run: test -z "$(git status --porcelain)"
+
+  rust-test:
+    name: Rust simulator
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      DREEMS_REQUIRE_RUST: "1"
+      JAX_PLATFORMS: cpu
+      XLA_PYTHON_CLIENT_PREALLOCATE: "false"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+
+      - name: Install Python
+        run: uv python install
+
+      - name: Install locked Rust test environment
+        run: uv sync --frozen --group dev --group rust
+
+      - name: Build Rust extension
+        run: >-
+          uv run --no-sync maturin develop
+          --release
+          --manifest-path rust/island_sim/Cargo.toml
+
+      - name: Verify Rust extension
+        run: uv run --no-sync python -c "import dreems._island_sim"
+
+      - name: Test Rust simulator
+        run: uv run --no-sync pytest -q tests/test_island_sim.py
+
+  feems-test:
+    name: Official FEEMS adapter
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      JAX_PLATFORMS: cpu
+      XLA_PYTHON_CLIENT_PREALLOCATE: "false"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+
+      - name: Install Python
+        run: uv python install
+
+      - name: Install SuiteSparse
+        run: sudo apt-get update && sudo apt-get install --yes libsuitesparse-dev
+
+      - name: Install locked FEEMS test environment
+        run: uv sync --frozen --extra feems --group dev
+
+      - name: Verify official FEEMS API
+        run: >-
+          uv run --no-sync python -c
+          "from dreems.feems import _import_feems; api = _import_feems();
+          assert api.spatial_graph.__module__.startswith('feems.')"
+
+      - name: Test FEEMS adapter
+        run: >-
+          uv run --no-sync pytest -q
+          tests/test_feems_adapter.py tests/test_feems_edge_order.py

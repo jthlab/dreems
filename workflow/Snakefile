@@ -1,0 +1,936 @@
+import hashlib
+import json
+import math
+import os
+import shlex
+from pathlib import Path
+
+from snakemake.exceptions import WorkflowError
+
+from dreems import island_sim
+
+
+PROJECT_ROOT = str(Path(workflow.basedir).parent.resolve())
+if not config:
+    raise ValueError("pass exactly one workflow config with --configfile")
+if bool(config.get("simulation", {}).get("island_require_rust", False)):
+    try:
+        island_sim.require_rust_backend()
+    except RuntimeError as error:
+        raise WorkflowError(str(error)) from error
+OUTDIR = str(config["outdir"]).rstrip("/")
+UV_CACHE_DIR = str(config.get("uv_cache_dir") or os.environ.get("UV_CACHE_DIR", "")).strip()
+UV_CACHE_PREFIX = f"UV_CACHE_DIR={shlex.quote(UV_CACHE_DIR)} " if UV_CACHE_DIR else ""
+UV_RUN_ARGS = str(config.get("uv_run_args", "--frozen --no-sync"))
+UV_RUN = (
+    f"{UV_CACHE_PREFIX}uv --project {shlex.quote(PROJECT_ROOT)} run {UV_RUN_ARGS}"
+)
+
+
+def source_paths(*names):
+    return [str(Path(PROJECT_ROOT, "src", "dreems", name).resolve()) for name in names]
+
+
+SIMULATION_SOURCES = source_paths(
+    "coalescent.py",
+    "corpus.py",
+    "geography.py",
+    "island_sim.py",
+    "motifs.py",
+    "simulation.py",
+    "simulation_config.py",
+    "workflow_io.py",
+) + [
+    str(Path(PROJECT_ROOT, "rust", "island_sim", name).resolve())
+    for name in ("Cargo.toml", "Cargo.lock", "src/lib.rs")
+]
+PREPARATION_SOURCES = source_paths(
+    "pipeline.py", "corpus.py", "features.py", "linearized.py", "train.py", "workflow_io.py"
+)
+NORMALIZATION_SOURCES = source_paths("pipeline.py", "workflow_io.py")
+PACKING_SOURCES = source_paths("pipeline.py", "workflow_io.py")
+TRAINING_SOURCES = source_paths(
+    "pipeline.py",
+    "checkpoints.py",
+    "features.py",
+    "linearized.py",
+    "losses.py",
+    "model.py",
+    "train.py",
+    "workflow_io.py",
+)
+EVALUATION_SOURCES = source_paths(
+    "pipeline.py", "checkpoints.py", "features.py", "metrics.py", "model.py", "workflow_io.py"
+)
+
+
+def config_snapshot(name, payload):
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(serialized.encode()).hexdigest()[:16]
+    return f"{OUTDIR}/config/{name}.{digest}.json", serialized + "\n"
+
+
+SIMULATION_CONFIG, SIMULATION_CONFIG_TEXT = config_snapshot(
+    "simulation", {"simulation": config["simulation"]}
+)
+FEATURE_CONFIG, FEATURE_CONFIG_TEXT = config_snapshot(
+    "features",
+    {
+        "dreems": {
+            key: config["dreems"][key]
+            for key in ("features", "edge_conditioner")
+        }
+    },
+)
+TRAINING_CONFIG, TRAINING_CONFIG_TEXT = config_snapshot(
+    "training",
+    {
+        "dreems": config["dreems"],
+        "train_validation_examples": config["train_validation_examples"],
+        "train_pack_size": config.get("train_pack_size", 64),
+        "validation_pack_size": config.get(
+            "validation_pack_size", config.get("train_pack_size", 64)
+        ),
+        "prepared_pack_source_dir": config.get("prepared_pack_source_dir"),
+        "normalization_source": config.get("normalization_source"),
+    },
+)
+TRAIN_EXAMPLES = int(config["train_examples"])
+TEST_EXAMPLES = int(config["test_examples"])
+if TRAIN_EXAMPLES <= 0 or TEST_EXAMPLES <= 0:
+    raise ValueError("train_examples and test_examples must be positive")
+TRAIN_PACK_SIZE = int(config.get("train_pack_size", 64))
+VALIDATION_PACK_SIZE = int(config.get("validation_pack_size", TRAIN_PACK_SIZE))
+PREPARE_BATCH_SIZE = int(config.get("prepare_batch_size", 1))
+RAW_PACK_SIZE = int(config.get("raw_pack_size", TRAIN_PACK_SIZE))
+VALIDATION_EXAMPLES = int(config["train_validation_examples"])
+if (
+    TRAIN_PACK_SIZE <= 0
+    or VALIDATION_PACK_SIZE <= 0
+    or PREPARE_BATCH_SIZE <= 0
+    or RAW_PACK_SIZE <= 0
+):
+    raise ValueError("raw, training, validation, and preparation pack sizes must be positive")
+USE_BATCHED_PREPARATION = PREPARE_BATCH_SIZE > 1
+if USE_BATCHED_PREPARATION and (
+    PREPARE_BATCH_SIZE != TRAIN_PACK_SIZE
+    or PREPARE_BATCH_SIZE != VALIDATION_PACK_SIZE
+):
+    raise ValueError(
+        "prepare_batch_size must equal both train_pack_size and "
+        "validation_pack_size"
+    )
+if not 0 < VALIDATION_EXAMPLES <= TEST_EXAMPLES:
+    raise ValueError("train_validation_examples must be in [1, test_examples]")
+
+
+def project_path(value):
+    path = Path(str(value)).expanduser()
+    return str(path if path.is_absolute() else Path(PROJECT_ROOT, path).resolve())
+
+
+RAW_SOURCE_DIR = (
+    project_path(config["raw_source_dir"]) if config.get("raw_source_dir") else None
+)
+RAW_SOURCE_LAYOUT = str(
+    config.get("raw_source_layout") or ("examples" if RAW_SOURCE_DIR else "packs")
+)
+if RAW_SOURCE_LAYOUT not in {"examples", "packs"}:
+    raise ValueError("raw_source_layout must be 'examples' or 'packs'")
+if RAW_SOURCE_DIR is None and RAW_SOURCE_LAYOUT != "packs":
+    raise ValueError("new corpus generation requires packed raw storage")
+PREPARED_PACK_SOURCE_DIR = (
+    project_path(config["prepared_pack_source_dir"])
+    if config.get("prepared_pack_source_dir")
+    else None
+)
+NORMALIZATION_SOURCE = (
+    project_path(config["normalization_source"])
+    if config.get("normalization_source")
+    else None
+)
+
+
+CARTOPY_DATA_DIR = project_path(config["simulation"]["global_landscape_cartopy_data_dir"])
+CARTOPY_RESOLUTION = str(config["simulation"]["global_landscape_resolution"])
+CARTOPY_READY = f"{CARTOPY_DATA_DIR}/.natural_earth_{CARTOPY_RESOLUTION}_land.ready"
+CARTOPY_LAND_STEM = f"ne_{CARTOPY_RESOLUTION}_land"
+CARTOPY_LAND_DIR = f"{CARTOPY_DATA_DIR}/shapefiles/natural_earth/physical"
+CARTOPY_ARCHIVE = f"{CARTOPY_DATA_DIR}/downloads/{CARTOPY_LAND_STEM}.zip"
+CARTOPY_ARCHIVE_URL = (
+    f"https://naturalearth.s3.amazonaws.com/{CARTOPY_RESOLUTION}_physical/"
+    f"{CARTOPY_LAND_STEM}.zip"
+)
+CARTOPY_ARCHIVE_SHA256 = {
+    "50m": "0b8e670cf80dce9cbebe2a193bc44ba5602758c22e1fa603980553646d7ff162",
+}.get(CARTOPY_RESOLUTION)
+if CARTOPY_ARCHIVE_SHA256 is None:
+    raise ValueError(
+        f"no pinned Natural Earth land checksum for resolution {CARTOPY_RESOLUTION!r}"
+    )
+TRAIN_ACCELERATOR = str(config.get("train_accelerator", "cuda")).lower()
+TRAIN_GPUS = int(config.get("train_gpus", 1))
+if TRAIN_ACCELERATOR not in {"cpu", "cuda"}:
+    raise ValueError("train_accelerator must be 'cpu' or 'cuda'")
+if TRAIN_ACCELERATOR == "cpu" and TRAIN_GPUS != 0:
+    raise ValueError("CPU training requires train_gpus: 0")
+if TRAIN_ACCELERATOR == "cuda" and TRAIN_GPUS <= 0:
+    raise ValueError("CUDA training requires at least one GPU")
+TRAIN_DEVICE_ENV = (
+    'export JAX_PLATFORMS=cpu; export CUDA_VISIBLE_DEVICES=""'
+    if TRAIN_ACCELERATOR == "cpu"
+    else "export JAX_PLATFORMS=cuda"
+)
+TRAIN_JAX_PLATFORM = "cpu" if TRAIN_ACCELERATOR == "cpu" else "gpu"
+TRAIN_GRES = f"gpu:{TRAIN_GPUS}" if TRAIN_GPUS else ""
+
+localrules: all, cache_cartopy_land, write_simulation_config, write_feature_config, write_training_config, production_tranche, write_prepared_manifest, write_normalization_manifest, write_training_input_manifest, aggregate_evaluations
+
+
+def slurm_time(value):
+    if isinstance(value, int):
+        return f"{value}m"
+    return str(value)
+
+
+TRAIN_CHUNKS = list(range(TRAIN_EXAMPLES))
+TEST_CHUNKS = list(range(TEST_EXAMPLES))
+PRODUCTION_TRANCHE_SIZE = int(config.get("production_tranche_size", 0) or 0)
+USE_TRANCHE_AGGREGATION = PRODUCTION_TRANCHE_SIZE > 0
+NORMALIZATION_GROUP_SIZE = int(config.get("normalization_group_size", 1))
+if NORMALIZATION_GROUP_SIZE <= 0:
+    raise ValueError("normalization_group_size must be positive")
+NORMALIZATION_GROUPS = list(
+    range(math.ceil(len(TRAIN_CHUNKS) / NORMALIZATION_GROUP_SIZE))
+)
+
+
+def split_chunks(split):
+    if split == "train":
+        return TRAIN_CHUNKS
+    if split == "test":
+        return TEST_CHUNKS
+    raise ValueError(f"unknown split: {split}")
+
+
+def split_tranches(split):
+    if not USE_TRANCHE_AGGREGATION:
+        return []
+    chunks = split_chunks(split)
+    return list(range(math.ceil(len(chunks) / PRODUCTION_TRANCHE_SIZE)))
+
+
+def tranche_chunks(split, tranche):
+    chunks = split_chunks(split)
+    if not USE_TRANCHE_AGGREGATION:
+        return chunks
+    start = int(tranche) * PRODUCTION_TRANCHE_SIZE
+    stop = min(start + PRODUCTION_TRANCHE_SIZE, len(chunks))
+    return chunks[start:stop]
+
+
+def raw_staging_path(split, chunk):
+    return f"{OUTDIR}/staging/raw/{split}/chunk_{chunk}.pkl"
+
+
+def raw_pack_path(split, pack):
+    return f"{OUTDIR}/raw/{split}/pack_{pack}.pkl"
+
+
+def raw_pack_meta_path(split, pack):
+    return f"{OUTDIR}/raw/{split}/pack_{pack}.metadata.json"
+
+
+def raw_pack_indices(split):
+    return list(range(math.ceil(len(split_chunks(split)) / RAW_PACK_SIZE)))
+
+
+def raw_pack_chunks(split, pack):
+    chunks = split_chunks(split)
+    start = int(pack) * RAW_PACK_SIZE
+    return chunks[start : min(start + RAW_PACK_SIZE, len(chunks))]
+
+
+def raw_pack_staging_inputs(wildcards):
+    split = str(wildcards.split)
+    return [
+        raw_staging_path(split, chunk)
+        for chunk in raw_pack_chunks(split, int(wildcards.pack))
+    ]
+
+
+def raw_pack_input_path(split, pack):
+    """Return a generated pack or an existing packed-corpus input."""
+
+    if RAW_SOURCE_DIR is not None:
+        return f"{RAW_SOURCE_DIR}/{split}/pack_{pack}.pkl"
+    return raw_pack_path(split, pack)
+
+
+def raw_input_path(split, chunk):
+    """Locate one example directly or locate the pack that contains it."""
+
+    if RAW_SOURCE_LAYOUT == "examples":
+        assert RAW_SOURCE_DIR is not None
+        return f"{RAW_SOURCE_DIR}/{split}/chunk_{chunk}.pkl"
+    return raw_pack_input_path(split, int(chunk) // RAW_PACK_SIZE)
+
+
+def raw_example_index(chunk):
+    if RAW_SOURCE_LAYOUT == "examples":
+        return 0
+    return int(chunk) % RAW_PACK_SIZE
+
+
+def prepared_path(split, chunk):
+    return f"{OUTDIR}/prepared/{split}/chunk_{chunk}.pkl"
+
+
+def prepared_meta_path(split, chunk):
+    return f"{OUTDIR}/prepared/{split}/chunk_{chunk}.metadata.json"
+
+
+def legacy_packed_path(role, pack):
+    return f"{OUTDIR}/packed/{role}/pack_{pack}.pkl"
+
+
+def legacy_packed_meta_path(role, pack):
+    return f"{OUTDIR}/packed/{role}/pack_{pack}.metadata.json"
+
+
+def prepared_batch_path(role, pack):
+    return f"{OUTDIR}/prepared_batches/{role}/pack_{pack}.pkl"
+
+
+def prepared_batch_meta_path(role, pack):
+    return f"{OUTDIR}/prepared_batches/{role}/pack_{pack}.metadata.json"
+
+
+def packed_path(role, pack):
+    if USE_BATCHED_PREPARATION:
+        return prepared_batch_path(role, pack)
+    return legacy_packed_path(role, pack)
+
+
+def pack_size(role):
+    if role == "train":
+        return TRAIN_PACK_SIZE
+    if role == "validation":
+        return VALIDATION_PACK_SIZE
+    raise ValueError(f"unknown pack role: {role}")
+
+
+def pack_example_count(role):
+    if role == "train":
+        return TRAIN_EXAMPLES
+    if role == "validation":
+        return VALIDATION_EXAMPLES
+    raise ValueError(f"unknown pack role: {role}")
+
+
+def pack_indices(role):
+    return list(range(math.ceil(pack_example_count(role) / pack_size(role))))
+
+
+def packed_paths(role):
+    return [training_pack_path(role, pack) for pack in pack_indices(role)]
+
+
+def training_pack_path(role, pack):
+    if PREPARED_PACK_SOURCE_DIR is not None:
+        return f"{PREPARED_PACK_SOURCE_DIR}/{role}/pack_{pack}.pkl"
+    return packed_path(role, pack)
+
+
+def pack_prepared_inputs(wildcards):
+    role = str(wildcards.role)
+    pack = int(wildcards.pack)
+    start = pack * pack_size(role)
+    stop = min(start + pack_size(role), pack_example_count(role))
+    split = "train" if role == "train" else "test"
+    return [prepared_path(split, chunk) for chunk in range(start, stop)]
+
+
+def prepare_batch_raw_inputs(wildcards):
+    role = str(wildcards.role)
+    pack = int(wildcards.pack)
+    start = pack * pack_size(role)
+    stop = min(start + pack_size(role), pack_example_count(role))
+    split = "train" if role == "train" else "test"
+    if RAW_SOURCE_LAYOUT == "examples":
+        return [raw_input_path(split, chunk) for chunk in range(start, stop)]
+    first_pack = start // RAW_PACK_SIZE
+    final_pack = (stop - 1) // RAW_PACK_SIZE
+    return [raw_pack_input_path(split, index) for index in range(first_pack, final_pack + 1)]
+
+
+def prepare_batch_start_index(wildcards):
+    if RAW_SOURCE_LAYOUT == "examples":
+        return 0
+    role = str(wildcards.role)
+    start = int(wildcards.pack) * pack_size(role)
+    return start % RAW_PACK_SIZE
+
+
+def prepare_batch_example_count(wildcards):
+    role = str(wildcards.role)
+    start = int(wildcards.pack) * pack_size(role)
+    stop = min(start + pack_size(role), pack_example_count(role))
+    return stop - start
+
+
+def normalization_group_path(group):
+    return f"{OUTDIR}/normalization/group_{group}.stats.json"
+
+
+def normalization_group_inputs(wildcards):
+    group = int(wildcards.group)
+    start = group * NORMALIZATION_GROUP_SIZE
+    stop = min(start + NORMALIZATION_GROUP_SIZE, TRAIN_EXAMPLES)
+    if USE_BATCHED_PREPARATION:
+        if start % TRAIN_PACK_SIZE != 0 or stop % TRAIN_PACK_SIZE != 0:
+            raise ValueError(
+                "normalization_group_size must align with train_pack_size "
+                "when preparation is batched"
+            )
+        return [
+            training_pack_path("train", pack)
+            for pack in range(start // TRAIN_PACK_SIZE, stop // TRAIN_PACK_SIZE)
+        ]
+    return [prepared_path("train", chunk) for chunk in range(start, stop)]
+
+
+def prepared_manifest_path(split):
+    return f"{OUTDIR}/manifests/{split}_prepared.txt"
+
+
+def eval_prepared_input_path(wildcards):
+    return prepared_path("test", int(wildcards.chunk))
+
+
+def prepare_chunk_raw_input(wildcards):
+    return raw_input_path(str(wildcards.split), int(wildcards.chunk))
+
+
+def prepare_chunk_example_index(wildcards):
+    return raw_example_index(int(wildcards.chunk))
+
+
+def normalization_manifest_path():
+    return f"{OUTDIR}/manifests/train_normalization_stats.txt"
+
+
+def training_normalization_path():
+    if NORMALIZATION_SOURCE is not None:
+        return NORMALIZATION_SOURCE
+    return f"{OUTDIR}/normalization.json"
+
+
+def training_input_manifest_path(role):
+    return f"{OUTDIR}/manifests/{role}_packs.txt"
+
+
+def training_accelerator_ready_path():
+    return f"{OUTDIR}/environment/{TRAIN_ACCELERATOR}.ready"
+
+
+def training_manifest_inputs(wildcards):
+    return packed_paths(str(wildcards.role))
+
+
+def eval_chunk_summary_path(chunk):
+    return f"{OUTDIR}/eval/chunks/chunk_{chunk}/summary.json"
+
+
+def eval_chunk_csv_path(chunk):
+    return f"{OUTDIR}/eval/chunks/chunk_{chunk}/summary.csv"
+
+
+def tranche_done_path(split, tranche):
+    return f"{OUTDIR}/tranches/{split}_{tranche}.done"
+
+
+def prepared_manifest_inputs(wildcards):
+    split = str(wildcards.split)
+    if USE_TRANCHE_AGGREGATION:
+        return expand(tranche_done_path(split, "{tranche}"), tranche=split_tranches(split))
+    return [prepared_path(split, chunk) for chunk in split_chunks(split)]
+
+
+def normalization_manifest_inputs(_wildcards=None):
+    return expand(normalization_group_path("{group}"), group=NORMALIZATION_GROUPS)
+
+
+def production_tranche_inputs(wildcards):
+    split = str(wildcards.split)
+    chunks = tranche_chunks(split, int(wildcards.tranche))
+    return [prepared_path(split, chunk) for chunk in chunks]
+
+
+rule all:
+    input:
+        f"{OUTDIR}/model/training_summary.json",
+        f"{OUTDIR}/eval/summary.json",
+
+
+rule write_simulation_config:
+    output:
+        SIMULATION_CONFIG,
+    run:
+        path = Path(output[0])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(SIMULATION_CONFIG_TEXT)
+
+
+rule write_feature_config:
+    output:
+        FEATURE_CONFIG,
+    run:
+        path = Path(output[0])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(FEATURE_CONFIG_TEXT)
+
+
+rule write_training_config:
+    output:
+        TRAINING_CONFIG,
+    run:
+        path = Path(output[0])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(TRAINING_CONFIG_TEXT)
+
+
+rule cache_cartopy_land:
+    output:
+        archive=CARTOPY_ARCHIVE,
+        shp=f"{CARTOPY_LAND_DIR}/{CARTOPY_LAND_STEM}.shp",
+        shx=f"{CARTOPY_LAND_DIR}/{CARTOPY_LAND_STEM}.shx",
+        dbf=f"{CARTOPY_LAND_DIR}/{CARTOPY_LAND_STEM}.dbf",
+        prj=f"{CARTOPY_LAND_DIR}/{CARTOPY_LAND_STEM}.prj",
+        cpg=f"{CARTOPY_LAND_DIR}/{CARTOPY_LAND_STEM}.cpg",
+        ready=touch(CARTOPY_READY),
+    params:
+        url=CARTOPY_ARCHIVE_URL,
+        checksum=CARTOPY_ARCHIVE_SHA256,
+        archive_partial=f"{CARTOPY_ARCHIVE}.partial",
+        land_dir=CARTOPY_LAND_DIR,
+        land_glob=f"{CARTOPY_LAND_STEM}.*",
+    shell:
+        r"""
+        set -euo pipefail
+        mkdir -p "$(dirname {output.archive:q})" {params.land_dir:q}
+        curl --fail --location --retry 3 \
+            --silent --show-error \
+            --output {params.archive_partial:q} \
+            {params.url:q}
+        test "$(sha256sum {params.archive_partial:q} | awk '{{print $1}}')" = \
+            {params.checksum:q}
+        mv {params.archive_partial:q} {output.archive:q}
+        unzip -oq {output.archive:q} {params.land_glob:q} -d {params.land_dir:q}
+        touch {output.ready:q}
+        """
+
+
+rule generate_raw_example:
+    input:
+        cartopy=CARTOPY_READY,
+        config=SIMULATION_CONFIG,
+        code=SIMULATION_SOURCES,
+    output:
+        raw=temp(raw_staging_path("{split}", "{chunk}")),
+    threads: int(config.get("raw_threads", 4))
+    resources:
+        mem_mb=int(config.get("raw_mem_mb", 32000)),
+        runtime=slurm_time(config.get("raw_runtime", "120m")),
+        slurm_partition=str(config.get("raw_partition", "standard")),
+    shell:
+        """
+        export JAX_PLATFORMS=cpu
+        export CUDA_VISIBLE_DEVICES=""
+        export CARTOPY_DATA_DIR={CARTOPY_DATA_DIR:q}
+        export OMP_NUM_THREADS={threads}
+        export OPENBLAS_NUM_THREADS={threads}
+        export MKL_NUM_THREADS={threads}
+        export NUMEXPR_NUM_THREADS={threads}
+        {UV_RUN} python -m dreems.corpus generate \
+            --config {input.config:q} \
+            --split {wildcards.split} \
+            --example-id {wildcards.chunk} \
+            --output {output.raw:q}
+        """
+
+
+rule pack_raw_examples:
+    input:
+        examples=raw_pack_staging_inputs,
+        config=SIMULATION_CONFIG,
+        code=SIMULATION_SOURCES,
+    output:
+        packed=raw_pack_path("{split}", "{pack}"),
+        metadata=raw_pack_meta_path("{split}", "{pack}"),
+    benchmark:
+        f"{OUTDIR}/benchmarks/raw_pack/{{split}}/{{pack}}.tsv"
+    wildcard_constraints:
+        split="train|test",
+        pack=r"\d+",
+    priority: 50
+    threads: int(config.get("raw_pack_threads", 1))
+    resources:
+        mem_mb=int(config.get("raw_pack_mem_mb", 8000)),
+        runtime=slurm_time(config.get("raw_pack_runtime", "30m")),
+        slurm_partition=str(config.get("raw_pack_partition", "standard")),
+    params:
+        start=lambda wildcards: int(wildcards.pack) * RAW_PACK_SIZE,
+    shell:
+        """
+        export JAX_PLATFORMS=cpu
+        export CUDA_VISIBLE_DEVICES=""
+        {UV_RUN} python -m dreems.corpus pack \
+            --inputs {input.examples:q} \
+            --output {output.packed:q} \
+            --metadata {output.metadata:q} \
+            --config {input.config:q} \
+            --split {wildcards.split} \
+            --pack-index {wildcards.pack} \
+            --start-index {params.start}
+        """
+
+
+rule prepare_chunk:
+    input:
+        raw=prepare_chunk_raw_input,
+        config=FEATURE_CONFIG,
+        code=PREPARATION_SOURCES,
+    output:
+        prepared=temp(prepared_path("{split}", "{chunk}")),
+        metadata=temp(prepared_meta_path("{split}", "{chunk}")),
+    params:
+        example_index=prepare_chunk_example_index,
+    threads: int(config.get("prepare_threads", 4))
+    resources:
+        mem_mb=int(config.get("prepare_mem_mb", 32000)),
+        runtime=slurm_time(config.get("prepare_runtime", "120m")),
+        slurm_partition=str(config.get("prepare_partition", "standard")),
+    shell:
+        """
+        export JAX_PLATFORMS=cpu
+        export CUDA_VISIBLE_DEVICES=""
+        export OMP_NUM_THREADS={threads}
+        export OPENBLAS_NUM_THREADS={threads}
+        export MKL_NUM_THREADS={threads}
+        export NUMEXPR_NUM_THREADS={threads}
+        {UV_RUN} python -m dreems.pipeline prepare-shard \
+            --config {input.config:q} \
+            --input {input.raw:q} \
+            --output {output.prepared:q} \
+            --metadata {output.metadata:q} \
+            --example-index {params.example_index}
+        """
+
+
+rule pack_prepared:
+    input:
+        prepared=pack_prepared_inputs,
+        config=TRAINING_CONFIG,
+        code=PACKING_SOURCES,
+    output:
+        packed=legacy_packed_path("{role}", "{pack}"),
+        metadata=legacy_packed_meta_path("{role}", "{pack}"),
+    benchmark:
+        f"{OUTDIR}/benchmarks/pack/{{role}}/{{pack}}.tsv"
+    wildcard_constraints:
+        role="train|validation",
+        pack=r"\d+",
+    threads: int(config.get("pack_threads", 1))
+    resources:
+        mem_mb=int(config.get("pack_mem_mb", 4000)),
+        runtime=slurm_time(config.get("pack_runtime", "60m")),
+        slurm_partition=str(config.get("pack_partition", "standard")),
+    shell:
+        """
+        export JAX_PLATFORMS=cpu
+        export CUDA_VISIBLE_DEVICES=""
+        export OMP_NUM_THREADS={threads}
+        export OPENBLAS_NUM_THREADS={threads}
+        export MKL_NUM_THREADS={threads}
+        export NUMEXPR_NUM_THREADS={threads}
+        {UV_RUN} python -m dreems.pipeline pack-prepared \
+            --inputs {input.prepared:q} \
+            --output {output.packed:q} \
+            --metadata {output.metadata:q}
+        """
+
+
+rule prepare_batch:
+    input:
+        raw=prepare_batch_raw_inputs,
+        config=FEATURE_CONFIG,
+        code=PREPARATION_SOURCES,
+    output:
+        packed=prepared_batch_path("{role}", "{pack}"),
+        metadata=prepared_batch_meta_path("{role}", "{pack}"),
+    benchmark:
+        f"{OUTDIR}/benchmarks/prepare_batch/{{role}}/{{pack}}.tsv"
+    wildcard_constraints:
+        role="train|validation",
+        pack=r"\d+",
+    params:
+        start_index=prepare_batch_start_index,
+        max_examples=prepare_batch_example_count,
+    threads: int(config.get("prepare_batch_threads", 1))
+    resources:
+        mem_mb=int(config.get("prepare_batch_mem_mb", 4000)),
+        runtime=slurm_time(config.get("prepare_batch_runtime", "120m")),
+        slurm_partition=str(config.get("prepare_partition", "standard")),
+    shell:
+        """
+        export JAX_PLATFORMS=cpu
+        export CUDA_VISIBLE_DEVICES=""
+        export OMP_NUM_THREADS={threads}
+        export OPENBLAS_NUM_THREADS={threads}
+        export MKL_NUM_THREADS={threads}
+        export NUMEXPR_NUM_THREADS={threads}
+        {UV_RUN} python -m dreems.pipeline prepare-batch \
+            --config {input.config:q} \
+            --inputs {input.raw:q} \
+            --output {output.packed:q} \
+            --metadata {output.metadata:q} \
+            --start-index {params.start_index} \
+            --max-examples {params.max_examples}
+        """
+
+
+rule write_prepared_manifest:
+    input:
+        prepared_manifest_inputs,
+    output:
+        manifest=prepared_manifest_path("{split}"),
+    run:
+        from pathlib import Path
+
+        split = str(wildcards.split)
+        manifest_paths = [
+            str(Path(prepared_path(split, chunk)).resolve())
+            for chunk in split_chunks(split)
+        ]
+        path = Path(output.manifest)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(manifest_paths) + "\n")
+
+
+rule production_tranche:
+    input:
+        production_tranche_inputs,
+    output:
+        done=tranche_done_path("{split}", "{tranche}"),
+    run:
+        from pathlib import Path
+
+        path = Path(output.done)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(str(item) for item in input) + "\n")
+
+
+rule normalization_group_stats:
+    input:
+        prepared=normalization_group_inputs,
+        code=NORMALIZATION_SOURCES,
+    output:
+        stats=normalization_group_path("{group}"),
+    benchmark:
+        f"{OUTDIR}/benchmarks/normalization/{{group}}.tsv"
+    threads: int(config.get("normalization_threads", 1))
+    resources:
+        mem_mb=int(config.get("normalization_mem_mb", 16000)),
+        runtime=slurm_time(config.get("normalization_runtime", "60m")),
+        slurm_partition=str(config.get("normalization_partition", "standard")),
+    shell:
+        """
+        export JAX_PLATFORMS=cpu
+        export CUDA_VISIBLE_DEVICES=""
+        export OMP_NUM_THREADS={threads}
+        export OPENBLAS_NUM_THREADS={threads}
+        export MKL_NUM_THREADS={threads}
+        export NUMEXPR_NUM_THREADS={threads}
+        {UV_RUN} python -m dreems.pipeline normalization-shard-stats \
+            --inputs {input.prepared:q} \
+            --output {output.stats:q}
+        """
+
+
+rule write_normalization_manifest:
+    input:
+        normalization_manifest_inputs,
+    output:
+        manifest=normalization_manifest_path(),
+    run:
+        from pathlib import Path
+
+        manifest_paths = [
+            str(Path(normalization_group_path(group)).resolve())
+            for group in NORMALIZATION_GROUPS
+        ]
+        path = Path(output.manifest)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(manifest_paths) + "\n")
+
+
+rule write_training_input_manifest:
+    input:
+        training_manifest_inputs,
+    output:
+        manifest=training_input_manifest_path("{role}"),
+    wildcard_constraints:
+        role="train|validation",
+    run:
+        from pathlib import Path
+
+        path = Path(output.manifest)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(str(Path(item).resolve()) for item in input) + "\n")
+
+
+rule merge_normalization:
+    input:
+        manifest=normalization_manifest_path(),
+        config=FEATURE_CONFIG,
+        code=NORMALIZATION_SOURCES,
+    output:
+        stats=f"{OUTDIR}/normalization.json",
+    benchmark:
+        f"{OUTDIR}/benchmarks/normalization/merge.tsv"
+    threads: int(config.get("normalization_threads", 1))
+    resources:
+        mem_mb=int(config.get("normalization_mem_mb", 16000)),
+        runtime=slurm_time(config.get("normalization_runtime", "60m")),
+        slurm_partition=str(config.get("normalization_partition", "standard")),
+    shell:
+        """
+        export JAX_PLATFORMS=cpu
+        export CUDA_VISIBLE_DEVICES=""
+        {UV_RUN} python -m dreems.pipeline merge-normalization \
+            --config {input.config:q} \
+            --input-manifest {input.manifest:q} \
+            --output {output.stats:q}
+        """
+
+
+rule check_training_accelerator:
+    input:
+        pyproject=str(Path(PROJECT_ROOT, "pyproject.toml")),
+        lock=str(Path(PROJECT_ROOT, "uv.lock")),
+    output:
+        ready=touch(training_accelerator_ready_path()),
+    params:
+        device_env=TRAIN_DEVICE_ENV,
+        expected_platform=TRAIN_JAX_PLATFORM,
+    threads: 1
+    resources:
+        mem_mb=int(config.get("accelerator_check_mem_mb", 4000)),
+        runtime=slurm_time(config.get("accelerator_check_runtime", "10m")),
+        gres=TRAIN_GRES,
+        slurm_partition=str(config.get("train_partition", "gpu_mig40,spgpu,gpu")),
+    shell:
+        """
+        {params.device_env}
+        {UV_RUN} python -c 'import jax; devices = jax.devices(); assert devices and all(device.platform == "{params.expected_platform}" for device in devices), devices; print("JAX devices:", devices, flush=True)'
+        """
+
+
+rule train:
+    input:
+        normalization=training_normalization_path(),
+        train_manifest=training_input_manifest_path("train"),
+        validation_manifest=training_input_manifest_path("validation"),
+        accelerator=training_accelerator_ready_path(),
+        config=TRAINING_CONFIG,
+        code=TRAINING_SOURCES,
+    output:
+        checkpoint=f"{OUTDIR}/model/checkpoint.dreems.zip",
+        best=f"{OUTDIR}/model/checkpoint.best.dreems.zip",
+        best_summary=f"{OUTDIR}/model/checkpoint.best.summary.json",
+        summary=f"{OUTDIR}/model/training_summary.json",
+    benchmark:
+        f"{OUTDIR}/benchmarks/train.tsv"
+    params:
+        device_env=TRAIN_DEVICE_ENV,
+        expected_platform=TRAIN_JAX_PLATFORM,
+    threads: int(config.get("train_threads", 4))
+    resources:
+        mem_mb=int(config.get("train_mem_mb", 24000)),
+        runtime=slurm_time(config.get("train_runtime", "90m")),
+        gres=TRAIN_GRES,
+        slurm_partition=str(config.get("train_partition", "gpu_mig40,spgpu,gpu")),
+    shell:
+        """
+        {params.device_env}
+        export XLA_PYTHON_CLIENT_MEM_FRACTION={config[xla_mem_fraction]}
+        {UV_RUN} python -c 'import jax; devices = jax.devices(); assert devices and all(device.platform == "{params.expected_platform}" for device in devices), devices; print("JAX devices:", devices, flush=True)'
+        CACHE_DIR="${{TMPDIR:-/tmp}}/dreems-${{SLURM_JOB_ID}}"
+        {UV_RUN} python -m dreems.pipeline train \
+            --config {input.config:q} \
+            --normalization {input.normalization:q} \
+            --input-manifest {input.train_manifest:q} \
+            --validation-input-manifest {input.validation_manifest:q} \
+            --cache-dir "$CACHE_DIR" \
+            --output {output.checkpoint:q} \
+            --summary {output.summary:q} \
+            --stream
+        """
+
+
+rule evaluate_chunk:
+    input:
+        checkpoint=f"{OUTDIR}/model/checkpoint.best.dreems.zip",
+        prepared=eval_prepared_input_path,
+        code=EVALUATION_SOURCES,
+    output:
+        summary=temp(eval_chunk_summary_path("{chunk}")),
+        csv=temp(eval_chunk_csv_path("{chunk}")),
+    params:
+        outdir=f"{OUTDIR}/eval/chunks/chunk_{{chunk}}",
+    threads: int(config.get("eval_threads", 4))
+    resources:
+        mem_mb=int(config.get("eval_mem_mb", 24000)),
+        runtime=slurm_time(config.get("eval_runtime", "60m")),
+        slurm_partition=str(config.get("eval_partition", "standard")),
+    shell:
+        """
+        export JAX_LOGGING_LEVEL=CRITICAL
+        export JAX_PLATFORMS=cpu
+        export JAX_PLATFORM_NAME=cpu
+        export CUDA_VISIBLE_DEVICES=""
+        export XLA_PYTHON_CLIENT_PREALLOCATE=false
+        export XLA_PYTHON_CLIENT_MEM_FRACTION=0.10
+        export OMP_NUM_THREADS={threads}
+        export OPENBLAS_NUM_THREADS={threads}
+        export MKL_NUM_THREADS={threads}
+        {UV_RUN} python -m dreems.pipeline evaluate \
+            --checkpoint {input.checkpoint:q} \
+            --inputs {input.prepared:q} \
+            --output-dir {params.outdir:q} \
+            --batch-size {config[eval_batch_size]} \
+            --replicate-offset {wildcards.chunk}
+        """
+
+
+rule aggregate_evaluations:
+    input:
+        summaries=expand(eval_chunk_summary_path("{chunk}"), chunk=TEST_CHUNKS),
+        code=EVALUATION_SOURCES,
+    output:
+        summary=f"{OUTDIR}/eval/summary.json",
+        csv=f"{OUTDIR}/eval/summary.csv",
+    benchmark:
+        f"{OUTDIR}/benchmarks/eval.tsv"
+    threads: 1
+    resources:
+        mem_mb=int(config.get("eval_aggregate_mem_mb", 8000)),
+        runtime=slurm_time(config.get("eval_aggregate_runtime", "30m")),
+        slurm_partition=str(config.get("eval_partition", "standard")),
+    shell:
+        """
+        {UV_RUN} python -m dreems.pipeline aggregate-evaluations \
+            --inputs {input.summaries:q} \
+            --output-dir {OUTDIR}/eval
+        """

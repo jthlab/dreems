@@ -1,0 +1,16 @@
+executor: slurm
+jobs: 200
+local-cores: 2
+printshellcmds: true
+rerun-incomplete: true
+keep-going: true
+latency-wait: 120
+slurm-logdir: logs/slurm
+max-jobs-per-second: 2
+persistence-backend: db
+persistence-backend-db-url: sqlite:///.snakemake/metadata.db
+default-resources:
+  slurm_account: jonth0
+  slurm_partition: standard
+  mem_mb: 8000
+  runtime: "240m"

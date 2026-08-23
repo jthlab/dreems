@@ -1,0 +1,16 @@
+executor: local
+cores: 60
+local-cores: 2
+printshellcmds: true
+rerun-incomplete: true
+keep-going: true
+latency-wait: 60
+max-jobs-per-second: 32
+persistence-backend: db
+persistence-backend-db-url: sqlite:///.snakemake/metadata.db
+resources:
+  mem_mb: 240000
+  gpu: 1
+default-resources:
+  mem_mb: 8000
+  runtime: 240

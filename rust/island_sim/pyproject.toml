@@ -1,0 +1,13 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "dreems-island-sim"
+version = "0.1.0"
+requires-python = ">=3.11"
+
+[tool.maturin]
+module-name = "dreems._island_sim"
+python-source = "../../src"
+features = ["pyo3/extension-module"]

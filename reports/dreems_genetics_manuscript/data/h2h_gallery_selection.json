@@ -1,0 +1,16 @@
+{
+  "random_examples": [
+    13,
+    44,
+    97,
+    198
+  ],
+  "random_seed": 20260822,
+  "worst_mse_definition": "dreems_refined_mse_minus_feems_mse",
+  "worst_mse_examples": [
+    121,
+    484,
+    436,
+    98
+  ]
+}

@@ -1,0 +1,58 @@
+{
+  "comparison": "paired synthetic edge-log migration recovery",
+  "dreems": {
+    "checkpoint": "/gpfs/accounts/jonth_root/jonth1/jonth/dreems/canonical_only_code_20260821/src/dreems/data/dreems_diffusion_bands.dreems.zip",
+    "checkpoint_sha256": "f0b677d2cc028252002d15fac843ca7347b1b352eb2286a18bd202b724aa92b4",
+    "map_estimate": {
+      "edge_batch_size": 256,
+      "enabled": true,
+      "learning_rate": 0.15,
+      "log_every": 10,
+      "sd_floor": 0.25,
+      "smoothness_weight": 0.0001,
+      "steps": 50,
+      "trust_region_radius": 0.5
+    },
+    "neural_estimate": true
+  },
+  "dreems_source_commit": "bb1a9b5719a82c6c50e81809251fc21f67ff9c4c",
+  "feems": {
+    "cv_factr": 10000000000.0,
+    "cv_folds": "one per observed deme",
+    "cv_unit": "observed deme",
+    "final_refit": "all samples at jointly selected lambda and lambda_q",
+    "final_refit_factr": 10000000.0,
+    "final_refit_log_weight_bounds": "unbounded",
+    "final_refit_maxiter": 15000,
+    "fold_execution": "snakemake_one_job_per_observed_deme",
+    "fold_parallelism_only": true,
+    "lambda_grid": [
+      100.0,
+      27.825594022071257,
+      7.742636826811277,
+      2.1544346900318843,
+      0.5994842503189409,
+      0.1668100537200059,
+      0.046415888336127795,
+      0.01291549665014884,
+      0.003593813663804626,
+      0.001
+    ],
+    "lambda_q_grid": [
+      100.0,
+      10.0,
+      1.0,
+      0.1,
+      0.01
+    ],
+    "mode": "free_q",
+    "official_notebook": "https://github.com/NovembreLab/feems/blob/main/docsrc/notebooks/cross-validation.ipynb",
+    "official_source": "https://github.com/NovembreLab/feems/blob/aa890b0e8ef583dd657a6a696af591b732d1d8be/feems/cross_validation.py",
+    "pinned_commit": "aa890b0e8ef583dd657a6a696af591b732d1d8be",
+    "protocol": "v2_joint_lambda_lambda_q_leave_one_observed_deme_out",
+    "random_state": 500,
+    "selection_score": "FEEMS held-out allele-frequency L2 error"
+  },
+  "input_pattern": "/scratch/jonth_root/jonth1/jonth/dreems/current_release_global_landscape_h2h512_20260724/validated_examples/example_{example}.pkl",
+  "metadata_pattern": "/scratch/jonth_root/jonth1/jonth/dreems/current_release_global_landscape_h2h512_20260724/validated_examples/example_{example}.metadata.json"
+}

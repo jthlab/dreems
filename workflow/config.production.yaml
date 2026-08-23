@@ -1,0 +1,275 @@
+# Exact corpus and training recipe for the packaged graph-balanced
+# diffusion-band model. Posterior-SD calibration is recorded separately in
+# config.calibration.yaml.
+outdir: results/dreems_production
+uv_cache_dir: null
+uv_run_args: --frozen --no-sync
+xla_mem_fraction: "0.35"
+
+provenance:
+  released_checkpoint: src/dreems/data/dreems_diffusion_bands.dreems.zip
+  released_checkpoint_sha256: f0b677d2cc028252002d15fac843ca7347b1b352eb2286a18bd202b724aa92b4
+  released_params_sha256: d7899a6bb419e4d017e093af958ab9750c2a947ccc72087ccf7bfcd18a3c2984
+  source_checkpoint_sha256: f237554026432e2874a293b5f3c5dfbe680c4506d2075d4e0a7f728d480e4ff4
+  trained_checkpoint_sha256: 038632b1e11a8a4dc9ac858967c1f7cfa56c45920a1ec589a41823757c4a2bfe
+  source_run: graph_balanced_retrain_20260821
+  training_config_sha256: 47a44d278b50cda725d1ffeae1d642f0a7d9c70c1c23ac5e68f6c9abc8ba5c8b
+  training_summary_sha256: ca8e786b059a3f4535158b836e903efdf96800de4fcb497abc04ba65d96b4fb3
+  training_history_sha256: d62807e6de48fbafb8205bfd7f0b6c0f5e4c80ac38dde26abddbfaafa26eaebc
+  raw_corpus_config_sha256: 0c750edcf7553f451e8cf24dbddd7347ac85e9b5a432458c5b00181a4e7c5ea5
+  calibration_fit_sha256: 7b3a839bcdb5f34bb2d1207fbefa866fd27c4cf478142f567a7ace1bc39fa98e
+  calibration_selection_sha256: 2baac24afeb36b861522d914834ae49d57d387a8a51e3c51e138c851c4de4b4d
+  calibration_verification_sha256: 15a7d0b1408d184fd0e74101204b2f618cbeb25162826a4dab590feeef0fe175
+  best_step: 29000
+  best_validation_loss: 0.1572438609728124
+
+# The retrain reused the exact raw observations and prepared tensors from the
+# July production corpus. The changed code reduces each loss term by graph
+# before averaging the batch, so large graphs no longer dominate updates.
+train_examples: 61440
+test_examples: 4096
+train_validation_examples: 1024
+
+production_tranche_size: 1024
+# Worker outputs are compacted into reusable packs as soon as 64 examples finish.
+raw_source_layout: packs
+raw_pack_size: 64
+raw_threads: 1
+raw_mem_mb: 4000
+raw_runtime: 150m
+raw_partition: standard
+raw_pack_threads: 1
+raw_pack_mem_mb: 8000
+raw_pack_runtime: 30m
+raw_pack_partition: standard
+
+prepare_threads: 1
+prepare_mem_mb: 4000
+prepare_runtime: 60m
+prepare_partition: standard
+
+# Feature preparation reads one raw pack and writes one training pack. Example
+# order and graph boundaries remain explicit inside each pack.
+prepare_batch_size: 64
+prepare_batch_threads: 1
+prepare_batch_mem_mb: 4000
+prepare_batch_runtime: 30m
+
+# Packing is a downstream I/O optimization only. Raw simulation and feature
+# preparation remain one job per example; each pack combines 64 prepared files
+# so the GPU can stream from node-local storage efficiently.
+train_pack_size: 64
+validation_pack_size: 64
+pack_threads: 1
+pack_mem_mb: 4000
+pack_runtime: 60m
+pack_partition: standard
+
+normalization_threads: 1
+normalization_mem_mb: 4000
+normalization_runtime: 60m
+normalization_partition: standard
+normalization_group_size: 512
+
+train_threads: 4
+train_mem_mb: 24000
+train_runtime: 36h
+train_gpus: 1
+train_accelerator: cuda
+train_partition: gpu_mig40,spgpu,gpu
+
+eval_threads: 2
+eval_mem_mb: 8000
+eval_runtime: 8h
+eval_batch_size: 16
+eval_partition: standard
+
+simulation:
+  seed: 971801
+  simulator: island_coalescent
+  island_use_rust: true
+  island_require_rust: true
+  island_emit_covariance: true
+  island_mutation_rate: 0.01
+  island_migration_scale: 1.0
+  island_coalescence_scale: 1.0
+  island_symmetric_migration: true
+  island_ploidy: 2
+  island_marker_model: conditioned_random_marker
+  island_min_allele_frequency: 0.05
+  island_max_allele_frequency: 0.95
+  num_snps: 4000
+  min_num_snps: 2000
+  max_num_snps: 10000
+
+  # These are the actual marginal proportions used by the base run. The
+  # historical pipeline expressed the same mixture as sequential conditional
+  # draws (0.20, then 0.70, then 0.35, then 0.20).
+  case_weights:
+    feems_lattice: 0.2000
+    global_landscape: 0.5600
+    wolflike: 0.0840
+    earth_like: 0.0312
+    grid: 0.1248
+
+  global_landscape_resolution: "50m"
+  global_landscape_cartopy_data_dir: ~/.cache/cartopy
+  global_landscape_target_node_choices: [220, 450, 900, 1400]
+  global_landscape_target_node_weights:
+    "220": 1.0
+    "450": 1.5
+    "900": 1.5
+    "1400": 1.0
+  global_landscape_min_nodes: 120
+  global_landscape_max_nodes: 1800
+  global_landscape_min_box_deg: 3.0
+  global_landscape_max_box_deg: 28.0
+  global_landscape_min_land_fraction: 0.04
+  global_landscape_min_lat: -55.0
+  global_landscape_max_lat: 72.0
+  global_landscape_max_region_tries: 600
+  global_landscape_surface_kinds: [global_landscape]
+  global_landscape_sampled_fraction_choices: [0.03, 0.05, 0.10, 0.25, 0.50]
+  global_landscape_sampled_fraction_weights:
+    "0.03": 2.0
+    "0.05": 2.0
+    "0.1": 2.0
+    "0.25": 1.0
+    "0.5": 0.5
+  global_landscape_min_sampled_sites: 2
+  global_landscape_max_total_samples: 384
+  global_landscape_path_sample_probability: 0.35
+  global_landscape_min_diploids_per_site: 1
+  global_landscape_max_diploids_per_site: 8
+  global_landscape_water_strength: 2.8
+  global_landscape_coast_strength: 1.2
+  global_landscape_ridge_strength: 1.4
+
+  feems_lattice_rows: 8
+  feems_lattice_columns: 12
+  feems_lattice_surface_kinds:
+    [feems_homogeneous, feems_heterogeneous_barrier, feems_anisotropic]
+  feems_lattice_surface_weights:
+    feems_homogeneous: 1.0
+    feems_heterogeneous_barrier: 1.0
+    feems_anisotropic: 1.0
+  feems_lattice_barrier_startpt: 2.5
+  feems_lattice_barrier_endpt: 8.5
+  feems_lattice_barrier_w: 0.1
+  feems_lattice_corridor_w: 0.5
+  feems_lattice_anisotropy_scaler: 5.0
+  feems_lattice_n_samples_per_node: 10
+  feems_lattice_sample_prob_choices: [1.0, 0.2]
+  feems_lattice_sample_prob_weights:
+    "1.0": 1.0
+    "0.2": 1.0
+  feems_lattice_barrier_prob: 1.0
+  feems_lattice_corridor_left_prob: 1.0
+  feems_lattice_corridor_right_prob: 1.0
+
+  wolflike_graph_sources: [synthetic-corridor, land]
+  wolflike_graph_source_weights:
+    synthetic-corridor: 1.0
+    land: 3.0
+  wolflike_target_node_choices: [220, 450, 900, 1400]
+  wolflike_target_node_weights:
+    "220": 1.0
+    "450": 1.5
+    "900": 1.5
+    "1400": 1.0
+  wolflike_sampled_fraction_choices: [0.03, 0.05, 0.10, 0.25, 0.50]
+  wolflike_sampled_fraction_weights:
+    "0.03": 2.0
+    "0.05": 2.0
+    "0.1": 2.0
+    "0.25": 1.0
+    "0.5": 0.5
+  wolflike_min_sampled_sites: 2
+  wolflike_max_total_samples: 384
+  wolflike_min_diploids_per_site: 1
+  wolflike_max_diploids_per_site: 8
+  wolflike_surface_kinds: [smooth, barrier, gp, earth]
+  wolflike_surface_weights:
+    smooth: 4.0
+    gp: 4.0
+    barrier: 3.0
+    earth: 2.0
+
+  min_height: 8
+  max_height: 36
+  min_width: 8
+  max_width: 36
+  mask_kinds: [full, bay, lake, coast, islands]
+  sample_designs: [poisson_sites, sites, uniform, clustered, full]
+  min_samples: 6
+  max_samples: 1200
+  min_sample_fraction: 0.01
+  max_sample_fraction: 1.0
+  min_diploids_per_site: 1
+  max_diploids_per_site: 24
+  surface_kinds: [constant, smooth, barrier, gp, earth]
+  surface_weights:
+    constant: 0.10
+    smooth: 4.0
+    barrier: 1.5
+    gp: 5.0
+    earth: 2.0
+
+  gp_features: 64
+  log_rate_std: 1.0
+  min_log_rate_std: 0.35
+  max_log_rate_std: 1.60
+  q_log_std: 0.35
+  min_q_log_std: 0.0
+  max_q_log_std: 0.90
+  q_prior: gp
+  migration_gp_length_scale: 0.35
+  min_migration_gp_length_scale: 0.12
+  max_migration_gp_length_scale: 0.65
+  q_gp_length_scale: 0.35
+  min_q_gp_length_scale: 0.12
+  max_q_gp_length_scale: 0.90
+  max_conditionable_attempts: 32
+
+dreems:
+  architecture:
+    hidden_channels: 128
+    layers: 10
+    context_layers: 3
+  features:
+    covariance_components: 20
+    normalization_std_floor: 0.2
+    spatial_encoding: topology
+  edge_conditioner:
+    smoothness: 0.01
+    ridge_scale: 0.001
+    pair_weight_power: 0.0
+    length_weighted_baseline: true
+    output_sd: 1.0
+    batch_size: 256
+  loss:
+    min_logvar: -7.0
+    max_logvar: 5.0
+    context_weight: 0.5
+    q_weight: 0.5
+    slope_weight: 0.25
+    slope_target: 1.0
+    slope_target_floor: 0.05
+    slope_huber_delta: 1.0
+    correlation_weight: 0.2
+    correlation_target_floor: 0.05
+    orientation_weight: 0.35
+    orientation_target_floor: 0.05
+    orientation_margin_fraction: 0.5
+  optimizer:
+    seed: 971802
+    steps: 120000
+    batch_size: 8
+    learning_rate: 5.0e-05
+    gradient_clip_norm: 1.0
+    log_every: 1000
+    early_stopping_patience: 12
+    early_stopping_min_delta: 0.0001
+    early_stopping_warmup_steps: 20000
+    early_stopping_metric: validation_loss
+    restore_best_validation: true

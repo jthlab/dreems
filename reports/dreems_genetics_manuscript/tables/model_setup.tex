@@ -1,0 +1,22 @@
+\begin{tabular}{ll}
+\toprule
+Component & Setting \\
+\midrule
+Node / edge dimensions & 109 / 253 \\
+Hidden channels & 128 \\
+Local / context graph layers & 10 / 3 \\
+Graph-wide attention & yes \\
+Covariance score maps & 20 \\
+Diffusion times & 0.25, 0.5, 1, 2, 4 \\
+Spatial representation & topology and normalized edge length \\
+Coordinate-frame invariant & translation, rotation, reflection, scale \\
+Linearized initializer & all\_pair\_diagonal\_adjoint \\
+Initializer pairs & all observed-deme pairs \\
+Predictive family & factorized\_normal \\
+Training examples & 61,440 \\
+Validation / held-out examples & 1,024 / 4,096 \\
+Best / final step & 29,000 / 41,000 \\
+Best validation loss & 0.1572 \\
+Optimizer / learning rate / batch & Adam / 5e-5 / 8 \\
+\bottomrule
+\end{tabular}

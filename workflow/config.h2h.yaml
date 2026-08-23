@@ -1,0 +1,37 @@
+# Publication H2H recipe. Point input_pattern and metadata_pattern at a fixed
+# synthetic test set containing genotypes and known edge log migration rates.
+outdir: results/h2h_loo/work
+publish_dir: results/h2h_loo/report
+input_pattern: results/h2h_inputs/example_{example}.pkl
+metadata_pattern: results/h2h_inputs/example_{example}.metadata.json
+checkpoint: src/dreems/data/dreems_diffusion_bands.dreems.zip
+
+first_example: 0
+example_count: 512
+example_ids: null
+
+# Statistical FEEMS settings are intentionally absent. h2h.Snakefile always
+# uses FEEMS v2 joint lambda/lambda_q leave-one-observed-deme-out CV with the
+# grids and optimizer defaults from the official cross-validation notebook.
+# Each observed-deme fold is an independent one-CPU Snakemake job. The final
+# rule only collects fold scores, selects the penalties, and refits once.
+feems_fold_mem_mb: 4000
+feems_fold_runtime: 60m
+feems_final_mem_mb: 8000
+feems_final_runtime: 60m
+feems_partition: standard
+protocol_check_partition: standard
+
+dreems_threads: 2
+dreems_mem_mb: 6000
+dreems_runtime: 60m
+dreems_partition: standard
+
+aggregate_mem_mb: 4000
+aggregate_runtime: 30m
+aggregate_partition: standard
+
+# Final FEEMS fits are expensive and must outlive scratch. The workflow stores
+# one compact, checksummed archive beside the publication summary.
+archive_mem_mb: 1000
+archive_runtime: 15m

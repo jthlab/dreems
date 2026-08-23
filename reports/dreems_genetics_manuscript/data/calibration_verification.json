@@ -1,0 +1,102 @@
+{
+  "calibration": {
+    "density_breaks": [
+      0.1,
+      0.25
+    ],
+    "density_scales": [
+      1.0752856083032754,
+      0.9951167513722861,
+      1.9091496173280793
+    ],
+    "global_scale": 1.3116863684302233,
+    "method": "density",
+    "schema_version": 1
+  },
+  "checkpoint": "/gpfs/accounts/jonth_root/jonth1/jonth/dreems/graph_balanced_calibration_20260821/checkpoint.calibrated.dreems.zip",
+  "rows": [
+    {
+      "edges": 1521256,
+      "graph_balanced_coverage_50": 0.5282994662789828,
+      "graph_balanced_coverage_80": 0.8016632306830442,
+      "graph_balanced_coverage_95": 0.9317475651555779,
+      "graph_balanced_nll": -0.13126899810194032,
+      "graphs": 1024,
+      "method": "raw",
+      "sampling": "all"
+    },
+    {
+      "edges": 1246987,
+      "graph_balanced_coverage_50": 0.5225357087202646,
+      "graph_balanced_coverage_80": 0.8049514227986672,
+      "graph_balanced_coverage_95": 0.9373110977529268,
+      "graph_balanced_nll": 0.0928070724499769,
+      "graphs": 610,
+      "method": "raw",
+      "sampling": "sparse <=10%"
+    },
+    {
+      "edges": 170759,
+      "graph_balanced_coverage_50": 0.5921259996394258,
+      "graph_balanced_coverage_80": 0.8436038194011549,
+      "graph_balanced_coverage_95": 0.9502857334229066,
+      "graph_balanced_nll": -0.3666945018800123,
+      "graphs": 211,
+      "method": "raw",
+      "sampling": "medium 10-25%"
+    },
+    {
+      "edges": 103510,
+      "graph_balanced_coverage_50": 0.47927726712511404,
+      "graph_balanced_coverage_80": 0.7481890365448599,
+      "graph_balanced_coverage_95": 0.8957608243241045,
+      "graph_balanced_nll": -0.5598976766216267,
+      "graphs": 203,
+      "method": "raw",
+      "sampling": "dense >25%"
+    },
+    {
+      "edges": 1521256,
+      "graph_balanced_coverage_50": 0.6004105163260689,
+      "graph_balanced_coverage_80": 0.8568445067210577,
+      "graph_balanced_coverage_95": 0.9573545461206059,
+      "graph_balanced_nll": -0.1845567736712871,
+      "graphs": 1024,
+      "method": "selected",
+      "sampling": "all"
+    },
+    {
+      "edges": 1246987,
+      "graph_balanced_coverage_50": 0.5542105658436591,
+      "graph_balanced_coverage_80": 0.8330275081820416,
+      "graph_balanced_coverage_95": 0.9514100661842386,
+      "graph_balanced_nll": 0.0915363932799932,
+      "graphs": 610,
+      "method": "selected",
+      "sampling": "sparse <=10%"
+    },
+    {
+      "edges": 170759,
+      "graph_balanced_coverage_50": 0.5899645318091689,
+      "graph_balanced_coverage_80": 0.841960339286494,
+      "graph_balanced_coverage_95": 0.949464718592368,
+      "graph_balanced_nll": -0.36696582805465033,
+      "graphs": 211,
+      "method": "selected",
+      "sampling": "medium 10-25%"
+    },
+    {
+      "edges": 103510,
+      "graph_balanced_coverage_50": 0.7500956026676247,
+      "graph_balanced_coverage_80": 0.9438835630633865,
+      "graph_balanced_coverage_95": 0.9834180257740154,
+      "graph_balanced_nll": -0.8245987508407027,
+      "graphs": 203,
+      "method": "selected",
+      "sampling": "dense >25%"
+    }
+  ],
+  "selected": "density",
+  "stage": "edge_sd_calibration_verification",
+  "verification_examples": 1024
+}

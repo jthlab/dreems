@@ -1,0 +1,537 @@
+{
+  "calibration": {
+    "global_landscape": {
+      "edges": 1056285,
+      "examples": 512,
+      "graph_balanced_coverage": {
+        "neural": {
+          "50": 0.5643602216809328,
+          "80": 0.8458733414011727,
+          "95": 0.9584527164373211
+        },
+        "refined": {
+          "50": 0.5791488939832581,
+          "80": 0.8561516558162132,
+          "95": 0.962642834322406
+        }
+      },
+      "mean_sd_graph_mse_spearman": 0.7301007048156921,
+      "mean_within_graph_spearman": 0.20310709820640208,
+      "mse_by_sd_quintile": [
+        0.12697857481354924,
+        0.2251425349364328,
+        0.4046050579062209,
+        0.638108243260834,
+        0.955260582646359
+      ],
+      "pooled_coverage": {
+        "neural": {
+          "50": 0.561782094794492,
+          "80": 0.8424146892173987,
+          "95": 0.9566584775889083
+        },
+        "refined": {
+          "50": 0.5845969601007304,
+          "80": 0.8567091267981652,
+          "95": 0.9618417377885703
+        }
+      },
+      "pooled_sd_absolute_error_spearman": 0.3553751478913638,
+      "positive_within_graph_fraction": 0.86328125,
+      "selective_mse": [
+        {
+          "fraction": 0.2,
+          "mse": 0.12697857481354924
+        },
+        {
+          "fraction": 0.4,
+          "mse": 0.176060554874991
+        },
+        {
+          "fraction": 0.6,
+          "mse": 0.252242055885401
+        },
+        {
+          "fraction": 0.8,
+          "mse": 0.34870860272925924
+        },
+        {
+          "fraction": 1.0,
+          "mse": 0.47001899871267916
+        }
+      ]
+    },
+    "verification": {
+      "calibration": {
+        "density_breaks": [
+          0.1,
+          0.25
+        ],
+        "density_scales": [
+          1.0752856083032754,
+          0.9951167513722861,
+          1.9091496173280793
+        ],
+        "global_scale": 1.3116863684302233,
+        "method": "density",
+        "schema_version": 1
+      },
+      "checkpoint": "/gpfs/accounts/jonth_root/jonth1/jonth/dreems/graph_balanced_calibration_20260821/checkpoint.calibrated.dreems.zip",
+      "rows": [
+        {
+          "edges": 1521256,
+          "graph_balanced_coverage_50": 0.5282994662789828,
+          "graph_balanced_coverage_80": 0.8016632306830442,
+          "graph_balanced_coverage_95": 0.9317475651555779,
+          "graph_balanced_nll": -0.13126899810194032,
+          "graphs": 1024,
+          "method": "raw",
+          "sampling": "all"
+        },
+        {
+          "edges": 1246987,
+          "graph_balanced_coverage_50": 0.5225357087202646,
+          "graph_balanced_coverage_80": 0.8049514227986672,
+          "graph_balanced_coverage_95": 0.9373110977529268,
+          "graph_balanced_nll": 0.0928070724499769,
+          "graphs": 610,
+          "method": "raw",
+          "sampling": "sparse <=10%"
+        },
+        {
+          "edges": 170759,
+          "graph_balanced_coverage_50": 0.5921259996394258,
+          "graph_balanced_coverage_80": 0.8436038194011549,
+          "graph_balanced_coverage_95": 0.9502857334229066,
+          "graph_balanced_nll": -0.3666945018800123,
+          "graphs": 211,
+          "method": "raw",
+          "sampling": "medium 10-25%"
+        },
+        {
+          "edges": 103510,
+          "graph_balanced_coverage_50": 0.47927726712511404,
+          "graph_balanced_coverage_80": 0.7481890365448599,
+          "graph_balanced_coverage_95": 0.8957608243241045,
+          "graph_balanced_nll": -0.5598976766216267,
+          "graphs": 203,
+          "method": "raw",
+          "sampling": "dense >25%"
+        },
+        {
+          "edges": 1521256,
+          "graph_balanced_coverage_50": 0.6004105163260689,
+          "graph_balanced_coverage_80": 0.8568445067210577,
+          "graph_balanced_coverage_95": 0.9573545461206059,
+          "graph_balanced_nll": -0.1845567736712871,
+          "graphs": 1024,
+          "method": "selected",
+          "sampling": "all"
+        },
+        {
+          "edges": 1246987,
+          "graph_balanced_coverage_50": 0.5542105658436591,
+          "graph_balanced_coverage_80": 0.8330275081820416,
+          "graph_balanced_coverage_95": 0.9514100661842386,
+          "graph_balanced_nll": 0.0915363932799932,
+          "graphs": 610,
+          "method": "selected",
+          "sampling": "sparse <=10%"
+        },
+        {
+          "edges": 170759,
+          "graph_balanced_coverage_50": 0.5899645318091689,
+          "graph_balanced_coverage_80": 0.841960339286494,
+          "graph_balanced_coverage_95": 0.949464718592368,
+          "graph_balanced_nll": -0.36696582805465033,
+          "graphs": 211,
+          "method": "selected",
+          "sampling": "medium 10-25%"
+        },
+        {
+          "edges": 103510,
+          "graph_balanced_coverage_50": 0.7500956026676247,
+          "graph_balanced_coverage_80": 0.9438835630633865,
+          "graph_balanced_coverage_95": 0.9834180257740154,
+          "graph_balanced_nll": -0.8245987508407027,
+          "graphs": 203,
+          "method": "selected",
+          "sampling": "dense >25%"
+        }
+      ],
+      "selected": "density",
+      "stage": "edge_sd_calibration_verification",
+      "verification_examples": 1024
+    }
+  },
+  "checkpoint_sha256": "f0b677d2cc028252002d15fac843ca7347b1b352eb2286a18bd202b724aa92b4",
+  "empirical_dataset_count": 15,
+  "h2h": {
+    "comparisons": {
+      "neural_vs_feems_corr": {
+        "ci95_high": 0.10114165397454547,
+        "ci95_low": 0.06582451921290755,
+        "losses": 148,
+        "mean_advantage": 0.08348308659372651,
+        "n": 512,
+        "p": 4.501801286557069e-19,
+        "win_fraction": 0.7109375,
+        "wins": 364
+      },
+      "neural_vs_feems_mse": {
+        "ci95_high": 0.2111669868386194,
+        "ci95_low": 0.14994926227857192,
+        "losses": 133,
+        "mean_advantage": 0.18055812455859566,
+        "n": 512,
+        "p": 9.808038144065399e-28,
+        "win_fraction": 0.740234375,
+        "wins": 379
+      },
+      "refined_vs_feems_corr": {
+        "ci95_high": 0.12195445485630636,
+        "ci95_low": 0.08972347818763153,
+        "losses": 93,
+        "mean_advantage": 0.10583896652196895,
+        "n": 512,
+        "p": 3.608569964984166e-33,
+        "win_fraction": 0.818359375,
+        "wins": 419
+      },
+      "refined_vs_feems_mse": {
+        "ci95_high": 0.23232823792136806,
+        "ci95_low": 0.17732433863762123,
+        "losses": 83,
+        "mean_advantage": 0.20482628827949464,
+        "n": 512,
+        "p": 9.583503776291292e-41,
+        "win_fraction": 0.837890625,
+        "wins": 429
+      },
+      "refined_vs_neural_corr": {
+        "ci95_high": 0.03190797153366316,
+        "ci95_low": 0.0128037883228217,
+        "losses": 173,
+        "mean_advantage": 0.022355879928242433,
+        "n": 512,
+        "p": 5.382891845187567e-06,
+        "win_fraction": 0.662109375,
+        "wins": 339
+      },
+      "refined_vs_neural_mse": {
+        "ci95_high": 0.0345293665125818,
+        "ci95_low": 0.014006960929216107,
+        "losses": 201,
+        "mean_advantage": 0.024268163720898954,
+        "n": 512,
+        "p": 4.303178818633935e-06,
+        "win_fraction": 0.607421875,
+        "wins": 311
+      }
+    },
+    "examples": 512,
+    "methods": {
+      "feems": {
+        "corr": 0.6140753490619126,
+        "mse": 0.7381744738771386
+      },
+      "neural": {
+        "corr": 0.6975584356556391,
+        "cov_corr": 0.9394265779349122,
+        "cov_mse": 0.0003768022091631257,
+        "cov_r2": 0.9169980210470516,
+        "mse": 0.5576163493185431
+      },
+      "refined": {
+        "corr": 0.7199143155838815,
+        "cov_corr": 0.9844827736159083,
+        "cov_mse": 9.439759804255222e-05,
+        "cov_r2": 0.9757539296428643,
+        "mse": 0.5333481855976441
+      }
+    },
+    "ranges": {
+      "num_edges": {
+        "max": 4065.0,
+        "mean": 2063.056640625,
+        "median": 1270.0,
+        "min": 590.0
+      },
+      "num_nodes": {
+        "max": 1406.0,
+        "mean": 722.572265625,
+        "median": 451.5,
+        "min": 219.0
+      },
+      "num_sampled_nodes": {
+        "max": 384.0,
+        "mean": 46.474609375,
+        "median": 39.0,
+        "min": 2.0
+      },
+      "num_samples": {
+        "max": 384.0,
+        "mean": 182.564453125,
+        "median": 135.0,
+        "min": 5.0
+      },
+      "num_snps": {
+        "max": 9996.0,
+        "mean": 5848.0859375,
+        "median": 5810.5,
+        "min": 2003.0
+      },
+      "sampled_node_fraction": {
+        "max": 0.5,
+        "mean": 0.07064797900748475,
+        "median": 0.0488888888888888,
+        "min": 0.0044444444444444
+      }
+    },
+    "sampling_groups": [
+      {
+        "corr_effect": {
+          "ci95_high": 0.13336861772047925,
+          "ci95_low": 0.09582616883732539,
+          "losses": 80,
+          "mean_advantage": 0.11459739327890232,
+          "n": 430,
+          "p": 8.374041536776203e-29,
+          "win_fraction": 0.813953488372093,
+          "wins": 350
+        },
+        "dreems_corr": 0.6898415760605399,
+        "dreems_mse": 0.5834436830634155,
+        "feems_corr": 0.5752441827816375,
+        "feems_mse": 0.7997501958679147,
+        "label": "Sparse <=10%",
+        "mse_effect": {
+          "ci95_high": 0.24817701044361964,
+          "ci95_low": 0.18443601516537886,
+          "losses": 73,
+          "mean_advantage": 0.21630651280449925,
+          "n": 430,
+          "p": 3.3451515419716223e-34,
+          "win_fraction": 0.8302325581395349,
+          "wins": 357
+        },
+        "n": 430
+      },
+      {
+        "corr_effect": {
+          "ci95_high": 0.08357879928844454,
+          "ci95_low": 0.043216312134050514,
+          "losses": 10,
+          "mean_advantage": 0.06339755571124753,
+          "n": 73,
+          "p": 2.4538114321548822e-08,
+          "win_fraction": 0.863013698630137,
+          "wins": 63
+        },
+        "dreems_corr": 0.8743435818129839,
+        "dreems_mse": 0.27258214581809603,
+        "feems_corr": 0.8109460261017363,
+        "feems_mse": 0.4232479882842346,
+        "label": "Intermediate 10-25%",
+        "mse_effect": {
+          "ci95_high": 0.1918521741001009,
+          "ci95_low": 0.10947951083217647,
+          "losses": 8,
+          "mean_advantage": 0.15066584246613868,
+          "n": 73,
+          "p": 3.1833191422247264e-10,
+          "win_fraction": 0.8904109589041096,
+          "wins": 65
+        },
+        "n": 73
+      },
+      {
+        "corr_effect": {
+          "ci95_high": 0.07584803018205818,
+          "ci95_low": -0.012592434093385008,
+          "losses": 3,
+          "mean_advantage": 0.03162779804433659,
+          "n": 9,
+          "p": 0.13768949918733492,
+          "win_fraction": 0.6666666666666666,
+          "wins": 6
+        },
+        "dreems_corr": 0.9041300445074898,
+        "dreems_mse": 0.2549989626671198,
+        "feems_corr": 0.8725022464631532,
+        "feems_mse": 0.3506270285713924,
+        "label": "Dense >25%",
+        "mse_effect": {
+          "ci95_high": 0.19976112154774256,
+          "ci95_low": -0.008504989739197374,
+          "losses": 2,
+          "mean_advantage": 0.09562806590427259,
+          "n": 9,
+          "p": 0.06706871166641223,
+          "win_fraction": 0.7777777777777778,
+          "wins": 7
+        },
+        "n": 9
+      }
+    ],
+    "size_groups": [
+      {
+        "corr_effect": {
+          "ci95_high": 0.15899082959396255,
+          "ci95_low": 0.10406367156355317,
+          "losses": 45,
+          "mean_advantage": 0.13152725057875786,
+          "n": 252,
+          "p": 2.8338136973293005e-18,
+          "win_fraction": 0.8214285714285714,
+          "wins": 207
+        },
+        "dreems_corr": 0.663978250669659,
+        "dreems_mse": 0.6370870523468334,
+        "feems_corr": 0.5324510000909011,
+        "feems_mse": 0.8700034999120757,
+        "label": "219-450",
+        "mse_effect": {
+          "ci95_high": 0.2783847008009266,
+          "ci95_low": 0.18744819432955823,
+          "losses": 42,
+          "mean_advantage": 0.2329164475652424,
+          "n": 252,
+          "p": 2.5952867188542693e-20,
+          "win_fraction": 0.8333333333333334,
+          "wins": 210
+        },
+        "n": 252
+      },
+      {
+        "corr_effect": {
+          "ci95_high": 0.09723321452490072,
+          "ci95_low": 0.05716504943370202,
+          "losses": 24,
+          "mean_advantage": 0.07719913197930137,
+          "n": 150,
+          "p": 2.8172100488773526e-12,
+          "win_fraction": 0.84,
+          "wins": 126
+        },
+        "dreems_corr": 0.7652479396422316,
+        "dreems_mse": 0.43602996990386267,
+        "feems_corr": 0.6880488076629302,
+        "feems_mse": 0.6039218140627044,
+        "label": "451-900",
+        "mse_effect": {
+          "ci95_high": 0.20781869872355963,
+          "ci95_low": 0.1279649895941239,
+          "losses": 21,
+          "mean_advantage": 0.16789184415884176,
+          "n": 150,
+          "p": 5.4900554665611644e-14,
+          "win_fraction": 0.86,
+          "wins": 129
+        },
+        "n": 150
+      },
+      {
+        "corr_effect": {
+          "ci95_high": 0.11564714321852892,
+          "ci95_low": 0.05644038253612408,
+          "losses": 24,
+          "mean_advantage": 0.0860437628773265,
+          "n": 110,
+          "p": 7.857283907094651e-08,
+          "win_fraction": 0.7818181818181819,
+          "wins": 86
+        },
+        "dreems_corr": 0.7862401769441687,
+        "dreems_mse": 0.42839853044556697,
+        "feems_corr": 0.7001964140668422,
+        "feems_mse": 0.619237968525875,
+        "label": "901-1,406",
+        "mse_effect": {
+          "ci95_high": 0.24205745233226503,
+          "ci95_low": 0.13962142382835144,
+          "losses": 20,
+          "mean_advantage": 0.19083943808030823,
+          "n": 110,
+          "p": 3.243389994373867e-11,
+          "win_fraction": 0.8181818181818182,
+          "wins": 90
+        },
+        "n": 110
+      }
+    ]
+  },
+  "runtime": {
+    "atomized_example": {
+      "aggregate_cpu_seconds": 75948.03,
+      "critical_path_compute_seconds": 333.90000000000003,
+      "example": 295,
+      "final_cpu_seconds": 43.1,
+      "final_wall_seconds": 64.73,
+      "fold_cpu_sum_seconds": 75904.93,
+      "fold_wall_max_seconds": 269.17,
+      "fold_wall_sum_seconds": 83788.40000000001,
+      "folds": 384,
+      "peak_rss_mb": 850.71
+    },
+    "dreems_elapsed_median_seconds": 8.422801005886868,
+    "dreems_elapsed_p95_seconds": 25.7993404584704,
+    "dreems_prediction_median_seconds": 6.050891617313027,
+    "dreems_workers": 2,
+    "feems_elapsed_median_seconds": 151.59392012492754,
+    "feems_elapsed_p95_seconds": 1365.6264295314904,
+    "feems_workers": 16,
+    "note": "The 511 FEEMS elapsed times include LOO CV in a process pool and the final fit. Example 295 used one Snakemake job per fold and is reported separately.",
+    "paired_speedup_geometric_mean": 14.846736551977143,
+    "paired_speedup_median": 16.38985690903223,
+    "process_pool_cases": 511,
+    "training": {
+      "cpu_seconds": 2230.07,
+      "max_rss_mb": 5477.16,
+      "wall_seconds": 7578.56
+    }
+  },
+  "training": {
+    "best_step": 29000,
+    "best_validation_loss": 0.1572438609728124,
+    "examples": 61440,
+    "final_step": 41000
+  },
+  "wolf": {
+    "dreems_seconds": 16.302279185969383,
+    "edges": 3458,
+    "feems_cv_folds": 94,
+    "feems_seconds": 1828.6672874190845,
+    "hudson_edges": 556,
+    "methods": {
+      "feems": {
+        "cov_corr": 0.8922221287648512,
+        "cov_mse": 0.0004886010836687,
+        "cov_r2": 0.7754049368545537,
+        "edge_corr_vs_feems": 1.0,
+        "edge_sd": 1.131070595150743,
+        "hudson_mean": -0.5568977390757724
+      },
+      "neural": {
+        "cov_corr": 0.6718516341000196,
+        "cov_mse": 0.0011375060758366555,
+        "cov_r2": 0.47712304071750167,
+        "edge_corr_vs_feems": 0.4094714265010122,
+        "edge_sd": 0.6638371906587869,
+        "hudson_mean": 0.0398726101630786
+      },
+      "refined": {
+        "cov_corr": 0.7988519614173606,
+        "cov_mse": 0.0007505650959704089,
+        "cov_r2": 0.6549880449333619,
+        "edge_corr_vs_feems": 0.6959086820655666,
+        "edge_sd": 0.7838701507549234,
+        "hudson_mean": -0.07397790909847435
+      }
+    },
+    "nodes": 1207,
+    "observed_nodes": 94,
+    "samples": 111,
+    "snps": 17729
+  }
+}

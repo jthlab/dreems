@@ -1,0 +1,156 @@
+{
+  "categorical_counts": {
+    "graph_source": {
+      "earth_like": 1896,
+      "feems_triangular_lattice": 12256,
+      "global_landscape": 34605,
+      "grid": 7560,
+      "wolflike": 5123
+    },
+    "island_marker_model": {
+      "conditioned_random_marker": 61440
+    },
+    "mask_kind": {
+      "bay": 1551,
+      "coast": 1540,
+      "earth-land": 1896,
+      "feems_triangular_lattice": 12256,
+      "full": 1498,
+      "global_landscape_world_map": 34605,
+      "islands": 1476,
+      "lake": 1495,
+      "wolflike_land": 3887,
+      "wolflike_synthetic-corridor": 1236
+    },
+    "sample_design": {
+      "clustered": 1901,
+      "feems_setup_graph": 12256,
+      "full": 1849,
+      "global_landscape_land_sites": 34605,
+      "poisson_sites": 1893,
+      "sites": 1908,
+      "uniform": 1905,
+      "wolflike_path": 5123
+    },
+    "sample_regime": {
+      "clustered": 1901,
+      "dense_feems": 6047,
+      "full": 1849,
+      "global_landscape_land_sites": 34605,
+      "poisson_sites": 1893,
+      "sites": 1908,
+      "sparse_feems": 6209,
+      "uniform": 1905,
+      "wolflike_path": 5123
+    },
+    "simulator": {
+      "island_coalescent": 61440
+    },
+    "surface_kind": {
+      "barrier": 2554,
+      "constant": 78,
+      "earth": 891,
+      "feems_anisotropic": 4152,
+      "feems_heterogeneous_barrier": 4074,
+      "feems_homogeneous": 4030,
+      "global_landscape": 34605,
+      "gp": 5965,
+      "smooth": 5091
+    }
+  },
+  "examples": 61440,
+  "genotype_matrix_fraction": 0.0,
+  "numeric_distributions": {
+    "effective_snps": {
+      "max": 10000.0,
+      "mean": 5996.204248046875,
+      "median": 5994.0,
+      "min": 2000.0,
+      "q25": 4014.0,
+      "q75": 7982.0
+    },
+    "island_attempts": {
+      "max": 37575.0,
+      "mean": 12591.808414713541,
+      "median": 12015.0,
+      "min": 2014.0,
+      "q25": 7949.0,
+      "q75": 16494.75
+    },
+    "local_log_rate_std": {
+      "max": 1.5999429024071756,
+      "mean": 0.9762725702975146,
+      "median": 0.97562855719248,
+      "min": 0.3500070080413388,
+      "q25": 0.664050586645083,
+      "q75": 1.287202834888381
+    },
+    "local_q_log_std": {
+      "max": 0.8999957633340185,
+      "mean": 0.4513322236630133,
+      "median": 0.45228993252805627,
+      "min": 1.922300199059812e-05,
+      "q25": 0.2279863979138979,
+      "q75": 0.6749740024921534
+    },
+    "mean_diploids_per_sampled_node": {
+      "max": 26.0,
+      "mean": 5.642108186174768,
+      "median": 5.0,
+      "min": 1.0,
+      "q25": 3.0,
+      "q75": 8.0
+    },
+    "num_edges": {
+      "max": 4107.0,
+      "mean": 1436.0545572916667,
+      "median": 1255.0,
+      "min": 12.0,
+      "q25": 365.0,
+      "q75": 2575.0
+    },
+    "num_nodes": {
+      "max": 1743.0,
+      "mean": 543.0568033854166,
+      "median": 450.0,
+      "min": 9.0,
+      "q25": 201.0,
+      "q75": 900.0
+    },
+    "num_sampled_nodes": {
+      "max": 1200.0,
+      "mean": 70.08968098958333,
+      "median": 43.0,
+      "min": 2.0,
+      "q25": 19.0,
+      "q75": 96.0
+    },
+    "num_samples": {
+      "max": 1200.0,
+      "mean": 327.43279622395835,
+      "median": 200.0,
+      "min": 2.0,
+      "q25": 84.0,
+      "q75": 384.0
+    },
+    "num_snps": {
+      "max": 10000.0,
+      "mean": 5996.204248046875,
+      "median": 5994.0,
+      "min": 2000.0,
+      "q25": 4014.0,
+      "q75": 7982.0
+    },
+    "sampled_node_fraction": {
+      "max": 1.0,
+      "mean": 0.2452959878960293,
+      "median": 0.09142857142857143,
+      "min": 0.002142857142857143,
+      "q25": 0.03857142857142857,
+      "q75": 0.248868778280543
+    }
+  },
+  "rust_simulator_fraction": 1.0,
+  "sample_covariance_fraction": 1.0,
+  "source_directory": "/scratch/jonth_root/jonth1/jonth/dreems/clean_conditioned_broad_retrain_20260718_r3/raw/train"
+}

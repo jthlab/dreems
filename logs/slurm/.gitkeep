@@ -1,0 +1,1 @@
+# Slurm logs are runtime artifacts; keep only this directory marker in Git.

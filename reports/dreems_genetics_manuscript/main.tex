@@ -1,0 +1,597 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{microtype}
+\usepackage[round]{natbib}
+\usepackage{xcolor}
+\usepackage{xspace}
+\usepackage{hyperref}
+
+\graphicspath{{figures/}}
+
+\newcommand{\dreems}{DREEMS\xspace}
+\newcommand{\feems}{FEEMS\xspace}
+\newcommand{\vect}[1]{\boldsymbol{#1}}
+
+\title{Deep recovery of effective migration surfaces}
+\author{Jonathan Terhorst\\
+Department of Statistics, University of Michigan}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Spatial population genetic data often exhibit isolation by distance, but the
+rate at which genetic similarity decays can vary across a habitat. EEMS and
+\feems visualize this heterogeneity as a surface of relative effective
+migration. \feems obtains a surface by penalized optimization and selects its
+spatial regularization separately for each dataset, which can require many
+fits. Here we introduce Deep Resistance Estimation of Effective Migration
+Surfaces (\dreems), a simulation-trained graph neural network that estimates
+relative migration from genetic covariance and a geographic graph. \dreems
+uses graph signals at several spatial scales, an approximate resistance
+inversion, and a short covariance refinement. On 512 independently simulated
+landscapes, \dreems attained mean edge correlation 0.720 and mean squared
+error 0.533, compared with 0.614 and 0.738 for \feems using documented joint
+leave-one-observed-deme-out cross-validation. \dreems had higher correlation in 81.8\%
+and lower error in 83.8\% of examples. Nominal 95\% predictive intervals
+covered 95.7\% of edges in an independent calibration experiment. Median
+complete runtime was 8.4 seconds for \dreems and 151.6 seconds for \feems in
+the executed workflows. We also applied one checkpoint to 15 public datasets.
+In North American gray wolves, \feems fit covariance better and recovered a
+stronger Hudson Bay barrier.
+\dreems provides a fast exploratory estimate of spatial structure, while its
+simulation dependence makes model checking important for empirical use.
+\end{abstract}
+
+\section{Introduction}
+
+The relationship between geography and genetic variation has long been a
+central problem in population genetics. Individuals sampled near one another
+tend to be more genetically similar than individuals sampled far apart, a
+pattern commonly described as isolation by distance
+\citep{wright1943isolation,rousset1997differentiation}. This relationship is
+rarely uniform across a species' range. Coastlines, mountain ranges, habitat
+transitions, and historical events can make the same geographic distance
+correspond to very different levels of genetic differentiation.
+
+EEMS was developed to visualize spatially heterogeneous isolation by distance
+without assigning samples to discrete populations \citep{petkova2016eems}.
+It represents a habitat by a dense stepping-stone graph and estimates relative
+effective migration across the graph. The model has an electrical
+interpretation: migration rates act as conductances, and effective resistance
+approximates genetic dissimilarity \citep{mcrae2006resistance}. Regions of low
+effective migration can reveal barriers to gene flow, whereas regions of high
+effective migration can reveal unusually strong connectivity. These are
+effective summaries of spatial genetic structure, not direct estimates of
+contemporary dispersal.
+
+\emph{Fast Estimation of Effective Migration Surfaces} (\feems) placed this
+idea in a penalized-likelihood framework and made larger graphs practical
+\citep{marcus2021feems}. It estimates a separate parameter for each graph edge,
+which allows flexible and anisotropic surfaces, and uses spatial regularization
+to control overfitting. The amount of regularization is important: a strong
+penalty gives an almost uniform surface, while a weak penalty can produce a
+patchy fit. The documented \feems procedure chooses migration and local-drift
+penalties by leaving out each observed deme in turn. This is statistically
+appealing, but it requires many optimizations for every new dataset.
+
+Here we consider whether these repeated fits can be amortized. A model trained
+on many simulated inverse problems can learn how patterns in genetic
+covariance map to plausible conductance surfaces, then reuse that information
+for a new dataset. This approach has been successful for other population
+genetic problems \citep{flagel2019cnn,smith2024mapnn}. Its weakness is equally
+clear: the answer depends on the training distribution. A network can perform
+well on average and still fail when the graph, sampling design, or demographic
+history differs from its simulations.
+
+We introduce Deep Resistance Estimation of Effective Migration Surfaces
+(\dreems). The method takes a genetic covariance matrix, sample locations, and
+a geographic graph. It first computes a linearized approximation to the
+conductance inverse problem. It then represents covariance and sampling
+signals at several graph-diffusion scales and passes them through a graph
+neural network. The network predicts relative migration for every edge and a
+predictive standard deviation. A short, fixed refinement step improves the fit
+to the observed covariance while keeping the result near the neural estimate.
+The representation uses graph topology and relative edge length but no
+absolute geographic axis or environmental covariates.
+
+We evaluate one fixed checkpoint on 512 simulated landscapes and compare it
+with the upstream \feems implementation using its documented
+leave-one-observed-deme-out procedure. We examine edge recovery, sampling
+density, graph size, runtime, and predictive uncertainty. We then apply the
+same checkpoint without retraining to 15 public datasets, including the North
+American gray wolves used to introduce \feems. The simulations show a broad
+average advantage for \dreems, while the wolf analysis gives a concrete case
+in which the dataset-specific \feems fit remains more convincing.
+
+\section{Results}
+
+\subsection{Overview of DREEMS}
+
+Figure~\ref{fig:overview} summarizes the \dreems workflow. The inputs are a
+genetic covariance matrix, sample coordinates, and a graph whose nodes have
+geographic coordinates. Samples are assigned to nearby graph nodes and their
+covariance is aggregated by deme. The method does not receive coastlines,
+elevation, habitat labels, or a preliminary \feems estimate.
+
+The first stage uses all pairs of observed demes to construct a linearized
+estimate of edge conductance. This calculation asks which graph edges carry
+electrical flow between each sampled pair and accumulates evidence from their
+genetic dissimilarity. It is deliberately approximate: its purpose is to give
+the network an informative starting field without fitting a full migration
+surface.
+
+The second stage spreads covariance and sampling signals over the geographic
+graph for several diffusion times. Differences between successive smoothed
+signals form bands that retain local, regional, and broad-scale information.
+An edge-aware graph neural network combines these bands with the linearized
+field. Local message passing describes nearby structure, while a graph-wide
+attention branch allows each edge to use information from distant sampled
+regions. The output is a mean relative log-migration rate and predictive
+standard deviation for each edge, together with a node-level local-drift
+field.
+
+Finally, a fixed 50-step optimization adjusts the neural surface to better
+match the observed covariance. The adjustment is restricted to an
+uncertainty-scaled neighborhood of the neural prediction. Unlike \feems
+cross-validation, this refinement has no dataset-specific tuning search. The
+same checkpoint and refinement settings are used for every analysis.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{method_overview.pdf}
+\caption{Overview of \dreems. Genetic covariance and sample locations are
+placed on a user-supplied geographic graph. An all-pairs resistance
+approximation and fixed diffusion bands provide edge and node features to a
+graph neural network. The network predicts relative migration and uncertainty,
+and a fixed trust-region step refines the surface against observed covariance.}
+\label{fig:overview}
+\end{figure}
+
+\subsection{Training on simulated spatial histories}
+
+We trained \dreems on 61,440 structured-coalescent simulations. The graphs
+contained 9--1,743 nodes and included regular lattices, masked habitats,
+corridors, and random windows sampled from landmasses around the world
+(Table~\ref{tab:training-corpus}). Migration surfaces included homogeneous
+isolation by distance, smooth heterogeneity, barriers, corridors, anisotropy,
+coast effects, and variation in local drift. Sampling ranged from nearly full
+coverage to a small fraction of graph nodes and was allowed to correlate with
+the underlying migration process. Landscape variables generated the
+simulation targets, but they were not model inputs.
+
+Validation loss fell quickly during the first 10,000 updates and improved more
+slowly thereafter (Figure~\ref{fig:training}). The lowest graph-balanced
+validation loss occurred at step 29,000. Training stopped at step 41,000 after
+12 further checks failed to improve the loss by the prespecified threshold,
+and the step-29,000 parameters were restored. The separate set of 4,096
+held-out examples was not used to select the checkpoint.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.92\linewidth]{training_curve.pdf}
+\caption{Training of the production model. Validation loss was measured on
+1,024 complete graphs at 1,000-step intervals. The green point marks the
+restored checkpoint and the dashed line marks early stopping. Minibatch loss
+is noisy because graph size and difficulty differ among batches.}
+\label{fig:training}
+\end{figure}
+
+\subsection{DREEMS recovered simulated migration surfaces}
+
+We generated 512 independent global-landscape examples for the main
+comparison. These graphs contained 219--1,406 nodes and 590--4,065 edges. A
+median of 39 graph nodes was observed, corresponding to a median sampled-node
+fraction of 0.049. Each example contained a new graph window, migration
+surface, sampling design, and structured-coalescent genotype simulation.
+
+We ran \feems on the same genotype matrix, coordinates, and graph. For each
+example, \feems jointly selected its migration and local-$q$ smoothing
+parameters by documented leave-one-observed-deme-out cross-validation and
+then refit the selected model to all samples. In contrast, \dreems used the
+same checkpoint and radius-0.5 covariance refinement for all 512 examples.
+
+Refined \dreems attained mean edge correlation 0.720 and mean squared error
+(MSE) 0.533, compared with correlation 0.614 and MSE 0.738 for \feems
+(Table~\ref{tab:h2h-overall}). Before refinement, the neural estimate had mean
+correlation 0.698 and MSE 0.558. The fixed refinement therefore improved both
+metrics without using the simulated truth to choose its radius.
+
+The paired differences were also clear (Table~\ref{tab:h2h-paired}). Refined
+\dreems increased mean correlation by 0.1058 (95\% CI 0.0897--0.1220) and
+reduced mean MSE by 0.2048 (95\% CI 0.1773--0.2323) relative to \feems. It had
+higher correlation in 419 of 512 examples (81.8\%) and lower MSE in 429
+(83.8\%). The per-example comparison shows a broad shift rather than a small
+number of large gains, although substantial \dreems failures remain
+(Figure~\ref{fig:h2h-scatter}).
+
+\begin{table}[t]
+\centering
+\caption{Graph-balanced mean performance on 512 independently generated
+global-landscape examples. Covariance diagnostics were retained for \dreems
+only.}
+\label{tab:h2h-overall}
+\small
+\input{tables/h2h_overall.tex}
+\end{table}
+
+\begin{table}[t]
+\centering
+\caption{Paired contrasts across the same examples. Positive advantage favors
+the first method named. MSE advantage is baseline MSE minus candidate MSE.}
+\label{tab:h2h-paired}
+\scriptsize
+\input{tables/h2h_paired.tex}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.94\linewidth]{h2h_scatter_corr_mse.pdf}
+\caption{Recovery of simulated edge log-conductance. Each point compares
+refined \dreems with documented \feems LOO-CV on one landscape. Points above
+the diagonal in the correlation panel and below it in the MSE panel favor
+\dreems. Color gives the fraction of graph nodes containing samples.}
+\label{fig:h2h-scatter}
+\end{figure}
+
+The refinement had a larger effect on the quantity it directly targets. Mean
+off-diagonal covariance correlation increased from 0.939 for the neural
+surface to 0.984 after refinement, while mean covariance $R^2$ increased from
+0.917 to 0.976. Mean edge correlation increased by 0.0224 and MSE decreased by
+0.0243. Covariance fit and edge recovery are not equivalent: sparse
+observations can be explained by more than one conductance surface.
+
+Accuracy improved as more of the graph was sampled. Refined \dreems mean
+correlation was 0.690 in the 430 sparse examples, 0.874 in 73 intermediate
+examples, and 0.904 in nine dense examples
+(Table~\ref{tab:h2h-regimes}). Nevertheless, its group mean exceeded \feems in
+all three strata. In the sparse group, \dreems increased mean correlation by
+0.1146 and reduced mean MSE by 0.2163. The dense stratum is too small for a
+precise separate comparison.
+
+The average \dreems advantage was also present in each graph-size stratum
+(Table~\ref{tab:h2h-sizes}; Figure~\ref{fig:h2h-regimes}). The mean correlation
+advantages were 0.1315 for graphs with 219--450 nodes, 0.0772 for graphs with
+451--900 nodes, and 0.0860 for graphs with 901--1,406 nodes. Thus accuracy did
+not collapse at the largest benchmark size, although all test graphs remained
+within the training range.
+
+\begin{table}[t]
+\centering
+\caption{Accuracy by observed-node fraction. D denotes refined \dreems and F
+denotes documented \feems LOO-CV.}
+\label{tab:h2h-regimes}
+\scriptsize
+\input{tables/h2h_regimes.tex}
+\end{table}
+
+\begin{table}[t]
+\centering
+\caption{Accuracy by graph size. Advantages are paired graphwise means.}
+\label{tab:h2h-sizes}
+\scriptsize
+\input{tables/h2h_graph_sizes.tex}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.94\linewidth]{h2h_regime_delta_bars.pdf}
+\caption{Mean paired \dreems advantage by sampling and graph-size regime.
+Positive values favor refined \dreems for both correlation and MSE reduction.
+Bars show means and error bars show 95\% confidence intervals. The number of
+graphs differs substantially among strata.}
+\label{fig:h2h-regimes}
+\end{figure}
+
+Random examples show that both methods often recovered the largest
+landscape-scale barriers (Figure~\ref{fig:h2h-random}). \dreems surfaces were
+generally smoother and had lower amplitude. In many cases only a small
+fraction of nodes was observed, so estimates across broad unsampled regions
+were driven largely by resistance structure and the learned simulation prior.
+
+The examples with the largest \dreems MSE disadvantage show its remaining
+failure modes (Figure~\ref{fig:h2h-worst}). These include misplaced barriers,
+excessive shrinkage, and incorrect extrapolation through sparsely sampled
+regions. They are not merely sign-flipped versions of the truth. Because
+empirical datasets provide no edge truth, such failures cannot be identified
+by an oracle selector at prediction time.
+
+\begin{figure}[p]
+\centering
+\includegraphics[width=\linewidth]{h2h_examples_random.png}
+\caption{Random examples from the 512-landscape benchmark. Each row shows the
+true surface, refined \dreems estimate, and \feems estimate on one centered
+edge-log scale. Circles mark sampled nodes.}
+\label{fig:h2h-random}
+\end{figure}
+
+\begin{figure}[p]
+\centering
+\includegraphics[width=\linewidth]{h2h_examples_worst_mse.png}
+\caption{Examples with the largest MSE disadvantage for refined \dreems. This
+deliberately unfavorable selection illustrates failure modes and does not
+summarize average performance.}
+\label{fig:h2h-worst}
+\end{figure}
+
+\subsection{DREEMS reduced the cost of repeated analyses}
+
+Across 511 process-pool benchmark cases, median complete \dreems time was
+8.4 s and the 95th percentile was 25.8 s. Median \feems LOO selection plus
+final refit was 151.6 s and its 95th percentile was 1,365.6 s
+(Table~\ref{tab:runtime}). The median paired runtime ratio was 16.4 and the
+geometric mean ratio was 14.8. These timings favor \feems computationally:
+its folds used a process pool of up to 16 workers, whereas \dreems used two
+CPU threads. Even so, \feems runtime increased sharply with the number of
+observed demes because each deme creates another cross-validation fold
+(Figure~\ref{fig:runtime}).
+
+One example with 384 observed demes was run with a separate Snakemake job for
+every fold. Its ideal compute critical path was 333.9 s, but the folds used
+75,904.9 aggregate CPU-seconds before the final refit
+(Table~\ref{tab:runtime-atomized}). Parallel execution can reduce latency, but
+it does not remove the computational work of cross-validation.
+
+\begin{table}[t]
+\centering
+\caption{Executed runtime protocols for the 511 process-pool cases.
+Parallelism was not matched and favors \feems.}
+\label{tab:runtime}
+\small
+\input{tables/runtime_overall.tex}
+\end{table}
+
+\begin{table}[t]
+\centering
+\caption{Resource accounting for the separately atomized 384-fold \feems
+example. Worker-seconds sum wall time over concurrent jobs.}
+\label{tab:runtime-atomized}
+\small
+\input{tables/runtime_atomized.tex}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.94\linewidth]{runtime_scaling.pdf}
+\caption{Measured runtime for the process-pool benchmark cases. Complete
+elapsed time is shown against graph size (left), together with the paired
+\feems-to-\dreems runtime ratio (right).}
+\label{fig:runtime}
+\end{figure}
+
+\subsection{Predictive uncertainty identified difficult graphs}
+
+We calibrated the network's predictive standard deviation on independent
+simulations. On a separate 1,024-graph verification set, graph-balanced
+coverage was 0.600, 0.857, and 0.957 for nominal 50\%, 80\%, and 95\%
+intervals (Table~\ref{tab:calibration}). The 95\% interval was close to nominal
+for sparse (0.951) and intermediate (0.949) graphs and conservative for the
+dense group (0.983). The lower-level intervals overcovered overall.
+
+Predictive SD was most informative about broad difficulty
+(Table~\ref{tab:uncertainty}; Figure~\ref{fig:calibration}). Mean SD across a
+graph had Spearman correlation 0.730 with graph MSE. At the edge level, SD had
+pooled correlation 0.355 with absolute error. Mean within-graph correlation
+was 0.203 and was positive in 86.3\% of graphs. Edge MSE increased from 0.127
+in the lowest-SD quintile to 0.955 in the highest. The uncertainty estimate
+therefore distinguishes easy from difficult graphs better than it pinpoints
+every erroneous edge.
+
+The covariance refinement changes the point estimate but does not update the
+network SD. On the 512-landscape benchmark, centering the calibrated intervals
+on the refined estimate gave 50\%, 80\%, and 95\% coverage of 0.579, 0.856,
+and 0.963. These remain predictive intervals learned from simulations, not a
+posterior distribution conditional on the refinement objective.
+
+\begin{table}[t]
+\centering
+\caption{Marginal predictive-interval coverage. Verification graphs were not
+used to fit or select the calibrator.}
+\label{tab:calibration}
+\small
+\input{tables/calibration.tex}
+\end{table}
+
+\begin{table}[t]
+\centering
+\caption{Association between calibrated predictive SD and refined edge error
+on 1,056,285 edges from the 512 global-landscape examples.}
+\label{tab:uncertainty}
+\small
+\input{tables/uncertainty_utility.tex}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.94\linewidth]{calibration_utility.pdf}
+\caption{Calibration and utility of predictive SD. Coverage is averaged by
+graph. Error summaries use the refined mean and the unchanged calibrated
+neural SD.}
+\label{fig:calibration}
+\end{figure}
+
+\subsection{Application to empirical datasets}
+
+We applied the same checkpoint without retraining to 15 public datasets
+(Table~\ref{tab:empirical}). They span vertebrates, invertebrates, and plants,
+with graphs containing 193--4,371 nodes. Fourteen analyses completed in
+7.3--16.3 s; the largest sampled-node case, horseweed with 281 observed nodes,
+took 161.0 s. The resulting surfaces showed broad geographic structure and
+localized low-conductance regions in several taxa
+(Figure~\ref{fig:empirical-dreems}). Because the true migration surfaces are
+unknown, these analyses establish that the interface and checkpoint operate
+across diverse public data, not that each inferred feature is correct.
+
+For six examples, we placed the \dreems result next to a published EEMS,
+\feems, or study figure (Figure~\ref{fig:empirical-published}). Several broad
+patterns were visually similar, but local structure and amplitude often
+differed. These panels are qualitative: the original studies can use different
+variant filters, graphs, regularization, models, and rendering. We therefore
+do not report numerical comparisons with the published images.
+
+\begin{table}[p]
+\centering
+\caption{Public empirical datasets analyzed with one checkpoint. Obs. is the
+number of graph nodes containing samples.}
+\label{tab:empirical}
+\scriptsize
+\input{tables/empirical_datasets.tex}
+\end{table}
+
+\begin{figure}[p]
+\centering
+\includegraphics[width=\linewidth]{empirical_dreems_gallery.pdf}
+\caption{Selected empirical \dreems surfaces. Blue indicates higher and red
+lower centered relative migration; white is near the graph mean. Maps and
+contours interpolate edge estimates for display only.}
+\label{fig:empirical-dreems}
+\end{figure}
+
+\begin{figure}[p]
+\centering
+\includegraphics[width=\linewidth,height=0.82\textheight,keepaspectratio]{empirical_published_comparison.pdf}
+\caption{Qualitative comparison with published FEEMS/EEMS or study figures.
+Rows need not share graph, filtering, model, tuning, scale, or rendering, so
+no numerical comparison is implied.}
+\label{fig:empirical-published}
+\end{figure}
+
+\subsection{North American gray wolves exposed an empirical limitation}
+
+The North American gray-wolf dataset provides a useful empirical test because
+it was analyzed in the original \feems study and is distributed with its
+software \citep{schweizer2016wolves,marcus2021feems}. The common-MAF-filtered
+data contain 111 samples and 17,729 SNPs assigned to 94 of 1,207 graph nodes.
+We ran \dreems and the documented 94-fold \feems procedure on this same graph
+and genotype matrix.
+
+The neural \dreems surface fit the off-diagonal covariance with correlation
+0.672 and $R^2=0.477$. Refinement increased these values to 0.799 and 0.655.
+\feems reached 0.892 and 0.775 (Table~\ref{tab:wolf}). The refined \dreems and
+\feems edge fields had correlation 0.696, but the \dreems field had lower
+edge-log standard deviation (0.784 compared with 1.131).
+
+The difference is visible on the map (Figure~\ref{fig:wolf}). \feems placed a
+strong low-conductance region across Hudson Bay and sharper contrasts along
+coastlines. Refinement moved \dreems in the same direction relative to the
+neural estimate, but its mean centered edge log-conductance in the broad
+Hudson Bay region was $-0.074$, compared with $-0.557$ for \feems. The graph
+size is within the training range, but only 7.8\% of nodes contain samples and
+the real covariance need not follow the simulated demographic distribution.
+
+\begin{table}[t]
+\centering
+\caption{North American gray-wolf diagnostics. Edge correlation is relative
+to the \feems field, not to unknown truth. Hudson mean is a descriptive
+centered edge-log average over a fixed bounding region.}
+\label{tab:wolf}
+\scriptsize
+\input{tables/wolf_empirical.tex}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{wolf_comparison.pdf}
+\caption{North American gray-wolf surfaces using the packaged graph and the
+same common-MAF-filtered data. Refined \dreems is shown at left and \feems,
+selected by documented joint LOO cross-validation, at right.}
+\label{fig:wolf}
+\end{figure}
+
+\clearpage
+\section{Discussion}
+
+\dreems provides a fast way to estimate effective migration surfaces from
+genetic covariance. On 512 simulated landscapes, the refined estimate was
+more accurate on average than \feems run with joint leave-one-deme-out
+selection of migration and local-drift penalties. The advantage persisted in
+the sparsely sampled group and across the tested range of graph sizes. Once
+trained, one checkpoint could also be applied to 15 public datasets without a
+new hyperparameter search.
+
+The comparison measures two different ways of regularizing a difficult
+inverse problem. \feems chooses a smooth surface separately for each dataset.
+\dreems learns regularities across many simulated graphs and reuses them. More
+than half of the training corpus was generated by the same global-landscape
+meta-procedure as the synthetic benchmark, although every benchmark graph,
+surface, sampling design, and random seed was new. The simulation result is
+therefore evidence for amortization over this family, not a guarantee under an
+arbitrary demographic model.
+
+Several components helped make the learned estimate useful across graphs. The
+linearized resistance calculation gives every observed pair a way to inform
+edges that carry current between them. Diffusion bands retain genetic and
+sampling patterns at several graph scales instead of relying only on repeated
+local message passing. Graph-wide attention supplies long-range context. The
+representation is also invariant to translation, rotation, reflection,
+uniform scale, and node relabeling. This last property prevents the drawing of
+a graph from creating a preferred migration direction.
+
+The fixed covariance refinement combines the speed of a neural prediction
+with a small amount of dataset-specific correction. It improved covariance fit
+substantially and edge recovery modestly. The trust region is important because
+many edge surfaces can explain a sparse observed covariance. Optimizing the
+forward fit without this restriction can move toward a statistically similar
+but spatially incorrect surface. Training through the refinement is possible
+in principle, but would require a separate experiment to show that its added
+cost improves generalization.
+
+Predictive uncertainty supplies another diagnostic. After calibration, 95\%
+marginal intervals had nearly nominal coverage on independent simulations,
+and mean SD distinguished difficult from easy graphs. Local edge ranking was
+weaker, and the factorized predictor does not describe dependence among edge
+errors. The intervals also retain the neural SD after covariance refinement.
+They should be read as simulation-based warning measures rather than Bayesian
+credible intervals for an empirical dataset.
+
+The wolf analysis illustrates the central limitation. \dreems was competitive
+on the simulated landscape benchmark, yet \feems fit the empirical wolf
+covariance better and recovered stronger structure around Hudson Bay. \dreems
+receives no water or elevation layer, so it can recover a shoreline only when
+genetic covariance, sample placement, graph geometry, and its learned prior
+support that interpretation. The weaker wolf result suggests that this
+combination of sparse sampling, geographic scale, and demographic history is
+not fully represented by the training distribution.
+
+Other limitations follow from the model itself. Relative effective migration
+is not an identified contemporary migration rate. The present checkpoint
+assumes a connected undirected graph, diploid simulations, and covariance from
+common variants. It has not been validated for directional migration, strong
+linkage, rare-variant summaries, polyploid genotypes, or graphs substantially
+larger than those used in training. Interpolated maps can also appear more
+continuous and geographically precise than the underlying edge estimates.
+
+We therefore view \dreems as a rapid first analysis rather than a substitute
+for scrutiny of the data and graph. Its clearest use is exploratory work across
+many datasets or sensitivity analyses that would make repeated
+cross-validation costly. For strong empirical claims, users should examine
+covariance fit, predictive uncertainty, graph construction, and variant
+filtering, and compare with a dataset-specific fit when the inferred surface
+is unstable or biologically implausible.
+
+\section{Materials and methods}
+
+\input{methods.tex}
+
+\section*{Data and code availability}
+
+The software includes the Equinox checkpoint, an xarray-based Python API,
+command-line entry points, the Rust simulator, tests, and Snakemake workflows
+for corpus generation, training, calibration, \feems comparison, and figure
+construction. The exact checkpoint SHA-256 is
+\texttt{f0b677d2cc028252002d15fac843ca7347b1b352eb2286a18bd202b724aa92b4}.
+The manuscript release manifest records hashes for the checkpoint, benchmark
+rows, training history, calibration report, empirical provenance, tables,
+figures, and PDF. Public-data source URLs and dataset-specific quality-control
+steps are stored in the empirical manifest.
+
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\end{document}
