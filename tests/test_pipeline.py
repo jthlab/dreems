@@ -190,6 +190,36 @@ def test_simulation_defaults_use_maf_conditioned_island_markers() -> None:
     assert sim["island_max_allele_frequency"] == 0.95
 
 
+def test_num_snps_log_bins_are_balanced_and_log_uniform() -> None:
+    bins = [[50, 128], [129, 512], [513, 2_000], [2_001, 10_000], [10_001, 50_000]]
+    sim = simulation_config.simulation_config(
+        {"simulation": {"num_snps_log_bins": bins}}
+    )
+    rng = np.random.default_rng(29)
+    draws = np.asarray(
+        [simulation_config.draw_num_snps(rng, sim) for _ in range(50_000)]
+    )
+
+    counts = np.asarray(
+        [np.sum((draws >= low) & (draws <= high)) for low, high in bins]
+    )
+    np.testing.assert_allclose(counts / draws.size, 0.2, atol=0.01)
+    for low, high in bins:
+        values = draws[(draws >= low) & (draws <= high)]
+        assert np.isclose(np.median(np.log(values)), np.log(np.sqrt(low * high)), atol=0.04)
+
+
+@pytest.mark.parametrize(
+    "bins",
+    [[], [[0, 10]], [[20, 10]], [[10]], "10-20"],
+)
+def test_num_snps_log_bins_reject_invalid_ranges(bins) -> None:
+    with pytest.raises(ValueError, match="SNP bins|num_snps_log_bins"):
+        simulation_config.simulation_config(
+            {"simulation": {"num_snps_log_bins": bins}}
+        )
+
+
 def test_feems_lattice_and_reference_surfaces_match_feems_protocol() -> None:
     graph, positions = geography.feems_triangular_lattice_graph(8, 12)
     assert positions.shape == (96, 2)

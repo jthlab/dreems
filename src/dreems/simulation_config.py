@@ -108,6 +108,7 @@ def simulation_config(config: Mapping[str, Any]) -> dict[str, Any]:
         "num_snps": 4000,
         "min_num_snps": None,
         "max_num_snps": None,
+        "num_snps_log_bins": None,
         "sample_designs": ["sites"],
         "sample_regimes": None,
         "sampling_counterfactual_modes": None,
@@ -211,6 +212,27 @@ def simulation_config(config: Mapping[str, Any]) -> dict[str, Any]:
     barrier_quantile = float(defaults["sampling_barrier_quantile"])
     if not 0.0 < barrier_quantile < 1.0:
         raise ValueError("sampling_barrier_quantile must lie strictly between zero and one")
+    raw_snp_bins = defaults["num_snps_log_bins"]
+    if raw_snp_bins is not None:
+        if isinstance(raw_snp_bins, (str, bytes)) or not isinstance(raw_snp_bins, Sequence):
+            raise ValueError("simulation.num_snps_log_bins must be a sequence of [low, high] pairs")
+        snp_bins: list[list[int]] = []
+        for raw_bin in raw_snp_bins:
+            if isinstance(raw_bin, (str, bytes)) or not isinstance(raw_bin, Sequence):
+                raise ValueError(
+                    "simulation.num_snps_log_bins must be a sequence of [low, high] pairs"
+                )
+            if len(raw_bin) != 2:
+                raise ValueError(
+                    "simulation.num_snps_log_bins must be a sequence of [low, high] pairs"
+                )
+            low, high = (int(raw_bin[0]), int(raw_bin[1]))
+            if low <= 0 or high < low:
+                raise ValueError("SNP bins must satisfy 0 < low <= high")
+            snp_bins.append([low, high])
+        if not snp_bins:
+            raise ValueError("simulation.num_snps_log_bins cannot be empty")
+        defaults["num_snps_log_bins"] = snp_bins
     return defaults
 
 
@@ -322,6 +344,19 @@ def draw_float_range(
 
 
 def draw_num_snps(rng: np.random.Generator, sim: Mapping[str, Any]) -> int:
+    bins = sim.get("num_snps_log_bins")
+    if bins:
+        position = float(rng.random()) * len(bins)
+        bin_index = min(int(position), len(bins) - 1)
+        within_bin = position - bin_index
+        low, high = bins[bin_index]
+        low = int(low)
+        high = int(high)
+        if low == high:
+            return low
+        log_value = np.log(low) + within_bin * (np.log(high + 1) - np.log(low))
+        value = int(np.floor(np.exp(log_value)))
+        return int(np.clip(value, low, high))
     if sim.get("min_num_snps") is not None and sim.get("max_num_snps") is not None:
         low = min(int(sim["min_num_snps"]), int(sim["max_num_snps"]))
         high = max(int(sim["min_num_snps"]), int(sim["max_num_snps"]))

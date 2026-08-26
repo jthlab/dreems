@@ -14,6 +14,7 @@ from dreems import pipeline
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PRODUCTION_CONFIG = REPO_ROOT / "workflow" / "config.production.yaml"
 EXAMPLE_CONFIG = REPO_ROOT / "workflow" / "config.example.yaml"
+SNP_RANGE_CONFIG = REPO_ROOT / "workflow" / "config.snp_range_experiment.yaml"
 CALIBRATION_CONFIG = REPO_ROOT / "workflow" / "config.calibration.yaml"
 RELEASED_CHECKPOINT = REPO_ROOT / "src" / "dreems" / "data" / "dreems_diffusion_bands.dreems.zip"
 RELEASED_CHECKPOINT_SHA256 = "f0b677d2cc028252002d15fac843ca7347b1b352eb2286a18bd202b724aa92b4"
@@ -122,6 +123,30 @@ def test_production_corpus_contract() -> None:
         "grid": 0.1248,
     }
     assert simulation["global_landscape_target_node_choices"] == [220, 450, 900, 1400]
+
+
+def test_snp_range_experiment_matches_production_except_snp_distribution() -> None:
+    production = load_yaml(PRODUCTION_CONFIG)
+    experiment = load_yaml(SNP_RANGE_CONFIG)
+
+    assert experiment["train_examples"] == production["train_examples"]
+    assert experiment["test_examples"] == production["test_examples"]
+    assert experiment["dreems"] == production["dreems"]
+    expected_simulation = dict(production["simulation"])
+    expected_simulation.update(
+        {
+            "min_num_snps": None,
+            "max_num_snps": None,
+            "num_snps_log_bins": [
+                [50, 128],
+                [129, 512],
+                [513, 2_000],
+                [2_001, 10_000],
+                [10_001, 50_000],
+            ],
+        }
+    )
+    assert experiment["simulation"] == expected_simulation
 
 
 def test_example_config_preserves_production_model_and_conditioning() -> None:
