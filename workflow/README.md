@@ -189,6 +189,40 @@ DREEMS_RUN_ROOT=/scratch/jonth_root/jonth1/jonth/dreems/topology_diffusion_bands
 workflow/run_great_lakes.sh
 ```
 
+## Broad SNP-Count Retraining
+
+`config.snp_range_experiment.yaml` retrains DREEMS from scratch on the same
+graphs, migration surfaces, sampling designs, architecture, and loss as the
+released model. It changes only the SNP-count distribution. The five ranges
+below receive equal numbers of examples, with counts drawn log-uniformly inside
+each range:
+
+```text
+50-128
+129-512
+513-2,000
+2,001-10,000
+10,001-50,000
+```
+
+The released corpus used 2,000-10,000 SNPs. This experiment tests whether
+DREEMS can learn the much stronger finite-SNP noise found in small datasets
+while extending to roughly the number of independent SNPs available in the
+human genome. Existing training examples cannot be downsampled exactly because
+they retain only the final covariance, not individual genotype columns. The
+new covariance corpus must therefore be simulated.
+
+On Great Lakes, launch the experiment with the Rust simulator required:
+
+```bash
+DREEMS_BUILD_RUST=1 \
+DREEMS_CONFIG=workflow/config.snp_range_experiment.yaml \
+DREEMS_RUN_ROOT=/scratch/jonth_root/jonth1/jonth/dreems_snp_range \
+sbatch workflow/run_great_lakes.sh
+```
+
+The production config and released checkpoint remain unchanged.
+
 The controller uses Slurm account `jonth0`. The production workflow requires
 61,440 independent training simulations and 4,096 independent test simulations;
 do not launch it as a smoke test. Paths and scheduler resources may
