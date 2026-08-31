@@ -56,6 +56,7 @@ class DREEMSPrediction:
     raw_edge_sd: list[np.ndarray]
     node_log_q_mean: list[np.ndarray]
     node_log_q_sd: list[np.ndarray]
+    surface_weight: list[float]
     checkpoint: DREEMSCheckpoint
 
 
@@ -121,6 +122,16 @@ def model_from_metadata(model: dict[str, Any]) -> dreems_model.DREEMS:
         hidden_channels=int(architecture["hidden_channels"]),
         layers=int(architecture["layers"]),
         context_layers=int(context_layers),
+        initializer_gate=bool(
+            architecture.get(
+                "initializer_gate",
+                architecture.get("kind") == "diffusion_band_initializer_gate_v2",
+            )
+        ),
+        surface_gate=(
+            bool(architecture.get("surface_gate", False))
+            or architecture.get("kind") == "diffusion_band_surface_gate_v3"
+        ),
     )
 
 
@@ -157,12 +168,14 @@ def predict_examples(
     )
     prepared = features.apply_normalization(prepared, loaded.normalization)
     arrays = features.pad_examples(prepared)
-    edge_mean, edge_logvar, q_mean, q_logvar = dreems_model.predict(
-        loaded.params,
-        arrays,
-        y_scale=float(loaded.normalization["y_scale"]),
-        q_y_scale=float(loaded.normalization["q_y_scale"]),
-        model=model,
+    edge_mean, edge_logvar, q_mean, q_logvar, surface_weight = (
+        dreems_model.predict_with_diagnostics(
+            loaded.params,
+            arrays,
+            y_scale=float(loaded.normalization["y_scale"]),
+            q_y_scale=float(loaded.normalization["q_y_scale"]),
+            model=model,
+        )
     )
     means: list[np.ndarray] = []
     sds: list[np.ndarray] = []
@@ -192,6 +205,7 @@ def predict_examples(
         raw_edge_sd=raw_sds,
         node_log_q_mean=q_means,
         node_log_q_sd=q_sds,
+        surface_weight=[float(value) for value in np.asarray(surface_weight)],
         checkpoint=loaded,
     )
 

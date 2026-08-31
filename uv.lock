@@ -620,7 +620,7 @@ wheels = [
 
 [[package]]
 name = "dreems"
-version = "0.1.1"
+version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "beartype" },
@@ -668,6 +668,7 @@ rust = [
 ]
 workflow = [
     { name = "cartopy" },
+    { name = "matplotlib" },
     { name = "pyproj" },
     { name = "shapely" },
     { name = "snakemake" },
@@ -712,6 +713,7 @@ notebook = [
 rust = [{ name = "maturin", specifier = ">=1.7,<2" }]
 workflow = [
     { name = "cartopy", specifier = ">=0.24" },
+    { name = "matplotlib", specifier = ">=3.9" },
     { name = "pyproj", specifier = ">=3.7" },
     { name = "shapely", specifier = ">=2.0" },
     { name = "snakemake", specifier = ">=9.0.0" },

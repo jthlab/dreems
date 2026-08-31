@@ -1,5 +1,5 @@
-# Full retraining experiment spanning 50 to 50,000 effective independent SNPs.
-# The released production recipe remains unchanged in config.production.yaml.
+# Full retraining experiment spanning 50 to 10,000 effective independent SNPs.
+# The graph-balanced base recipe is recorded in config.production.yaml.
 outdir: results/dreems_snp_range_experiment
 uv_cache_dir: null
 uv_run_args: --frozen --no-sync
@@ -80,7 +80,7 @@ simulation:
   island_marker_model: conditioned_random_marker
   island_min_allele_frequency: 0.05
   island_max_allele_frequency: 0.95
-  # Equal representation of five information regimes; draws are log-uniform
+  # Equal representation of four information regimes; draws are log-uniform
   # within each inclusive range. Counts mean effective independent SNPs.
   num_snps: 4000
   min_num_snps: null
@@ -90,7 +90,6 @@ simulation:
     - [129, 512]
     - [513, 2000]
     - [2001, 10000]
-    - [10001, 50000]
 
   # These are the actual marginal proportions used by the base run. The
   # historical pipeline expressed the same mixture as sequential conditional

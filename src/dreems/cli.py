@@ -59,6 +59,7 @@ def write_diagnostics(path: Path, result: DREEMSResult) -> None:
     payload = {
         "metadata": dict(result.metadata),
         "refinement": result.refinement_diagnostics,
+        "surface_weight": result.surface_weight,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True, default=json_default) + "\n")
@@ -143,7 +144,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help=(
             "DREEMS checkpoint for neural inference. Defaults to the packaged "
-            "diffusion-band checkpoint."
+            "diffusion-band model with learned homogeneous-surface shrinkage."
         ),
     )
     parser.add_argument("--covariance", type=Path, help="Sample covariance matrix, .npy or CSV.")

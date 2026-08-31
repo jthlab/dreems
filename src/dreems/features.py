@@ -997,6 +997,16 @@ def prepare_examples(
                 "edges": edges,
                 "y": y,
                 "q": q,
+                "sampled_node_fraction": np.asarray(
+                    np.unique(
+                        example_sample_nodes(
+                            example,
+                            np.asarray(example["active_positions"], dtype=np.float64),
+                        )
+                    ).size
+                    / max(node_x.shape[0], 1),
+                    dtype=np.float32,
+                ),
             }
         )
     return out
@@ -1016,15 +1026,64 @@ def apply_normalization(
     for item in items:
         y = item["y"] - float(item["y"].mean())
         q = item["q"] - float(item["q"].mean())
-        out.append(
-            {
-                "node_x": ((item["node_x"] - node_mean) / node_std).astype(np.float32),
-                "edge_x": ((item["edge_x"] - edge_mean) / edge_std).astype(np.float32),
-                "edges": item["edges"],
-                "y": (y / y_scale).astype(np.float32),
-                "q": (q / q_y_scale).astype(np.float32),
-            }
+        edge_count = int(np.asarray(item["edges"]).shape[0])
+        initializer_values = np.asarray(
+            item.get(
+                "linearized_resistance_edge_log",
+                np.zeros(edge_count, dtype=np.float32),
+            ),
+            dtype=np.float64,
         )
+        initializer_valid = np.asarray(
+            item.get(
+                "linearized_resistance_valid",
+                np.zeros(edge_count, dtype=np.float32),
+            ),
+            dtype=np.float32,
+        )
+        if initializer_values.shape != (edge_count,) or initializer_valid.shape != (edge_count,):
+            raise ValueError("linearized initializer fields must match the number of edges")
+        finite_valid = (initializer_valid > 0.0) & np.isfinite(initializer_values)
+        initializer_valid = finite_valid.astype(np.float32)
+        if np.any(finite_valid):
+            initializer_center = float(np.mean(initializer_values[finite_valid]))
+            initializer = np.where(
+                finite_valid,
+                initializer_values - initializer_center,
+                0.0,
+            )
+        else:
+            initializer = np.zeros((edge_count,), dtype=np.float64)
+        normalized: dict[str, np.ndarray] = {
+            "node_x": ((item["node_x"] - node_mean) / node_std).astype(np.float32),
+            "edge_x": ((item["edge_x"] - edge_mean) / edge_std).astype(np.float32),
+            "edges": item["edges"],
+            "y": (y / y_scale).astype(np.float32),
+            "q": (q / q_y_scale).astype(np.float32),
+            "edge_initializer": (initializer / y_scale).astype(np.float32),
+            "edge_initializer_valid": initializer_valid,
+        }
+        if "counterfactual_group" in item:
+            normalized["counterfactual_group"] = np.asarray(
+                item["counterfactual_group"],
+                dtype=np.int32,
+            )
+        if "counterfactual_anchor" in item:
+            normalized["counterfactual_anchor"] = np.asarray(
+                item["counterfactual_anchor"],
+                dtype=np.float32,
+            )
+        if "counterfactual_mask" in item:
+            normalized["counterfactual_mask"] = np.asarray(
+                item["counterfactual_mask"],
+                dtype=np.int32,
+            )
+        if "sampled_node_fraction" in item:
+            normalized["sampled_node_fraction"] = np.asarray(
+                item["sampled_node_fraction"],
+                dtype=np.float32,
+            )
+        out.append(normalized)
     return out
 
 
@@ -1080,6 +1139,12 @@ def pad_examples(
     q = np.zeros((batch, max_nodes), dtype=np.float32)
     node_mask = np.zeros((batch, max_nodes), dtype=np.float32)
     edge_mask = np.zeros((batch, max_edges), dtype=np.float32)
+    edge_initializer = np.zeros((batch, max_edges), dtype=np.float32)
+    edge_initializer_valid = np.zeros((batch, max_edges), dtype=np.float32)
+    counterfactual_group = np.full((batch,), -1, dtype=np.int32)
+    counterfactual_anchor = np.zeros((batch,), dtype=np.float32)
+    counterfactual_mask = np.full((batch,), -1, dtype=np.int32)
+    sampled_node_fraction = np.full((batch,), np.nan, dtype=np.float32)
     for index, item in enumerate(items):
         n = item["node_x"].shape[0]
         e = item["edges"].shape[0]
@@ -1090,6 +1155,18 @@ def pad_examples(
         q[index, :n] = item["q"]
         node_mask[index, :n] = 1.0
         edge_mask[index, :e] = 1.0
+        if "edge_initializer" in item:
+            edge_initializer[index, :e] = item["edge_initializer"]
+        if "edge_initializer_valid" in item:
+            edge_initializer_valid[index, :e] = item["edge_initializer_valid"]
+        if "counterfactual_group" in item:
+            counterfactual_group[index] = int(np.asarray(item["counterfactual_group"]))
+        if "counterfactual_anchor" in item:
+            counterfactual_anchor[index] = float(np.asarray(item["counterfactual_anchor"]))
+        if "counterfactual_mask" in item:
+            counterfactual_mask[index] = int(np.asarray(item["counterfactual_mask"]))
+        if "sampled_node_fraction" in item:
+            sampled_node_fraction[index] = float(np.asarray(item["sampled_node_fraction"]))
     return {
         "node_x": node_x,
         "edge_x": edge_x,
@@ -1098,6 +1175,12 @@ def pad_examples(
         "q": q,
         "node_mask": node_mask,
         "edge_mask": edge_mask,
+        "edge_initializer": edge_initializer,
+        "edge_initializer_valid": edge_initializer_valid,
+        "counterfactual_group": counterfactual_group,
+        "counterfactual_anchor": counterfactual_anchor,
+        "counterfactual_mask": counterfactual_mask,
+        "sampled_node_fraction": sampled_node_fraction,
     }
 
 

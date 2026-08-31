@@ -704,6 +704,117 @@ def draw_random_landscape_features(
     return features
 
 
+def draw_multiscale_surface(
+    rng: np.random.Generator,
+    local: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Draw a rotation-neutral mixture of smooth, regional, and local structure."""
+    features_per_band = max(int(local["gp_features"]) // 3, 8)
+    bands = []
+    for low, high in ((0.65, 1.25), (0.22, 0.55), (0.07, 0.20)):
+        length_scale = float(rng.uniform(low, high))
+        bands.append(
+            {
+                "field": draw_rff_params(
+                    rng,
+                    features_count=features_per_band,
+                    length_scale=length_scale,
+                ),
+                "length_scale": length_scale,
+                "weight": float(rng.uniform(0.55, 1.25)),
+            }
+        )
+
+    regions = []
+    for _ in range(int(rng.integers(1, 4))):
+        sign = float(rng.choice([-1.0, 1.0]))
+        length_scale = float(rng.uniform(0.18, 0.70))
+        regions.append(
+            {
+                "field": draw_rff_params(
+                    rng,
+                    features_count=features_per_band,
+                    length_scale=length_scale,
+                ),
+                "length_scale": length_scale,
+                "threshold": float(rng.uniform(-0.75, 0.75)),
+                "interior_strength": sign * float(rng.uniform(0.45, 1.55)),
+                "boundary_strength": (
+                    -float(rng.uniform(0.25, 1.10)) if rng.random() < 0.65 else 0.0
+                ),
+            }
+        )
+
+    primitives = []
+    for _ in range(int(rng.integers(1, 5))):
+        center_angle = float(rng.uniform(0.0, 2.0 * math.pi))
+        center_radius = float(math.sqrt(rng.uniform(0.0, 1.0)) * 0.72)
+        elongated = bool(rng.random() < 0.6)
+        if elongated:
+            along_scale = float(rng.uniform(0.30, 0.90))
+            across_scale = float(rng.uniform(0.035, 0.14))
+        else:
+            along_scale = float(rng.uniform(0.10, 0.34))
+            across_scale = float(rng.uniform(0.08, 0.30))
+        primitives.append(
+            {
+                "center": [
+                    center_radius * math.cos(center_angle),
+                    center_radius * math.sin(center_angle),
+                ],
+                "angle": float(rng.uniform(0.0, 2.0 * math.pi)),
+                "along_scale": along_scale,
+                "across_scale": across_scale,
+                "power": float(rng.choice([2.0, 4.0])),
+                "strength": float(rng.choice([-1.0, 1.0])) * float(rng.uniform(0.35, 1.45)),
+            }
+        )
+
+    return {
+        "kind": "multiscale",
+        "std": float(local["log_rate_std"]),
+        "bands": bands,
+        "regions": regions,
+        "primitives": primitives,
+    }
+
+
+def multiscale_edge_values(
+    surface: Mapping[str, Any],
+    positions: np.ndarray,
+    edges: np.ndarray,
+) -> np.ndarray:
+    left = edges[:, 0]
+    right = edges[:, 1]
+    node_values = np.zeros(positions.shape[0], dtype=np.float64)
+    for band in surface["bands"]:
+        node_values += float(band["weight"]) * eval_rff_params(band["field"], positions)
+    values = 0.5 * (node_values[left] + node_values[right])
+
+    # Thresholded random fields create irregular regions and sharp boundaries.
+    for region in surface["regions"]:
+        field = eval_rff_params(region["field"], positions)
+        inside = field >= float(region["threshold"])
+        interior = inside[left] & inside[right]
+        boundary = inside[left] != inside[right]
+        values += float(region["interior_strength"]) * interior
+        values += float(region["boundary_strength"]) * boundary
+
+    coords = scaled_positions(positions)
+    midpoint = 0.5 * (coords[left] + coords[right])
+    for primitive in surface["primitives"]:
+        angle = float(primitive["angle"])
+        along_vector = np.asarray([math.cos(angle), math.sin(angle)])
+        across_vector = np.asarray([-math.sin(angle), math.cos(angle)])
+        delta = midpoint - np.asarray(primitive["center"], dtype=np.float64)
+        along = np.abs(delta @ along_vector) / float(primitive["along_scale"])
+        across = np.abs(delta @ across_vector) / float(primitive["across_scale"])
+        power = float(primitive["power"])
+        profile = np.exp(-0.5 * (along**power + across**power))
+        values += float(primitive["strength"]) * profile
+    return values
+
+
 def landscape_edge_penalty(
     features: Sequence[Mapping[str, Any]],
     positions: np.ndarray,
@@ -777,6 +888,8 @@ def draw_surface(
             "corridor_w": float(local["feems_lattice_corridor_w"]),
             "anisotropy_scaler": float(local["feems_lattice_anisotropy_scaler"]),
         }
+    if kind == "multiscale":
+        return draw_multiscale_surface(rng, local)
     features_count = 8 if kind == "smooth" else int(local["gp_features"])
     length_scale = float(local["migration_gp_length_scale"])
     surface: dict[str, Any] = {
@@ -843,6 +956,10 @@ def edge_log_rates_from_surface(
             rates[horizontal] = float(surface["anisotropy_scaler"])
         logs = np.log(np.maximum(rates, 1e-12))
         return (logs - float(np.mean(logs))).astype(np.float32)
+
+    if kind == "multiscale":
+        values = multiscale_edge_values(surface, positions, edges)
+        return (standardize(values) * float(surface["std"])).astype(np.float32)
 
     node_field = eval_rff_params(surface["field"], positions)
     values = 0.5 * (node_field[left] + node_field[right])

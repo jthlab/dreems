@@ -1,0 +1,28 @@
+# Matched reporting for the learned null-surface gate. Every prediction and
+# FEEMS fit below already exists; this workflow only validates and visualizes
+# them together.
+outdir: /scratch/jonth_root/jonth0/jonth/dreems/surface_gate_comparison_20260831
+publish_dir: /home/jonth/turbo/dreems/surface_gate_comparison_20260831
+
+core_checkpoint: /home/jonth/turbo/dreems/sampling_robustness_20260830/dreems_sampling_robustness_candidate.dreems.zip
+gated_checkpoint: /home/jonth/turbo/dreems/null_surface_gate_20260831/dreems_null_surface_gate.dreems.zip
+
+core_scenario_bundle: /home/jonth/turbo/dreems/feems_scenarios_exact_h2h_20260830/notebook_edge_comparison.npz
+gated_scenario_pattern: /scratch/jonth_root/jonth0/jonth/dreems/null_surface_gate_20260831/evaluation/exact/example_{example}.npz
+
+broad_rows: /home/jonth/turbo/dreems/null_surface_gate_20260831/broad_rows.csv
+broad_report: /home/jonth/turbo/dreems/null_surface_gate_20260831/broad_report.json
+core_broad_pattern: /scratch/jonth_root/jonth0/jonth/dreems/sampling_robustness_h2h_20260830/work/dreems/example_{example}.npz
+gated_broad_pattern: /scratch/jonth_root/jonth0/jonth/dreems/null_surface_gate_broad_20260831/dreems/example_{example}.npz
+feems_broad_pattern: /scratch/jonth_root/jonth0/jonth/dreems/sampling_robustness_h2h_20260830/work/feems/example_{example}.npz
+example_count: 512
+
+uv_run_args: --frozen --no-sync
+analysis_threads: 2
+analysis_mem_mb: 12000
+analysis_runtime: 90m
+analysis_partition: standard
+notebook_threads: 2
+notebook_mem_mb: 8000
+notebook_runtime: 30m
+notebook_partition: standard

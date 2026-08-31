@@ -465,9 +465,25 @@ def draw_feems_lattice_sample_nodes(
         node_diploids[node] = diploids
         sample_nodes.extend([node] * diploids)
     sample_nodes_array = np.asarray(sample_nodes, dtype=np.int32)
+    uncapped_samples = int(sample_nodes_array.shape[0])
+    raw_sample_cap = local.get("max_samples")
+    if raw_sample_cap is not None:
+        sample_cap = max(int(raw_sample_cap), 2)
+        if sample_nodes_array.shape[0] > sample_cap:
+            keep = rng.choice(sample_nodes_array.shape[0], size=sample_cap, replace=False)
+            sample_nodes_array = sample_nodes_array[keep]
+            node_diploids = np.bincount(
+                sample_nodes_array,
+                minlength=positions.shape[0],
+            ).astype(np.int32)
+    else:
+        sample_cap = None
     metadata = {
         "feems_lattice_sample_prob": float(sample_prob),
         "feems_lattice_n_samples_per_node": int(n_samples_per_node),
+        "feems_lattice_uncapped_samples": uncapped_samples,
+        "feems_lattice_sample_cap": sample_cap,
+        "feems_lattice_samples_capped": bool(sample_nodes_array.shape[0] < uncapped_samples),
         "feems_lattice_barrier_prob": float(local["feems_lattice_barrier_prob"]),
         "feems_lattice_corridor_left_prob": float(local["feems_lattice_corridor_left_prob"]),
         "feems_lattice_corridor_right_prob": float(local["feems_lattice_corridor_right_prob"]),
@@ -496,14 +512,23 @@ def draw_feems_lattice_case(
         fallback=int(sim["feems_lattice_columns"]),
     )
     graph, positions = feems_triangular_lattice_graph(rows, columns)
+    reference_columns = max(int(sim["feems_lattice_columns"]), 2)
+    barrier_scale = (float(columns) - 0.5) / (float(reference_columns) - 0.5)
+    case_local = dict(local)
+    case_local["feems_lattice_barrier_startpt"] = (
+        float(local["feems_lattice_barrier_startpt"]) * barrier_scale
+    )
+    case_local["feems_lattice_barrier_endpt"] = (
+        float(local["feems_lattice_barrier_endpt"]) * barrier_scale
+    )
     surface_kind = choose_weighted_name(
         rng,
         string_list(sim.get("feems_lattice_surface_kinds")),
         sim.get("feems_lattice_surface_weights"),
     )
-    surface = draw_surface(rng, surface_kind=surface_kind, local=local)
+    surface = draw_surface(rng, surface_kind=surface_kind, local=case_local)
     q_surface = draw_q_surface(rng, local)
-    sample_nodes, sample_metadata = draw_feems_lattice_sample_nodes(rng, positions, local)
+    sample_nodes, sample_metadata = draw_feems_lattice_sample_nodes(rng, positions, case_local)
     return {
         "graph": graph,
         "active_positions": positions,
@@ -524,8 +549,8 @@ def draw_feems_lattice_case(
         "feems_lattice_training": True,
         "feems_lattice_rows": int(rows),
         "feems_lattice_columns": int(columns),
-        "feems_lattice_barrier_startpt": float(local["feems_lattice_barrier_startpt"]),
-        "feems_lattice_barrier_endpt": float(local["feems_lattice_barrier_endpt"]),
+        "feems_lattice_barrier_startpt": float(case_local["feems_lattice_barrier_startpt"]),
+        "feems_lattice_barrier_endpt": float(case_local["feems_lattice_barrier_endpt"]),
         "feems_lattice_barrier_w": float(local["feems_lattice_barrier_w"]),
         "feems_lattice_corridor_w": float(local["feems_lattice_corridor_w"]),
         "feems_lattice_anisotropy_scaler": float(local["feems_lattice_anisotropy_scaler"]),

@@ -27,13 +27,24 @@ def toy_training_arrays() -> dict[str, np.ndarray]:
     }
 
 
-def small_config(*, steps: int = 2, patience: int | None = None) -> train.DREEMSTrainConfig:
+def small_config(
+    *,
+    steps: int = 2,
+    patience: int | None = None,
+    initializer_gate: bool = False,
+    surface_gate: bool = False,
+    surface_gate_weight: float = 0.0,
+    trainable_scope: str = "all",
+) -> train.DREEMSTrainConfig:
     return train.DREEMSTrainConfig(
         architecture=train.DREEMSArchitectureConfig(
             hidden_channels=8,
             layers=1,
             context_layers=1,
+            initializer_gate=initializer_gate,
+            surface_gate=surface_gate,
         ),
+        loss=train.DREEMSLossConfig(surface_gate_weight=surface_gate_weight),
         optimizer=train.DREEMSOptimizerConfig(
             seed=11,
             steps=steps,
@@ -42,6 +53,7 @@ def small_config(*, steps: int = 2, patience: int | None = None) -> train.DREEMS
             log_every=1,
             early_stopping_patience=patience,
             early_stopping_min_delta=1e9 if patience is not None else 0.0,
+            trainable_scope=trainable_scope,
         ),
     )
 
@@ -64,6 +76,11 @@ def test_train_save_and_load_production_checkpoint(tmp_path) -> None:
         "validation_slope",
         "validation_correlation",
         "validation_orientation",
+        "validation_initializer_regret",
+        "validation_counterfactual_consistency",
+        "validation_surface_gate_bce",
+        "validation_surface_weight_mean",
+        "validation_neural_weight_mean",
     }
 
     normalization = {
@@ -96,6 +113,184 @@ def test_train_save_and_load_production_checkpoint(tmp_path) -> None:
     }
     assert loaded.model["edge_conditioner"]["method"] == "all_pair_diagonal_adjoint"
     assert loaded.payload["training_config"]["optimizer"]["learning_rate"] == 1e-3
+
+
+def test_gated_checkpoint_round_trip(tmp_path) -> None:
+    arrays = toy_training_arrays()
+    arrays["edge_initializer"] = np.zeros_like(arrays["y"])
+    arrays["edge_initializer_valid"] = np.ones_like(arrays["y"])
+    config = small_config(steps=1, initializer_gate=True)
+    result = train.train_from_arrays(arrays, config=config)
+    normalization = {
+        "node_mean": [0.0] * arrays["node_x"].shape[-1],
+        "node_std": [1.0] * arrays["node_x"].shape[-1],
+        "edge_mean": [0.0] * arrays["edge_x"].shape[-1],
+        "edge_std": [1.0] * arrays["edge_x"].shape[-1],
+        "y_scale": 1.0,
+        "q_y_scale": 1.0,
+    }
+    path = tmp_path / "gated.dreems.zip"
+    edge_sd_calibration = {
+        "schema_version": 1,
+        "method": "global",
+        "global_scale": 1.25,
+        "density_breaks": [0.1, 0.25],
+        "density_scales": [],
+    }
+
+    train.save_checkpoint(
+        path,
+        params=result.params,
+        normalization=normalization,
+        config=config,
+        train_losses=result.losses,
+        train_arrays=arrays,
+        edge_sd_calibration=edge_sd_calibration,
+    )
+    loaded = checkpoints.load_checkpoint(path)
+
+    assert loaded.model["architecture"]["kind"] == "diffusion_band_initializer_gate_v2"
+    assert loaded.payload["edge_sd_calibration"] == edge_sd_calibration
+    assert loaded.params.initializer_gate_hidden is not None
+    assert loaded.params.initializer_gate_out is not None
+    expected = model.apply_batch(
+        result.params, {key: jnp.asarray(value) for key, value in arrays.items()}
+    )
+    actual = model.apply_batch(
+        loaded.params, {key: jnp.asarray(value) for key, value in arrays.items()}
+    )
+    for expected_array, actual_array in zip(expected, actual, strict=True):
+        np.testing.assert_array_equal(actual_array, expected_array)
+
+
+def test_surface_gate_checkpoint_round_trip(tmp_path) -> None:
+    arrays = toy_training_arrays()
+    config = small_config(
+        steps=1,
+        initializer_gate=True,
+        surface_gate=True,
+        surface_gate_weight=1.0,
+    )
+    params = model.DREEMS(
+        jax.random.PRNGKey(15),
+        node_dim=arrays["node_x"].shape[-1],
+        edge_dim=arrays["edge_x"].shape[-1],
+        hidden_channels=8,
+        layers=1,
+        context_layers=1,
+        initializer_gate=True,
+        surface_gate=True,
+    )
+    normalization = {
+        "node_mean": [0.0] * arrays["node_x"].shape[-1],
+        "node_std": [1.0] * arrays["node_x"].shape[-1],
+        "edge_mean": [0.0] * arrays["edge_x"].shape[-1],
+        "edge_std": [1.0] * arrays["edge_x"].shape[-1],
+        "y_scale": 1.0,
+        "q_y_scale": 1.0,
+    }
+    path = tmp_path / "surface-gated.dreems.zip"
+    train.save_checkpoint(
+        path,
+        params=params,
+        normalization=normalization,
+        config=config,
+        train_losses=[],
+        train_arrays=arrays,
+    )
+
+    loaded = checkpoints.load_checkpoint(path)
+
+    assert loaded.model["architecture"]["kind"] == "diffusion_band_surface_gate_v3"
+    assert loaded.params.initializer_gate_hidden is not None
+    assert loaded.params.surface_gate_hidden is not None
+    batch = {key: jnp.asarray(value) for key, value in arrays.items()}
+    expected = model.apply_batch_with_diagnostics(params, batch)
+    actual = model.apply_batch_with_diagnostics(loaded.params, batch)
+    for expected_array, actual_array in zip(expected, actual, strict=True):
+        np.testing.assert_array_equal(actual_array, expected_array)
+
+
+def test_initializer_gate_blends_and_falls_back_to_neural_proposal() -> None:
+    arrays = toy_training_arrays()
+    batch = {key: jnp.asarray(value) for key, value in arrays.items()}
+    base = model.DREEMS(
+        jax.random.PRNGKey(17),
+        node_dim=arrays["node_x"].shape[-1],
+        edge_dim=arrays["edge_x"].shape[-1],
+        hidden_channels=8,
+        layers=1,
+        context_layers=1,
+    )
+    gated = model.add_initializer_gate(
+        base,
+        key=jax.random.PRNGKey(18),
+        node_dim=arrays["node_x"].shape[-1],
+        edge_dim=arrays["edge_x"].shape[-1],
+        hidden_channels=8,
+        layers=1,
+        context_layers=1,
+        initial_logit=0.0,
+    )
+    proposal = np.asarray(model.apply_batch(base, batch)[0])
+
+    invalid_batch = {
+        **batch,
+        "edge_initializer": jnp.full_like(batch["y"], jnp.nan),
+        "edge_initializer_valid": jnp.zeros_like(batch["y"]),
+    }
+    invalid_prediction, *_rest, invalid_weight = model.apply_batch_with_gate(
+        gated,
+        invalid_batch,
+    )
+    np.testing.assert_allclose(invalid_prediction, proposal, rtol=1e-6, atol=1e-6)
+    np.testing.assert_array_equal(invalid_weight, np.ones_like(proposal))
+
+    initializer = np.asarray(arrays["y"], dtype=np.float32)
+    initializer -= initializer.mean(axis=1, keepdims=True)
+    valid_batch = {
+        **batch,
+        "edge_initializer": jnp.asarray(initializer),
+        "edge_initializer_valid": jnp.ones_like(batch["y"]),
+    }
+    valid_prediction, *_rest, valid_weight = model.apply_batch_with_gate(gated, valid_batch)
+    np.testing.assert_allclose(valid_weight, 0.5, rtol=0.0, atol=1e-7)
+    np.testing.assert_allclose(
+        valid_prediction,
+        0.5 * (proposal + initializer),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+
+def test_surface_gate_only_scales_the_centered_surface() -> None:
+    arrays = toy_training_arrays()
+    batch = {key: jnp.asarray(value) for key, value in arrays.items()}
+    base = model.DREEMS(
+        jax.random.PRNGKey(41),
+        node_dim=arrays["node_x"].shape[-1],
+        edge_dim=arrays["edge_x"].shape[-1],
+        hidden_channels=8,
+        layers=1,
+        context_layers=1,
+    )
+    gated = model.add_surface_gate(
+        base,
+        key=jax.random.PRNGKey(42),
+        node_dim=arrays["node_x"].shape[-1],
+        edge_dim=arrays["edge_x"].shape[-1],
+        hidden_channels=8,
+        layers=1,
+        context_layers=1,
+        initial_logit=0.0,
+    )
+
+    baseline = np.asarray(model.apply_batch(base, batch)[0])
+    prediction, *_rest, surface_weight = model.apply_batch_with_diagnostics(gated, batch)
+
+    np.testing.assert_allclose(surface_weight, 0.5, rtol=0.0, atol=1e-7)
+    np.testing.assert_allclose(prediction, 0.5 * baseline, rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(np.mean(prediction, axis=1), 0.0, atol=1e-6)
 
 
 def test_train_from_arrays_stops_on_validation_plateau() -> None:
@@ -250,3 +445,93 @@ def test_model_is_equivariant_to_graph_representation() -> None:
             rtol=2e-5,
             atol=2e-5,
         )
+
+
+def test_gate_only_training_does_not_change_backbone() -> None:
+    arrays = toy_training_arrays()
+    arrays["edge_initializer"] = np.zeros_like(arrays["y"])
+    arrays["edge_initializer_valid"] = np.ones_like(arrays["y"])
+    arrays["counterfactual_group"] = np.full((arrays["y"].shape[0],), -1, dtype=np.int32)
+    arrays["counterfactual_anchor"] = np.zeros((arrays["y"].shape[0],), dtype=np.float32)
+    base = model.DREEMS(
+        jax.random.PRNGKey(31),
+        node_dim=arrays["node_x"].shape[-1],
+        edge_dim=arrays["edge_x"].shape[-1],
+        hidden_channels=8,
+        layers=1,
+        context_layers=1,
+    )
+    config = small_config(
+        steps=2,
+        initializer_gate=True,
+        trainable_scope="initializer_gate",
+    )
+
+    result = train.train_from_arrays(arrays, config=config, init_params=base)
+
+    assert result.params.initializer_gate_hidden is not None
+    assert result.params.initializer_gate_out is not None
+    core_fields = (
+        "input",
+        "self_layers",
+        "neigh_layers",
+        "context_self_layers",
+        "context_neigh_layers",
+        "fusion",
+        "context_edge_hidden",
+        "context_edge_out",
+        "global_query",
+        "global_key",
+        "global_value",
+        "edge_hidden",
+        "edge_out",
+        "edge_logvar_out",
+        "node_q_hidden",
+        "node_q_out",
+        "node_q_logvar_out",
+        "edge_feature_hidden",
+        "edge_feature_gate",
+        "edge_message_layers",
+        "edge_gate_layers",
+    )
+    for field in core_fields:
+        before = jax.tree_util.tree_leaves(getattr(base, field))
+        after = jax.tree_util.tree_leaves(getattr(result.params, field))
+        for before_leaf, after_leaf in zip(before, after, strict=True):
+            np.testing.assert_array_equal(after_leaf, before_leaf)
+
+
+def test_surface_gate_only_training_does_not_change_existing_model() -> None:
+    arrays = toy_training_arrays()
+    arrays["y"][0] = 0.0
+    base = model.DREEMS(
+        jax.random.PRNGKey(51),
+        node_dim=arrays["node_x"].shape[-1],
+        edge_dim=arrays["edge_x"].shape[-1],
+        hidden_channels=8,
+        layers=1,
+        context_layers=1,
+        initializer_gate=True,
+    )
+    config = small_config(
+        steps=2,
+        initializer_gate=True,
+        surface_gate=True,
+        surface_gate_weight=1.0,
+        trainable_scope="surface_gate",
+    )
+
+    result = train.train_from_arrays(arrays, config=config, init_params=base)
+
+    assert result.params.surface_gate_hidden is not None
+    assert result.params.surface_gate_out is not None
+    existing_fields = tuple(
+        field
+        for field in base.__dataclass_fields__
+        if field not in {"surface_gate_hidden", "surface_gate_out"}
+    )
+    for field in existing_fields:
+        before = jax.tree_util.tree_leaves(getattr(base, field))
+        after = jax.tree_util.tree_leaves(getattr(result.params, field))
+        for before_leaf, after_leaf in zip(before, after, strict=True):
+            np.testing.assert_array_equal(after_leaf, before_leaf)

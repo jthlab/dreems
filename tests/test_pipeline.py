@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 from dreems import (
+    calibration,
     checkpoints,
     coalescent,
     corpus,
@@ -32,6 +33,31 @@ def test_load_config_preserves_json_exponent_numbers(tmp_path) -> None:
     learning_rate = loaded["dreems"]["optimizer"]["learning_rate"]
     assert learning_rate == 5.0e-5
     assert isinstance(learning_rate, float)
+
+
+def test_normalization_sanitizes_invalid_linearized_initializer() -> None:
+    item = {
+        "node_x": np.zeros((2, 1), dtype=np.float32),
+        "edge_x": np.zeros((1, 2), dtype=np.float32),
+        "edges": np.asarray([[0, 1]], dtype=np.int32),
+        "y": np.zeros((1,), dtype=np.float32),
+        "q": np.zeros((2,), dtype=np.float32),
+        "linearized_resistance_edge_log": np.asarray([np.nan], dtype=np.float32),
+        "linearized_resistance_valid": np.asarray([0.0], dtype=np.float32),
+    }
+    stats = {
+        "node_mean": [0.0],
+        "node_std": [1.0],
+        "edge_mean": [0.0, 0.0],
+        "edge_std": [1.0, 1.0],
+        "y_scale": 1.0,
+        "q_y_scale": 1.0,
+    }
+
+    [normalized] = features.apply_normalization([item], stats)
+
+    np.testing.assert_array_equal(normalized["edge_initializer"], np.zeros(1))
+    np.testing.assert_array_equal(normalized["edge_initializer_valid"], np.zeros(1))
 
 
 def small_raw_example(offset: float = 0.0) -> dict[str, object]:
@@ -192,17 +218,11 @@ def test_simulation_defaults_use_maf_conditioned_island_markers() -> None:
 
 def test_num_snps_log_bins_are_balanced_and_log_uniform() -> None:
     bins = [[50, 128], [129, 512], [513, 2_000], [2_001, 10_000], [10_001, 50_000]]
-    sim = simulation_config.simulation_config(
-        {"simulation": {"num_snps_log_bins": bins}}
-    )
+    sim = simulation_config.simulation_config({"simulation": {"num_snps_log_bins": bins}})
     rng = np.random.default_rng(29)
-    draws = np.asarray(
-        [simulation_config.draw_num_snps(rng, sim) for _ in range(50_000)]
-    )
+    draws = np.asarray([simulation_config.draw_num_snps(rng, sim) for _ in range(50_000)])
 
-    counts = np.asarray(
-        [np.sum((draws >= low) & (draws <= high)) for low, high in bins]
-    )
+    counts = np.asarray([np.sum((draws >= low) & (draws <= high)) for low, high in bins])
     np.testing.assert_allclose(counts / draws.size, 0.2, atol=0.01)
     for low, high in bins:
         values = draws[(draws >= low) & (draws <= high)]
@@ -215,9 +235,7 @@ def test_num_snps_log_bins_are_balanced_and_log_uniform() -> None:
 )
 def test_num_snps_log_bins_reject_invalid_ranges(bins) -> None:
     with pytest.raises(ValueError, match="SNP bins|num_snps_log_bins"):
-        simulation_config.simulation_config(
-            {"simulation": {"num_snps_log_bins": bins}}
-        )
+        simulation_config.simulation_config({"simulation": {"num_snps_log_bins": bins}})
 
 
 def test_feems_lattice_and_reference_surfaces_match_feems_protocol() -> None:
@@ -239,6 +257,70 @@ def test_feems_lattice_and_reference_surfaces_match_feems_protocol() -> None:
             graph["edges"],
         )
         assert np.isclose(float(np.ptp(log_rates)), np.log(5.0), atol=1e-6)
+
+
+def test_multiscale_surface_is_reproducible_and_normalized() -> None:
+    graph, positions = geography.masked_grid_graph(np.ones((14, 17), dtype=bool))
+    sim = simulation_config.simulation_config({})
+    local = simulation_config.local_simulation_parameters(np.random.default_rng(3), sim)
+    local["log_rate_std"] = 1.25
+
+    surface = geography.draw_surface(
+        np.random.default_rng(41),
+        surface_kind="multiscale",
+        local=local,
+    )
+    repeated = geography.draw_surface(
+        np.random.default_rng(41),
+        surface_kind="multiscale",
+        local=local,
+    )
+    rates = geography.edge_log_rates_from_surface(surface, positions, graph["edges"])
+    repeated_rates = geography.edge_log_rates_from_surface(
+        repeated,
+        positions,
+        graph["edges"],
+    )
+
+    assert [band["length_scale"] for band in surface["bands"]] == pytest.approx(
+        [band["length_scale"] for band in repeated["bands"]]
+    )
+    assert len(surface["bands"]) == 3
+    assert 1 <= len(surface["regions"]) <= 3
+    assert 1 <= len(surface["primitives"]) <= 4
+    assert 0.65 <= surface["bands"][0]["length_scale"] <= 1.25
+    assert 0.22 <= surface["bands"][1]["length_scale"] <= 0.55
+    assert 0.07 <= surface["bands"][2]["length_scale"] <= 0.20
+    np.testing.assert_array_equal(rates, repeated_rates)
+    assert np.isclose(float(np.mean(rates)), 0.0, atol=1e-6)
+    assert np.isclose(float(np.std(rates)), 1.25, atol=1e-6)
+
+
+def test_feems_lattice_choices_vary_graph_size_and_scale_reference_barrier() -> None:
+    sim = simulation_config.simulation_config(
+        {
+            "simulation": {
+                "feems_lattice_row_choices": [8, 16],
+                "feems_lattice_column_choices": [9, 12],
+                "feems_lattice_surface_kinds": ["feems_heterogeneous_barrier"],
+                "feems_lattice_sample_prob_choices": [1.0],
+                "max_samples": 100,
+                "q_log_std": 0.0,
+            }
+        }
+    )
+    shapes = set()
+    for seed in range(32):
+        rng = np.random.default_rng(seed)
+        local = simulation_config.local_simulation_parameters(rng, sim)
+        case = motifs.draw_feems_lattice_case(rng, sim, local)
+        shapes.add((case["feems_lattice_rows"], case["feems_lattice_columns"]))
+        assert np.isclose(float(np.ptp(case["edge_log_rates"])), np.log(5.0), atol=1e-6)
+        assert case["sample_nodes"].shape[0] == 100
+        assert case["feems_lattice_samples_capped"] is True
+
+    assert {rows for rows, _columns in shapes} == {8, 16}
+    assert {columns for _rows, columns in shapes} == {9, 12}
 
 
 def test_sample_designs_always_observe_two_nodes_and_respect_sample_cap() -> None:
@@ -836,6 +918,21 @@ def test_stage_input_paths_copies_to_unique_local_names(tmp_path: Path) -> None:
     assert [workflow_io.read_pickle(path) for path in staged] == [[1], [2]]
 
 
+def test_stage_input_paths_reuses_duplicate_sources(tmp_path: Path) -> None:
+    source = tmp_path / "pack.pkl"
+    write_pickle(source, [1])
+
+    staged = pipeline.stage_input_paths(
+        [source, source, source],
+        tmp_path / "cache",
+        label="train",
+    )
+
+    assert staged == [staged[0], staged[0], staged[0]]
+    assert [path.name for path in (tmp_path / "cache" / "train").iterdir()] == ["00000_pack.pkl"]
+    assert workflow_io.read_pickle(staged[0]) == [1]
+
+
 def test_stage_input_paths_fails_before_copy_when_local_space_is_insufficient(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -995,6 +1092,7 @@ def test_pipeline_cli_prepares_trains_and_evaluates(tmp_path: Path) -> None:
     )
     batch_rows = workflow_io.read_pickle(prepared_batch)
     assert len(batch_rows) == 2
+    assert all(float(row["sampled_node_fraction"]) == 1.0 for row in batch_rows)
     np.testing.assert_allclose(batch_rows[0]["y"], small_raw_example()["edge_log_rates"])
     np.testing.assert_allclose(batch_rows[1]["y"], small_raw_example(0.1)["edge_log_rates"])
     batch_metadata = json.loads(prepared_batch.with_suffix(".metadata.json").read_text())
@@ -1066,6 +1164,7 @@ def test_pipeline_cli_prepares_trains_and_evaluates(tmp_path: Path) -> None:
     loaded = checkpoints.load_checkpoint(checkpoint)
     assert loaded.model["features"]["kind"] == "diffusion_bands_v1"
     evaluation = tmp_path / "evaluation"
+    predictions = evaluation / "predictions.npz"
     pipeline.main(
         [
             "evaluate",
@@ -1077,9 +1176,46 @@ def test_pipeline_cli_prepares_trains_and_evaluates(tmp_path: Path) -> None:
             str(evaluation),
             "--batch-size",
             "1",
+            "--predictions-output",
+            str(predictions),
         ]
     )
     assert json.loads((evaluation / "summary.json").read_text())["examples"] == 1
+    with np.load(predictions) as archive:
+        expected_truth = small_raw_example(0.1)["edge_log_rates"]
+        expected_truth = expected_truth - np.mean(expected_truth)
+        np.testing.assert_array_equal(archive["replicate"], np.array([0]))
+        np.testing.assert_array_equal(archive["edge_offsets"], np.array([0, expected_truth.size]))
+        np.testing.assert_allclose(archive["edge_truth"], expected_truth)
+        assert archive["edge_mean"].shape == expected_truth.shape
+        assert archive["edge_sd"].shape == expected_truth.shape
+        raw_edge_sd = archive["edge_sd"].copy()
+
+    calibrated_checkpoint = tmp_path / "model" / "checkpoint.calibrated.dreems.zip"
+    checkpoints.attach_edge_sd_calibration(
+        checkpoint,
+        calibrated_checkpoint,
+        calibration.SDCalibration(method="global", global_scale=2.0),
+    )
+    calibrated_evaluation = tmp_path / "evaluation_calibrated"
+    calibrated_predictions = calibrated_evaluation / "predictions.npz"
+    pipeline.main(
+        [
+            "evaluate",
+            "--checkpoint",
+            str(calibrated_checkpoint),
+            "--inputs",
+            str(prepared[1]),
+            "--output-dir",
+            str(calibrated_evaluation),
+            "--batch-size",
+            "1",
+            "--predictions-output",
+            str(calibrated_predictions),
+        ]
+    )
+    with np.load(calibrated_predictions) as archive:
+        np.testing.assert_allclose(archive["edge_sd"], 2.0 * raw_edge_sd)
 
 
 def test_global_landscape_samples_land_but_keeps_water_edges(monkeypatch) -> None:

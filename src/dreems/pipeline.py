@@ -9,12 +9,13 @@ import math
 import shutil
 import time
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-from dreems import checkpoints, corpus, features, metrics, simulation, train
+from dreems import checkpoints, corpus, counterfactual, features, metrics, simulation, train
 from dreems import model as dreems_model
 from dreems.workflow_io import (
     json_ready,
@@ -319,21 +320,64 @@ def iter_training_batches(
     steps: int,
     seed: int,
 ) -> Iterable[dict[str, np.ndarray]]:
-    # Shuffle shards while buffering examples across shard boundaries. Production
-    # stores one example per shard, so filling from a single shard would silently
-    # duplicate that example batch_size times.
+    # Keep counterfactual groups intact so their consistency term is observable
+    # inside a batch. Ordinary examples remain independent singleton units.
     rng = np.random.default_rng(seed)
     produced = 0
-    pending: list[dict[str, np.ndarray]] = []
+    grouped_pending: list[list[dict[str, np.ndarray]]] = []
+    singleton_pending: list[dict[str, np.ndarray]] = []
+
+    def units(
+        shard: list[dict[str, np.ndarray]],
+    ) -> tuple[list[list[dict[str, np.ndarray]]], list[dict[str, np.ndarray]]]:
+        grouped: dict[int, list[dict[str, np.ndarray]]] = {}
+        singletons: list[dict[str, np.ndarray]] = []
+        for item in shard:
+            group = int(np.asarray(item.get("counterfactual_group", -1)))
+            if group < 0:
+                singletons.append(item)
+            else:
+                grouped.setdefault(group, []).append(item)
+        groups = list(grouped.values())
+        for group_items in groups:
+            anchors = sum(
+                float(np.asarray(item.get("counterfactual_anchor", 0.0))) > 0.0
+                for item in group_items
+            )
+            if anchors != 1:
+                raise ValueError("each counterfactual training group must contain one anchor")
+            if batch_size % len(group_items) != 0:
+                raise ValueError(
+                    f"counterfactual group size {len(group_items)} must divide batch size "
+                    f"{batch_size}"
+                )
+        return groups, singletons
+
     while produced < steps:
         for path_index in rng.permutation(len(paths)):
             shard = normalized_shard(paths[int(path_index)], stats)
             if not shard:
                 continue
-            pending.extend(shard[int(index)] for index in rng.permutation(len(shard)))
-            while len(pending) >= batch_size:
-                batch = pending[:batch_size]
-                del pending[:batch_size]
+            groups, singletons = units(shard)
+            grouped_pending.extend(groups[int(index)] for index in rng.permutation(len(groups)))
+            singleton_pending.extend(
+                singletons[int(index)] for index in rng.permutation(len(singletons))
+            )
+            while grouped_pending:
+                group_size = len(grouped_pending[0])
+                groups_per_batch = batch_size // group_size
+                if len(grouped_pending) < groups_per_batch:
+                    break
+                batch_groups = grouped_pending[:groups_per_batch]
+                del grouped_pending[:groups_per_batch]
+                batch = [item for group_items in batch_groups for item in group_items]
+                yield pad_with_dimensions(batch, dims)
+                produced += 1
+                if produced >= steps:
+                    return
+            while len(singleton_pending) >= batch_size:
+                batch = singleton_pending[:batch_size]
+                del singleton_pending[:batch_size]
                 yield pad_with_dimensions(batch, dims)
                 produced += 1
                 if produced >= steps:
@@ -343,7 +387,8 @@ def iter_training_batches(
 def stage_input_paths(paths: Sequence[Path], cache_dir: Path, *, label: str) -> list[Path]:
     destination_dir = cache_dir / label
     destination_dir.mkdir(parents=True)
-    total_bytes = sum(path.stat().st_size for path in paths)
+    unique_sources = list(dict.fromkeys(path.resolve() for path in paths))
+    total_bytes = sum(path.stat().st_size for path in unique_sources)
     reserve_bytes = 2 * 1024**3
     free_bytes = shutil.disk_usage(destination_dir).free
     if free_bytes < total_bytes + reserve_bytes:
@@ -358,19 +403,20 @@ def stage_input_paths(paths: Sequence[Path], cache_dir: Path, *, label: str) -> 
                 "stage": "stage_training_inputs",
                 "event": "start",
                 "label": label,
-                "files": len(paths),
+                "files": len(unique_sources),
+                "references": len(paths),
                 "bytes": total_bytes,
             }
         ),
         flush=True,
     )
-    staged = []
-    for index, source in enumerate(paths):
+    staged_by_source: dict[Path, Path] = {}
+    for index, source in enumerate(unique_sources):
         destination = destination_dir / f"{index:05d}_{source.name}"
         shutil.copyfile(source, destination)
-        staged.append(destination)
+        staged_by_source[source] = destination
         completed = index + 1
-        if completed == 1 or completed == len(paths) or completed % 16 == 0:
+        if completed == 1 or completed == len(unique_sources) or completed % 16 == 0:
             print(
                 json.dumps(
                     {
@@ -378,7 +424,7 @@ def stage_input_paths(paths: Sequence[Path], cache_dir: Path, *, label: str) -> 
                         "event": "progress",
                         "label": label,
                         "completed_files": completed,
-                        "files": len(paths),
+                        "files": len(unique_sources),
                         "elapsed_seconds": round(time.time() - started, 3),
                     }
                 ),
@@ -390,14 +436,15 @@ def stage_input_paths(paths: Sequence[Path], cache_dir: Path, *, label: str) -> 
                 "stage": "stage_training_inputs",
                 "event": "done",
                 "label": label,
-                "files": len(paths),
+                "files": len(unique_sources),
+                "references": len(paths),
                 "bytes": total_bytes,
                 "elapsed_seconds": round(time.time() - started, 3),
             }
         ),
         flush=True,
     )
-    return staged
+    return [staged_by_source[path.resolve()] for path in paths]
 
 
 def edge_coverage(truth: np.ndarray, mean: np.ndarray, sd: np.ndarray, z: float) -> float:
@@ -593,6 +640,83 @@ def command_prepare_batch(args: argparse.Namespace) -> None:
     )
 
 
+def command_prepare_counterfactual(args: argparse.Namespace) -> None:
+    """Prepare four paired masks from one reusable raw covariance example."""
+
+    run_config = dreems_config(load_config(args.config))
+    selected = counterfactual.read_selection(args.selection)
+    slot = int(args.slot)
+    if slot < 0 or slot >= len(selected):
+        raise IndexError(f"counterfactual slot {slot} is outside [0, {len(selected)})")
+    base = selected[slot]
+    source = Path(base.raw_path)
+    raw_examples = load_examples(source)
+    if base.raw_index < 0 or base.raw_index >= len(raw_examples):
+        raise IndexError(
+            f"raw index {base.raw_index} is outside {source} with {len(raw_examples)} examples"
+        )
+    variants = counterfactual.counterfactual_variants(
+        raw_examples[base.raw_index],
+        group=base.slot,
+        seed=int(args.seed) + 1_000_003 * base.slot,
+    )
+    prepared, skipped, rows = prepare_raw_examples(
+        variants,
+        run_config,
+        source=source,
+        index_offset=base.original_index,
+    )
+    if skipped or len(prepared) != len(counterfactual.COUNTERFACTUAL_MASKS):
+        raise ValueError(
+            f"counterfactual slot {slot} prepared {len(prepared)} masks and skipped {len(skipped)}"
+        )
+    for item, variant in zip(prepared, variants, strict=True):
+        item["counterfactual_group"] = np.asarray(
+            variant["sampling_counterfactual_group"],
+            dtype=np.int32,
+        )
+        item["counterfactual_anchor"] = np.asarray(
+            variant["sampling_counterfactual_anchor"],
+            dtype=np.float32,
+        )
+        item["counterfactual_mask"] = np.asarray(
+            counterfactual.COUNTERFACTUAL_MASK_INDEX[str(variant["sampling_counterfactual_mask"])],
+            dtype=np.int32,
+        )
+        item["sampled_node_fraction"] = np.asarray(
+            variant["sampled_node_fraction"],
+            dtype=np.float32,
+        )
+    write_pickle(args.output, prepared)
+    dimensions = prepared_dimensions(prepared)
+    write_json(
+        args.metadata,
+        {
+            "stage": "prepare_counterfactual",
+            "slot": slot,
+            "source": str(source),
+            "source_index": base.raw_index,
+            "base": asdict(base),
+            "masks": list(counterfactual.COUNTERFACTUAL_MASKS),
+            "prepared_dimensions": dimensions,
+            "rows": rows,
+        },
+    )
+    print(
+        json.dumps(
+            {
+                "stage": "prepare_counterfactual",
+                "slot": slot,
+                "source": str(source),
+                "examples": len(prepared),
+                "output": str(args.output),
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
+
+
 def command_pack_prepared(args: argparse.Namespace) -> None:
     inputs = required_input_paths(
         args.inputs,
@@ -714,6 +838,7 @@ def _command_train(args: argparse.Namespace, cache_dir: Path | None) -> None:
         if args.init_checkpoint is not None
         else None
     )
+    inherited_edge_sd_calibration: Mapping[str, Any] | None = None
     if init_checkpoint is None:
         stats = json.loads(args.normalization.read_text())
         init_params = None
@@ -724,7 +849,20 @@ def _command_train(args: argparse.Namespace, cache_dir: Path | None) -> None:
         if not isinstance(checkpoint_architecture, dict):
             raise ValueError("init checkpoint is missing architecture metadata")
         checkpoint_architecture = train.canonical_architecture_metadata(checkpoint_architecture)
-        if checkpoint_architecture != expected_architecture:
+        expected_architecture = train.canonical_architecture_metadata(expected_architecture)
+        extending_with_gates = (
+            train.core_architecture_metadata(checkpoint_architecture)
+            == train.core_architecture_metadata(expected_architecture)
+            and (
+                not bool(checkpoint_architecture["initializer_gate"])
+                or bool(expected_architecture["initializer_gate"])
+            )
+            and (
+                not bool(checkpoint_architecture["surface_gate"])
+                or bool(expected_architecture["surface_gate"])
+            )
+        )
+        if checkpoint_architecture != expected_architecture and not extending_with_gates:
             raise ValueError(
                 "init checkpoint architecture does not match the training config: "
                 f"{checkpoint_architecture} != {expected_architecture}"
@@ -751,6 +889,12 @@ def _command_train(args: argparse.Namespace, cache_dir: Path | None) -> None:
             )
         stats = init_checkpoint.normalization
         init_params = init_checkpoint.params
+        if run_config.optimizer.trainable_scope in {"initializer_gate", "surface_gate"}:
+            calibration_payload = init_checkpoint.payload.get("edge_sd_calibration")
+            if calibration_payload is not None:
+                if not isinstance(calibration_payload, Mapping):
+                    raise ValueError("init checkpoint has invalid edge SD calibration metadata")
+                inherited_edge_sd_calibration = dict(calibration_payload)
     metadata_arrays_stub = {
         "node_x": np.zeros((1, 1, int(dims["node_dim"])), dtype=np.float32),
         "edge_x": np.zeros((1, 1, int(dims["edge_dim"])), dtype=np.float32),
@@ -798,6 +942,7 @@ def _command_train(args: argparse.Namespace, cache_dir: Path | None) -> None:
                 "restored_best_validation": False,
                 "history": [dict(row)],
             },
+            edge_sd_calibration=inherited_edge_sd_calibration,
         )
         write_json(
             best_summary_path,
@@ -878,6 +1023,7 @@ def _command_train(args: argparse.Namespace, cache_dir: Path | None) -> None:
         train_losses=train_result.losses,
         train_arrays=metadata_arrays,
         training_run=train_result.summary(),
+        edge_sd_calibration=inherited_edge_sd_calibration,
     )
     training_run = train_result.summary()
     best_validation_metrics = train_result.best_validation_metrics or {}
@@ -962,6 +1108,15 @@ def command_evaluate(args: argparse.Namespace) -> None:
     )
     stats = loaded.normalization
     rows: list[dict[str, Any]] = []
+    prediction_replicates: list[int] = []
+    edge_offsets = [0]
+    edge_truth_parts: list[np.ndarray] = []
+    edge_mean_parts: list[np.ndarray] = []
+    edge_sd_parts: list[np.ndarray] = []
+    q_offsets = [0]
+    q_truth_parts: list[np.ndarray] = []
+    q_mean_parts: list[np.ndarray] = []
+    q_sd_parts: list[np.ndarray] = []
     replicate = int(args.replicate_offset)
     max_examples = None if args.max_examples is None else int(args.max_examples)
     for shard_index, path in enumerate(inputs):
@@ -1019,7 +1174,14 @@ def command_evaluate(args: argparse.Namespace) -> None:
                     stats["y_scale"]
                 )
                 pred = np.asarray(edge_mean[local][edge_mask], dtype=np.float64)
-                sd = np.asarray(edge_sd[local][edge_mask], dtype=np.float64)
+                raw_sd = np.asarray(edge_sd[local][edge_mask], dtype=np.float64)
+                sampled_fraction = float(arrays["sampled_node_fraction"][local])
+                sd = loaded.edge_sd_calibration.apply(
+                    raw_sd,
+                    sampled_node_fraction=(
+                        sampled_fraction if np.isfinite(sampled_fraction) else None
+                    ),
+                )
                 q_truth = np.asarray(arrays["q"][local][node_mask], dtype=np.float64) * float(
                     stats["q_y_scale"]
                 )
@@ -1027,9 +1189,20 @@ def command_evaluate(args: argparse.Namespace) -> None:
                 q_sd_local = np.asarray(q_sd[local][node_mask], dtype=np.float64)
                 edge_metrics = metrics.edge_log_metrics(truth, pred).to_prefixed_dict("edge_log")
                 q_metrics = metrics.edge_log_metrics(q_truth, q_pred).to_prefixed_dict("q_log")
+                replicate_id = replicate + int(original)
+                if args.predictions_output is not None:
+                    prediction_replicates.append(replicate_id)
+                    edge_truth_parts.append(truth.astype(np.float32))
+                    edge_mean_parts.append(pred.astype(np.float32))
+                    edge_sd_parts.append(sd.astype(np.float32))
+                    edge_offsets.append(edge_offsets[-1] + int(truth.size))
+                    q_truth_parts.append(q_truth.astype(np.float32))
+                    q_mean_parts.append(q_pred.astype(np.float32))
+                    q_sd_parts.append(q_sd_local.astype(np.float32))
+                    q_offsets.append(q_offsets[-1] + int(q_truth.size))
                 rows.append(
                     {
-                        "replicate": replicate + int(original),
+                        "replicate": replicate_id,
                         "replicate_within_shard": int(original),
                         **edge_metrics,
                         **q_metrics,
@@ -1041,6 +1214,9 @@ def command_evaluate(args: argparse.Namespace) -> None:
                         if q_sd_local.size
                         else float("nan"),
                         "q_80_coverage": edge_coverage(q_truth, q_pred, q_sd_local, 1.28155157),
+                        "counterfactual_group": int(arrays["counterfactual_group"][local]),
+                        "counterfactual_mask": int(arrays["counterfactual_mask"][local]),
+                        "sampled_node_fraction": sampled_fraction,
                         "source_shard": str(path),
                     }
                 )
@@ -1093,6 +1269,20 @@ def command_evaluate(args: argparse.Namespace) -> None:
             "rows": rows,
         },
     )
+    if args.predictions_output is not None:
+        args.predictions_output.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(
+            args.predictions_output,
+            replicate=np.asarray(prediction_replicates, dtype=np.int64),
+            edge_offsets=np.asarray(edge_offsets, dtype=np.int64),
+            edge_truth=np.concatenate(edge_truth_parts).astype(np.float32, copy=False),
+            edge_mean=np.concatenate(edge_mean_parts).astype(np.float32, copy=False),
+            edge_sd=np.concatenate(edge_sd_parts).astype(np.float32, copy=False),
+            q_offsets=np.asarray(q_offsets, dtype=np.int64),
+            q_truth=np.concatenate(q_truth_parts).astype(np.float32, copy=False),
+            q_mean=np.concatenate(q_mean_parts).astype(np.float32, copy=False),
+            q_sd=np.concatenate(q_sd_parts).astype(np.float32, copy=False),
+        )
     print(
         json.dumps(
             {
@@ -1184,6 +1374,15 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_batch.add_argument("--max-examples", type=int)
     prepare_batch.set_defaults(func=command_prepare_batch)
 
+    prepare_counterfactual = subparsers.add_parser("prepare-counterfactual")
+    prepare_counterfactual.add_argument("--config", type=Path, required=True)
+    prepare_counterfactual.add_argument("--selection", type=Path, required=True)
+    prepare_counterfactual.add_argument("--slot", type=int, required=True)
+    prepare_counterfactual.add_argument("--seed", type=int, required=True)
+    prepare_counterfactual.add_argument("--output", type=Path, required=True)
+    prepare_counterfactual.add_argument("--metadata", type=Path, required=True)
+    prepare_counterfactual.set_defaults(func=command_prepare_counterfactual)
+
     pack = subparsers.add_parser("pack-prepared")
     pack.add_argument("--inputs", type=Path, nargs="+", default=None)
     pack.add_argument("--input-manifest", type=Path, default=None)
@@ -1227,6 +1426,7 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--batch-size", type=int, default=32)
     evaluate.add_argument("--replicate-offset", type=int, default=0)
     evaluate.add_argument("--max-examples", type=int, default=None)
+    evaluate.add_argument("--predictions-output", type=Path, default=None)
     evaluate.set_defaults(func=command_evaluate)
 
     aggregate = subparsers.add_parser("aggregate-evaluations")

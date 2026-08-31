@@ -12,3 +12,8 @@
   account and should be used only when explicitly requested.
 - The local high-memory/high-core workstation target is `maturin`; use the local
   Snakemake profile or `workflow/run_maturin.sh` there.
+
+## Manuscript
+
+- After rebuilding the manuscript, copy the final PDF to
+  `/home/jonth/turbo/dreems.pdf`.

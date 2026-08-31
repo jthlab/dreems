@@ -1,0 +1,9 @@
+source_notebook: /home/jonth/turbo/dreems/feems_scenarios.ipynb
+checkpoint: /home/jonth/turbo/dreems/sampling_robustness_20260830/dreems_sampling_robustness_candidate.dreems.zip
+workdir: /scratch/jonth_root/jonth0/jonth/dreems/hard_case_notebook_20260830
+outdir: /home/jonth/turbo/dreems/feems_scenarios_sampling_robustness_20260830
+
+threads: 4
+mem_mb: 32000
+runtime: 12h
+partition: standard

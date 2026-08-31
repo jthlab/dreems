@@ -25,6 +25,10 @@ class DREEMSArchitectureConfig:
     hidden_channels: int = 64
     layers: int = 10
     context_layers: int = 3
+    initializer_gate: bool = False
+    initializer_gate_initial_logit: float = 6.0
+    surface_gate: bool = False
+    surface_gate_initial_logit: float = 6.0
 
     def validate(self) -> None:
         if self.hidden_channels <= 0:
@@ -33,6 +37,10 @@ class DREEMSArchitectureConfig:
             raise ValueError("layers must be nonnegative")
         if self.context_layers < 0:
             raise ValueError("context_layers must be nonnegative")
+        if not np.isfinite(self.initializer_gate_initial_logit):
+            raise ValueError("initializer_gate_initial_logit must be finite")
+        if not np.isfinite(self.surface_gate_initial_logit):
+            raise ValueError("surface_gate_initial_logit must be finite")
 
 
 @dataclass(frozen=True)
@@ -83,6 +91,11 @@ class DREEMSLossConfig:
     orientation_weight: float = 0.35
     orientation_target_floor: float = 0.05
     orientation_margin_fraction: float = 0.5
+    initializer_regret_weight: float = 0.0
+    initializer_regret_margin: float = 0.0
+    counterfactual_consistency_weight: float = 0.0
+    surface_gate_weight: float = 0.0
+    surface_gate_target_floor: float = 0.05
 
     def validate(self) -> None:
         if self.min_logvar > self.max_logvar:
@@ -93,9 +106,16 @@ class DREEMSLossConfig:
             "slope_weight",
             "correlation_weight",
             "orientation_weight",
+            "initializer_regret_weight",
+            "counterfactual_consistency_weight",
+            "surface_gate_weight",
         ):
             if getattr(self, name) < 0.0:
                 raise ValueError(f"{name} must be nonnegative")
+        if self.initializer_regret_margin < 0.0:
+            raise ValueError("initializer_regret_margin must be nonnegative")
+        if self.surface_gate_target_floor < 0.0:
+            raise ValueError("surface_gate_target_floor must be nonnegative")
 
 
 @dataclass(frozen=True)
@@ -111,6 +131,7 @@ class DREEMSOptimizerConfig:
     early_stopping_warmup_steps: int = 0
     early_stopping_metric: str = "validation_loss"
     restore_best_validation: bool = True
+    trainable_scope: str = "all"
 
     def validate(self) -> None:
         if self.batch_size <= 0:
@@ -131,6 +152,8 @@ class DREEMSOptimizerConfig:
             raise ValueError("early_stopping_warmup_steps must be nonnegative")
         if not self.early_stopping_metric:
             raise ValueError("early_stopping_metric must be non-empty")
+        if self.trainable_scope not in {"all", "initializer_gate", "surface_gate"}:
+            raise ValueError("trainable_scope must be 'all', 'initializer_gate', or 'surface_gate'")
 
 
 @dataclass(frozen=True)
@@ -147,6 +170,13 @@ class DREEMSTrainConfig:
         self.edge_conditioner.validate()
         self.loss.validate()
         self.optimizer.validate()
+        if (
+            self.optimizer.trainable_scope == "initializer_gate"
+            and not self.architecture.initializer_gate
+        ):
+            raise ValueError("initializer_gate training scope requires initializer_gate=true")
+        if self.optimizer.trainable_scope == "surface_gate" and not self.architecture.surface_gate:
+            raise ValueError("surface_gate training scope requires surface_gate=true")
 
 
 @dataclass(frozen=True)
@@ -182,12 +212,23 @@ class TrainingRunResult:
 
 
 def architecture_metadata(config: DREEMSArchitectureConfig) -> dict[str, object]:
-    return {
-        "kind": "diffusion_band_gnn_v1",
+    if config.surface_gate:
+        kind = "diffusion_band_surface_gate_v3"
+    elif config.initializer_gate:
+        kind = "diffusion_band_initializer_gate_v2"
+    else:
+        kind = "diffusion_band_gnn_v1"
+    metadata: dict[str, object] = {
+        "kind": kind,
         "hidden_channels": config.hidden_channels,
         "layers": config.layers,
         "context_layers": config.context_layers,
     }
+    if config.initializer_gate:
+        metadata["initializer_gate"] = True
+    if config.surface_gate:
+        metadata["surface_gate"] = True
+    return metadata
 
 
 def feature_metadata(config: DREEMSFeatureConfig) -> dict[str, object]:
@@ -231,6 +272,41 @@ def posterior_metadata(config: DREEMSLossConfig) -> dict[str, object]:
     }
 
 
+def training_config_metadata(config: DREEMSTrainConfig) -> dict[str, Any]:
+    """Serialize configs without changing the released v1 metadata contract."""
+
+    payload = asdict(config)
+    if (
+        not config.architecture.initializer_gate
+        and config.architecture.initializer_gate_initial_logit
+        == DREEMSArchitectureConfig.initializer_gate_initial_logit
+    ):
+        payload["architecture"].pop("initializer_gate")
+        payload["architecture"].pop("initializer_gate_initial_logit")
+    if (
+        not config.architecture.surface_gate
+        and config.architecture.surface_gate_initial_logit
+        == DREEMSArchitectureConfig.surface_gate_initial_logit
+    ):
+        payload["architecture"].pop("surface_gate")
+        payload["architecture"].pop("surface_gate_initial_logit")
+    if (
+        config.loss.initializer_regret_weight == 0.0
+        and config.loss.initializer_regret_margin == 0.0
+        and config.loss.counterfactual_consistency_weight == 0.0
+        and config.loss.surface_gate_weight == 0.0
+        and config.loss.surface_gate_target_floor == DREEMSLossConfig.surface_gate_target_floor
+    ):
+        payload["loss"].pop("initializer_regret_weight")
+        payload["loss"].pop("initializer_regret_margin")
+        payload["loss"].pop("counterfactual_consistency_weight")
+        payload["loss"].pop("surface_gate_weight")
+        payload["loss"].pop("surface_gate_target_floor")
+    if config.optimizer.trainable_scope == "all":
+        payload["optimizer"].pop("trainable_scope")
+    return payload
+
+
 def model_metadata(config: DREEMSTrainConfig, arrays: dict[str, np.ndarray]) -> dict[str, Any]:
     config.validate()
     return {
@@ -251,7 +327,26 @@ def canonical_architecture_metadata(model: Mapping[str, Any]) -> dict[str, objec
         "hidden_channels": int(model["hidden_channels"]),
         "layers": int(model["layers"]),
         "context_layers": int(model["context_layers"]),
+        "initializer_gate": bool(
+            model.get(
+                "initializer_gate",
+                model.get("kind") == "diffusion_band_initializer_gate_v2",
+            )
+        ),
+        "surface_gate": bool(
+            model.get(
+                "surface_gate",
+                model.get("kind") == "diffusion_band_surface_gate_v3",
+            )
+        ),
     }
+
+
+def core_architecture_metadata(model: Mapping[str, Any]) -> dict[str, object]:
+    """Return architecture fields that must match when adding a new gate."""
+
+    canonical = canonical_architecture_metadata(model)
+    return {key: canonical[key] for key in ("hidden_channels", "layers", "context_layers")}
 
 
 def append_training_edge_conditioner_features(
@@ -290,6 +385,7 @@ def save_checkpoint(
     train_losses: list[float],
     train_arrays: dict[str, np.ndarray],
     training_run: Mapping[str, Any] | None = None,
+    edge_sd_calibration: Mapping[str, Any] | None = None,
 ) -> None:
     checkpoint_path = Path(path)
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
@@ -298,10 +394,12 @@ def save_checkpoint(
         "normalization": normalization,
         "train_losses": train_losses,
         "model": model_metadata(config, train_arrays),
-        "training_config": asdict(config),
+        "training_config": training_config_metadata(config),
     }
     if training_run is not None:
         payload["training_run"] = dict(training_run)
+    if edge_sd_calibration is not None:
+        payload["edge_sd_calibration"] = dict(edge_sd_calibration)
     params_data = io.BytesIO()
     eqx.tree_serialise_leaves(params_data, params)
     with zipfile.ZipFile(checkpoint_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
@@ -331,7 +429,9 @@ def loss_terms(
     batch: dict[str, jax.Array],
     config: DREEMSTrainConfig,
 ) -> dict[str, jax.Array]:
-    pred, edge_logvar, context_pred, q_pred, q_logvar = dreems_model.apply_batch(params, batch)
+    pred, edge_logvar, context_pred, q_pred, q_logvar, neural_weight, surface_weight = (
+        dreems_model.apply_batch_with_diagnostics(params, batch)
+    )
     loss_config = config.loss
     edge_nll = losses.masked_gaussian_nll(
         pred,
@@ -375,6 +475,36 @@ def loss_terms(
         target_floor=loss_config.orientation_target_floor,
         margin_fraction=loss_config.orientation_margin_fraction,
     )
+    initializer_regret = losses.masked_initializer_regret_loss(
+        pred,
+        batch["y"],
+        batch.get("edge_initializer", jnp.zeros_like(pred)),
+        batch.get("edge_initializer_valid", jnp.zeros_like(pred)),
+        batch["edge_mask"],
+        margin=loss_config.initializer_regret_margin,
+    )
+    counterfactual_consistency = losses.counterfactual_anchor_consistency_loss(
+        pred,
+        batch["edge_mask"],
+        batch.get(
+            "counterfactual_group",
+            jnp.full((pred.shape[0],), -1, dtype=jnp.int32),
+        ),
+        batch.get(
+            "counterfactual_anchor",
+            jnp.zeros((pred.shape[0],), dtype=pred.dtype),
+        ),
+    )
+    surface_gate = losses.surface_gate_binary_cross_entropy(
+        surface_weight,
+        batch["y"],
+        batch["edge_mask"],
+        target_floor=loss_config.surface_gate_target_floor,
+    )
+    valid_initializer = batch.get("edge_initializer_valid", jnp.zeros_like(pred))
+    gate_count = jnp.sum(valid_initializer * batch["edge_mask"])
+    neural_weight_mean = jnp.sum(neural_weight * valid_initializer * batch["edge_mask"])
+    neural_weight_mean /= jnp.maximum(gate_count, 1.0)
     total = (
         edge_nll
         + loss_config.context_weight * context_mse
@@ -382,6 +512,9 @@ def loss_terms(
         + loss_config.slope_weight * slope
         + loss_config.correlation_weight * correlation
         + loss_config.orientation_weight * orientation
+        + loss_config.initializer_regret_weight * initializer_regret
+        + loss_config.counterfactual_consistency_weight * counterfactual_consistency
+        + loss_config.surface_gate_weight * surface_gate
     )
     return {
         "loss": total,
@@ -391,6 +524,11 @@ def loss_terms(
         "slope": slope,
         "correlation": correlation,
         "orientation": orientation,
+        "initializer_regret": initializer_regret,
+        "counterfactual_consistency": counterfactual_consistency,
+        "surface_gate_bce": surface_gate,
+        "surface_weight_mean": jnp.mean(surface_weight),
+        "neural_weight_mean": neural_weight_mean,
     }
 
 
@@ -450,37 +588,103 @@ def train_from_batches(
     architecture = config.architecture
     optimizer_config = config.optimizer
     key = jax.random.PRNGKey(optimizer_config.seed)
-    params = (
-        dreems_model.DREEMS(
+    if init_params is None:
+        params = dreems_model.DREEMS(
             key,
             node_dim=node_dim,
             edge_dim=edge_dim,
             hidden_channels=architecture.hidden_channels,
             layers=architecture.layers,
             context_layers=architecture.context_layers,
+            initializer_gate=architecture.initializer_gate,
+            initializer_gate_initial_logit=architecture.initializer_gate_initial_logit,
+            surface_gate=architecture.surface_gate,
+            surface_gate_initial_logit=architecture.surface_gate_initial_logit,
         )
-        if init_params is None
-        else dreems_model.tree_to_jax(init_params)
-    )
+    else:
+        params = dreems_model.tree_to_jax(init_params)
+        if architecture.initializer_gate and params.initializer_gate_hidden is None:
+            params = dreems_model.add_initializer_gate(
+                params,
+                key=key,
+                node_dim=node_dim,
+                edge_dim=edge_dim,
+                hidden_channels=architecture.hidden_channels,
+                layers=architecture.layers,
+                context_layers=architecture.context_layers,
+                initial_logit=architecture.initializer_gate_initial_logit,
+            )
+        elif not architecture.initializer_gate and params.initializer_gate_hidden is not None:
+            raise ValueError("cannot initialize a v1 model from a gated checkpoint")
+        if architecture.surface_gate and params.surface_gate_hidden is None:
+            params = dreems_model.add_surface_gate(
+                params,
+                key=jax.random.fold_in(key, 1),
+                node_dim=node_dim,
+                edge_dim=edge_dim,
+                hidden_channels=architecture.hidden_channels,
+                layers=architecture.layers,
+                context_layers=architecture.context_layers,
+                initial_logit=architecture.surface_gate_initial_logit,
+            )
+        elif not architecture.surface_gate and params.surface_gate_hidden is not None:
+            raise ValueError("cannot initialize a model without the checkpoint's surface gate")
     optimizer = optax.chain(
         optax.clip_by_global_norm(optimizer_config.gradient_clip_norm),
         optax.adam(optimizer_config.learning_rate),
     )
-    opt_state = optimizer.init(params)
+    if optimizer_config.trainable_scope in {"initializer_gate", "surface_gate"}:
+        if optimizer_config.trainable_scope == "initializer_gate":
+            if params.initializer_gate_hidden is None or params.initializer_gate_out is None:
+                raise ValueError("initializer_gate scope requires an enabled initializer gate")
 
-    @jax.jit
-    def train_step(
-        current_params: dreems_model.DREEMS,
-        current_state: optax.OptState,
-        batch: dict[str, jax.Array],
-    ) -> tuple[dreems_model.DREEMS, optax.OptState, jax.Array]:
-        def objective(candidate_params: dreems_model.DREEMS) -> jax.Array:
-            return loss_terms(candidate_params, batch, config)["loss"]
+            def gate_selector(model: dreems_model.DREEMS):
+                return model.initializer_gate_hidden, model.initializer_gate_out
 
-        loss, grads = jax.value_and_grad(objective)(current_params)
-        updates, next_state = optimizer.update(grads, current_state, current_params)
-        next_params = optax.apply_updates(current_params, updates)
-        return next_params, next_state, loss
+        else:
+            if params.surface_gate_hidden is None or params.surface_gate_out is None:
+                raise ValueError("surface_gate scope requires an enabled surface gate")
+
+            def gate_selector(model: dreems_model.DREEMS):
+                return model.surface_gate_hidden, model.surface_gate_out
+
+        gate_params = gate_selector(params)
+        opt_state = optimizer.init(gate_params)
+
+        @jax.jit
+        def train_step(
+            current_params: dreems_model.DREEMS,
+            current_state: optax.OptState,
+            batch: dict[str, jax.Array],
+        ) -> tuple[dreems_model.DREEMS, optax.OptState, jax.Array]:
+            current_gate = gate_selector(current_params)
+
+            def objective(candidate_gate: tuple[eqx.nn.Linear, eqx.nn.Linear]) -> jax.Array:
+                candidate = eqx.tree_at(gate_selector, current_params, candidate_gate)
+                return loss_terms(candidate, batch, config)["loss"]
+
+            loss, grads = jax.value_and_grad(objective)(current_gate)
+            updates, next_state = optimizer.update(grads, current_state, current_gate)
+            next_gate = optax.apply_updates(current_gate, updates)
+            next_params = eqx.tree_at(gate_selector, current_params, next_gate)
+            return next_params, next_state, loss
+
+    else:
+        opt_state = optimizer.init(params)
+
+        @jax.jit
+        def train_step(
+            current_params: dreems_model.DREEMS,
+            current_state: optax.OptState,
+            batch: dict[str, jax.Array],
+        ) -> tuple[dreems_model.DREEMS, optax.OptState, jax.Array]:
+            def objective(candidate_params: dreems_model.DREEMS) -> jax.Array:
+                return loss_terms(candidate_params, batch, config)["loss"]
+
+            loss, grads = jax.value_and_grad(objective)(current_params)
+            updates, next_state = optimizer.update(grads, current_state, current_params)
+            next_params = optax.apply_updates(current_params, updates)
+            return next_params, next_state, loss
 
     @jax.jit
     def validation_step(

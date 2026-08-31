@@ -239,6 +239,7 @@ class DREEMSResult:
     edges: np.ndarray
     positions: np.ndarray
     raw_edge_log_sd: np.ndarray | None = None
+    surface_weight: float = 1.0
     node_log_q_mean: np.ndarray | None = None
     node_log_q_sd: np.ndarray | None = None
     name: str | None = None
@@ -274,6 +275,7 @@ class DREEMSResult:
         refinement_diagnostics = (
             None if self.refinement_diagnostics is None else dict(self.refinement_diagnostics)
         )
+        surface_weight = float(self.surface_weight)
         if edge_log_mean.ndim != 1:
             raise ValueError("edge_log_mean must be one-dimensional")
         if edge_log_sd.shape != edge_log_mean.shape:
@@ -303,9 +305,12 @@ class DREEMSResult:
             raise ValueError("node_log_q_sd must have shape (nodes,)")
         if (node_log_q_mean is None) != (node_log_q_sd is None):
             raise ValueError("node_log_q_mean and node_log_q_sd must be supplied together")
+        if not np.isfinite(surface_weight) or not 0.0 <= surface_weight <= 1.0:
+            raise ValueError("surface_weight must be finite and between zero and one")
         object.__setattr__(self, "edge_log_mean", edge_log_mean)
         object.__setattr__(self, "edge_log_sd", edge_log_sd)
         object.__setattr__(self, "raw_edge_log_sd", raw_edge_log_sd)
+        object.__setattr__(self, "surface_weight", surface_weight)
         object.__setattr__(self, "edges", edges)
         object.__setattr__(self, "positions", positions)
         object.__setattr__(self, "node_log_q_mean", node_log_q_mean)
@@ -382,6 +387,7 @@ class DREEMSResult:
                 "edge_log_mean": float(self.centered_edge_log_mean[index]),
                 "edge_log_sd": float(self.edge_log_sd[index]),
                 "relative_migration_mean": float(relative[index]),
+                "surface_weight": self.surface_weight,
             }
             if self.raw_edge_log_sd is not None and not np.array_equal(
                 self.raw_edge_log_sd,
@@ -436,6 +442,7 @@ class DREEMSPredictor:
                 edge_log_mean=mean,
                 edge_log_sd=sd,
                 raw_edge_log_sd=raw_sd,
+                surface_weight=surface_weight,
                 edges=example.edges,
                 positions=example.positions,
                 node_log_q_mean=q_mean,
@@ -444,13 +451,14 @@ class DREEMSPredictor:
                 checkpoint_path=self.checkpoint.path,
                 metadata=example.metadata,
             )
-            for example, mean, sd, raw_sd, q_mean, q_sd in zip(
+            for example, mean, sd, raw_sd, q_mean, q_sd, surface_weight in zip(
                 inference_examples,
                 prediction.edge_mean,
                 prediction.edge_sd,
                 prediction.raw_edge_sd,
                 prediction.node_log_q_mean,
                 prediction.node_log_q_sd,
+                prediction.surface_weight,
                 strict=True,
             )
         ]
@@ -578,6 +586,7 @@ def refine_prediction_result(
         edge_log_mean=result.edge_log_mean,
         edge_log_sd=result.edge_log_sd,
         raw_edge_log_sd=result.raw_edge_log_sd,
+        surface_weight=result.surface_weight,
         edges=result.edges,
         positions=result.positions,
         node_log_q_mean=result.node_log_q_mean,

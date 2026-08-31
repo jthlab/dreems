@@ -13,7 +13,8 @@ kernelspec:
 
 # DREEMS quickstart
 
-DREEMS maps a geographic graph and node-level genetic covariance to relative
+DREEMS (Deep Recovery of Effective Migration Surfaces) maps a geographic graph
+and node-level genetic covariance to relative
 migration on every graph edge. This notebook demonstrates both public input
 paths:
 

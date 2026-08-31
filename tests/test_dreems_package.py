@@ -96,3 +96,6 @@ def test_default_checkpoint_is_diffusion_band_model() -> None:
     }
     assert loaded.model["node_dim"] == 109
     assert loaded.model["edge_dim"] == 253
+    assert loaded.model["architecture"]["kind"] == "diffusion_band_surface_gate_v3"
+    assert loaded.model["architecture"]["surface_gate"] is True
+    assert loaded.params.surface_gate_hidden is not None

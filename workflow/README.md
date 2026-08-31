@@ -1,11 +1,13 @@
 # DREEMS Training And Calibration Workflow
 
-This directory contains the Snakemake path used to generate the synthetic
+This directory contains the Snakemake paths used to generate the synthetic
 corpus, construct DREEMS features, fit the model, and evaluate held-out
-simulations. `calibration.Snakefile` canonicalizes the input representation and
-calibrates posterior SDs on disjoint held-out splits. `config.production.yaml`
-and `config.calibration.yaml` record the released recipe. `config.example.yaml`
-is a small CPU smoke run with the same feature and model architecture.
+simulations. The production release has four explicit stages:
+`config.production.yaml` records the graph-balanced base fit,
+`config.sampling_robustness.yaml` records the counterfactual sampling-mask
+fine-tune, `config.null_surface_gate.yaml` records the frozen-core surface-gate
+fit, and `config.surface_gate_release.yaml` records fresh SD calibration and
+release packaging. `config.example.yaml` is a small CPU smoke run.
 
 ## Released Model Provenance
 
@@ -13,22 +15,34 @@ The packaged checkpoint is
 `src/dreems/data/dreems_diffusion_bands.dreems.zip`. Its archive SHA-256 is:
 
 ```text
-f0b677d2cc028252002d15fac843ca7347b1b352eb2286a18bd202b724aa92b4
+10d21a6326e848f48a7eccdd1a508d86f54effc55f79774486a626037a9e3530
 ```
 
 The serialized Equinox parameters have SHA-256
-`d7899a6bb419e4d017e093af958ab9750c2a947ccc72087ccf7bfcd18a3c2984`.
-They are the step-29,000 checkpoint from `graph_balanced_retrain_20260821`.
-Canonical-input migration, SD calibration, and release packaging change only
-metadata; the audited parameter bytes are unchanged.
+`d46045e3a5bbdc870427e2ca93b07daaac5a1d94ff7bbaa25e8f82972e3bec76`.
+The package version is 0.2.0.
 
-The checkpoint was fit from scratch on 61,440 training examples, with 1,024 of
-4,096 held-out examples used for validation. The selected validation loss was
-`0.1572438609728124` at step 29,000. Training stopped at step 41,000 and
-restored that checkpoint. The exact contract is recorded in
-`config.production.yaml` and enforced by `tests/test_production_workflow.py`.
-`promote_checkpoint.py` verifies the saved best step against the complete
-training record and writes the deterministic release archive.
+The model lineage is:
+
+1. The graph-balanced base model was fit from scratch on 61,440 simulations,
+   with 1,024 of 4,096 held-out simulations used for validation. Its archive
+   SHA-256 was `f0b677d2cc028252002d15fac843ca7347b1b352eb2286a18bd202b724aa92b4`.
+2. `sampling_robustness.Snakefile` added structured sampling masks and replayed
+   ordinary examples, then fine-tuned the complete v2 initializer-gate model.
+   The selected candidate SHA-256 is
+   `0e3e56c2c3098c3f0b04d0dfdad067ddb6bb1a928c79ca9048dec505763c61d3`.
+3. `null_surface_gate.Snakefile` froze that candidate and trained only a
+   graph-level gate. The raw gate checkpoint SHA-256 is
+   `df21d92755edeb9f37ac1dcc4251f4f1523f0096ce3ea5c6f914dec41075bdfc`.
+   The selected validation loss was `0.14434671436902136` at step 9,250; the
+   run completed 10,000 steps and restored the selected state.
+4. `surface_gate_release.Snakefile` fit SD calibration on cached independent
+   predictions and wrote the deterministic production archive above.
+
+`promote_surface_gate.py` verifies exact equality of every pre-gate Equinox
+parameter between stages 2 and 3, checks the complete 41-point gate training
+history, and verifies that calibration changes metadata but not parameter
+bytes. `tests/test_production_workflow.py` pins the final hashes and contract.
 
 ## Statistical Recipe
 
@@ -51,7 +65,7 @@ controller, verifies its SHA-256, and exposes the extracted Cartopy cache as a
 shared input to every landscape job. Compute workers do not need internet
 access.
 
-The released predictor uses the leading 20 components of the observed
+The production predictor uses the leading 20 components of the observed
 covariance, transforms those signals through five fixed graph-diffusion bands,
 and includes the all-pair diagonal-adjoint linearized-resistance conditioner.
 Coordinate axes and signed edge directions are excluded from model features;
@@ -60,10 +74,13 @@ short routes. Uniform rotation, reflection, scale, edge reversal, and node
 relabeling therefore do not change predictions.
 The neural network is a 10-layer, 128-channel edge-aware residual GNN with a
 three-layer context branch. The prepared node and edge dimensions are 109 and
-253.
+253. An edgewise gate blends the neural proposal with the linearized
+initializer. A second, graph-level gate multiplies the centered surface by a
+number in `[0, 1]`, allowing the model to represent homogeneous migration
+without retaining unsupported spatial contrast.
 
-Training minimizes one fixed objective. Every term is first reduced within a
-graph and then averaged across the batch, so graph size does not set a
+The base fit minimizes the objective below. Every term is first reduced within
+a graph and then averaged across the batch, so graph size does not set a
 simulation's influence:
 
 ```text
@@ -80,19 +97,19 @@ norm clipping at 1, batch size 8, and at most 120,000 steps. It checks
 validation every 1,000 steps, uses patience 12 after a 20,000-step warmup, and
 restores the best checkpoint.
 
-The training corpus already stores node covariance. The release workflow
-therefore relabels the checkpoint to use the canonical node-covariance path;
-the old and new feature arrays are exactly equal for every training input, and
-the serialized parameters do not change. Genotypes and sample covariance are
-collapsed to this same representation during inference.
+The sampling-robustness stage adds initializer-regret and paired-mask
+consistency terms while fine-tuning the complete model at learning rate
+`1e-5`. The final stage freezes those parameters and trains only the surface
+gate. Its loss includes the same prediction terms plus binary cross-entropy
+for whether the true centered edge surface has RMS greater than 0.05.
 
-Posterior-SD calibration uses test IDs 1024-2047 for fitting, 2048-3071 for
-selecting raw, global, or density-aware scaling by graph-balanced Gaussian NLL,
-and 3072-4095 for untouched verification. Density-aware scaling was selected.
-On verification, graph-balanced 95% coverage changed from 93.2% to 95.7%, and
-NLL changed from -0.131 to -0.185. Lower-level intervals remain conservative,
-so the factorized Gaussian posterior should not be read as a complete joint
-uncertainty model.
+Fresh posterior-SD calibration uses 688 independent gated predictions,
+stratified by simulation family and sampled-node density into 230 fit, 227
+selection, and 231 untouched verification graphs. Density-aware scaling was
+selected by graph-balanced Gaussian NLL. On verification, graph-balanced NLL
+changed from 0.0823 to 0.0212, 80% coverage changed from 80.18% to 81.55%, and
+95% coverage changed from 92.89% to 93.67%. The factorized Gaussian posterior
+should not be read as a complete joint uncertainty model.
 
 ## DAG And Artifacts
 
@@ -108,11 +125,13 @@ staging/raw/{split}/chunk_N.pkl               (temporary; one job per example)
     -> eval/chunks/chunk_N/summary.json        (temporary)
     -> eval/summary.{json,csv}
 
-test IDs 1024-2047 -> calibration fit
-test IDs 2048-3071 -> calibration selection
-test IDs 3072-4095 -> calibration verification
-    -> checkpoint.calibrated.dreems.zip
-    -> verification/{report.json,by_sampling.csv}
+sampling-mask replay -> v2 initializer-gate candidate
+    -> frozen-core v3 surface-gate checkpoint
+    -> independent gated predictions
+    -> calibration fit (230 graphs)
+    -> calibration selection (227 graphs)
+    -> calibration verification (231 graphs)
+    -> deterministic packaged checkpoint
 ```
 
 Pack, normalization, training, and aggregate evaluation rules record Snakemake
@@ -185,7 +204,7 @@ On Great Lakes, keep generated artifacts on scratch and let Snakemake submit all
 worker jobs through its Slurm executor:
 
 ```bash
-DREEMS_RUN_ROOT=/scratch/jonth_root/jonth1/jonth/dreems/topology_diffusion_bands \
+DREEMS_RUN_ROOT=/scratch/jonth_root/jonth0/jonth/dreems/topology_diffusion_bands \
 workflow/run_great_lakes.sh
 ```
 
@@ -193,7 +212,7 @@ workflow/run_great_lakes.sh
 
 `config.snp_range_experiment.yaml` retrains DREEMS from scratch on the same
 graphs, migration surfaces, sampling designs, architecture, and loss as the
-released model. It changes only the SNP-count distribution. The five ranges
+graph-balanced base model. It changes only the SNP-count distribution. The four ranges
 below receive equal numbers of examples, with counts drawn log-uniformly inside
 each range:
 
@@ -202,26 +221,25 @@ each range:
 129-512
 513-2,000
 2,001-10,000
-10,001-50,000
 ```
 
-The released corpus used 2,000-10,000 SNPs. This experiment tests whether
+The base corpus used 2,000-10,000 SNPs. This experiment tests whether
 DREEMS can learn the much stronger finite-SNP noise found in small datasets
-while extending to roughly the number of independent SNPs available in the
-human genome. Existing training examples cannot be downsampled exactly because
-they retain only the final covariance, not individual genotype columns. The
-new covariance corpus must therefore be simulated.
+without increasing the base corpus's upper limit. Existing training
+examples cannot be downsampled exactly because they retain only the final
+covariance, not individual genotype columns. The new covariance corpus must
+therefore be simulated.
 
 On Great Lakes, launch the experiment with the Rust simulator required:
 
 ```bash
 DREEMS_BUILD_RUST=1 \
 DREEMS_CONFIG=workflow/config.snp_range_experiment.yaml \
-DREEMS_RUN_ROOT=/scratch/jonth_root/jonth1/jonth/dreems_snp_range \
+DREEMS_RUN_ROOT=/scratch/jonth_root/jonth0/jonth/dreems_snp_range \
 sbatch workflow/run_great_lakes.sh
 ```
 
-The production config and released checkpoint remain unchanged.
+This experiment does not modify the packaged checkpoint.
 
 The controller uses Slurm account `jonth0`. The production workflow requires
 61,440 independent training simulations and 4,096 independent test simulations;
@@ -241,6 +259,22 @@ uv run --frozen --no-sync snakemake \
 Override `checkpoint`, `raw_source_dir`, and `outdir` with `--config` when the
 production run lives on scratch rather than under `results/`.
 
+Compare the base and broad SNP-count checkpoints on that same independent
+test corpus with:
+
+```bash
+uv run --frozen --no-sync snakemake \
+    -s workflow/snp_range_comparison.Snakefile \
+    --configfile workflow/config.snp_range_comparison.yaml \
+    --profile workflow/profiles/slurm
+```
+
+The comparison evaluates each checkpoint once per 64-example pack, keeps the
+paired edge predictions on scratch, and writes the aggregate table and visual
+gallery to `publish_dir`. Set the checkpoint, corpus, and output paths in the
+config file or override them with `--config`; the test examples are never
+regenerated by this workflow.
+
 New corpora use `raw_source_layout: packs`. Existing corpora with
 `raw/{split}/chunk_N.pkl` remain readable by setting `raw_source_dir` and
 `raw_source_layout: examples`; no conversion is required for archived runs.
@@ -251,14 +285,16 @@ accelerator, and driver versions, so a new fit is not promised to be
 byte-identical to the packaged checkpoint.
 
 FEEMS head-to-head evaluation is intentionally separate from model training.
-FEEMS is neither an input to the released model nor part of its training loss.
+FEEMS is neither an input to the production model nor part of its training loss.
 
 ## FEEMS Head-To-Head
 
 `h2h.Snakefile` compares the packaged checkpoint with FEEMS on a fixed
 synthetic test set. Each example must contain genotypes, sample-to-node
 assignments, graph geometry, and the generating edge log migration rates.
-The test set is an input artifact; this workflow does not regenerate it.
+Ordinary H2H runs treat the test set as an input artifact. A config with
+`scenario_config` instead generates each declared scenario as its own cached
+Snakemake job.
 
 The FEEMS baseline follows the v2 procedure in the official
 [cross-validation notebook](https://github.com/NovembreLab/feems/blob/main/docsrc/notebooks/cross-validation.ipynb).
@@ -312,3 +348,71 @@ implementation change leaves neural results untouched. The aggregate refuses
 results whose protocol is not the documented leave-one-observed-deme-out
 procedure. It also depends on a numerical parity test between the official
 serial FEEMS routine and the fold-parallel adapter.
+
+### Sampling-Mask Audit
+
+`config.feems_scenarios.yaml` crosses barrier, anisotropic, and homogeneous
+truths with four fixed sampling masks over three simulation replicates. It
+uses the production Rust coalescent and MAF ascertainment. The report separates
+the linearized initializer, raw DREEMS estimate, MAP refinement, and FEEMS LOO,
+then measures whether estimates remain suspiciously similar when the truth
+changes but the sampling mask does not.
+
+```bash
+DREEMS_SNAKEFILE=workflow/h2h.Snakefile \
+DREEMS_CONFIG=workflow/config.feems_scenarios.yaml \
+sbatch workflow/run_great_lakes.sh
+```
+
+### Sampling-Robustness Training
+
+`sampling_robustness.Snakefile` repairs sensitivity to where samples were
+collected without generating another SNP corpus. It selects densely observed
+simulations from the existing raw train and test splits, then derives four
+observations from each simulation: the original dense sample, a random 10%
+sample, two separated outer regions, and a sample with one end of the graph
+missing. All four observations retain the same graph, covariance submatrix,
+and migration truth. Batches keep each four-member group together so the loss
+can compare sparse predictions with their dense anchor.
+
+The training mix also replays ordinary examples from the source corpus. This
+guards against improving the structured masks by degrading the broader data
+distribution. The workflow first trains the small initializer gate with the
+graph-balanced neural core frozen, then fine-tunes the complete model at a lower
+learning rate. Both checkpoints are evaluated on held-out replay and paired
+counterfactual examples.
+
+```bash
+DREEMS_SNAKEFILE=workflow/sampling_robustness.Snakefile \
+DREEMS_CONFIG=workflow/config.sampling_robustness.yaml \
+sbatch workflow/run_great_lakes.sh
+```
+
+The source corpus path and all output paths are explicit in the config. The
+prepared masks, checkpoints, validation histories, and evaluations are managed
+as separate Snakemake artifacts. Changing a training hyperparameter therefore
+does not repeat covariance simulation or mask construction.
+
+### Surface Gate And Release
+
+`null_surface_gate.Snakefile` loads the selected sampling-robustness candidate,
+adds one graph-level gate, and freezes every preceding parameter. The gate
+learns when a homogeneous centered surface is preferable to the full edge
+prediction. Its held-out comparisons are separate from the gate-training
+validation set.
+
+`surface_gate_release.Snakefile` then recalibrates posterior SD from cached
+independent predictions. It uses deterministic family- and density-balanced
+fit, selection, and verification splits, checks parameter lineage, and writes
+the packaged checkpoint atomically:
+
+```bash
+uv run --frozen --no-sync snakemake \
+    -s workflow/surface_gate_release.Snakefile \
+    --configfile workflow/config.surface_gate_release.yaml \
+    --profile workflow/profiles/slurm
+```
+
+The checked-in release config records the exact archived inputs used for the
+0.2.0 package. Override its scratch and Turbo paths only when reproducing the
+same promotion from a relocated artifact archive.

@@ -141,6 +141,8 @@ model = dreems.load_model()
 assert model.checkpoint.model["model_name"] == "dreems"
 assert model.checkpoint.model["node_dim"] == 109
 assert model.checkpoint.model["edge_dim"] == 253
+assert model.checkpoint.model["architecture"]["kind"] == "diffusion_band_surface_gate_v3"
+assert model.checkpoint.params.surface_gate_hidden is not None
 print("wheel and packaged checkpoint are usable")
 '
         """

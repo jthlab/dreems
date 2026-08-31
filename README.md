@@ -1,9 +1,12 @@
 # DREEMS
 
-DREEMS is a neural estimator for effective migration surfaces. The released
-model predicts centered edge log-conductances on a spatial graph and reports
-held-out-calibrated edge posterior standard deviations. FEEMS baselines are
-exposed through a small wrapper around the Novembre Lab FEEMS implementation.
+DREEMS (Deep Recovery of Effective Migration Surfaces) is a neural estimator
+for effective migration surfaces. The production model predicts centered edge
+log-conductances on a spatial graph and reports held-out-calibrated edge
+posterior standard deviations. A learned graph-level gate shrinks the centered
+surface toward homogeneous migration when the data do not support spatial
+contrast. FEEMS baselines are exposed through a small wrapper around the
+Novembre Lab FEEMS implementation.
 
 This repository contains the production package, the workflows used to train
 and evaluate the released model, direct tests, and the manuscript with frozen
@@ -73,25 +76,25 @@ On Great Lakes, replace the local profile with `workflow/profiles/slurm`.
 
 ## Workflow
 
-The Snakemake workflow in `workflow/` is the publication base-training path. It
-generates each simulation in an independent job, prepares diffusion-band and
-all-pair conditioner features per example, computes mergeable normalization
-statistics, trains one JAX model, and evaluates each held-out example
-independently. `workflow/calibration.Snakefile` then fits, selects, and verifies
-posterior-SD calibration on three disjoint held-out splits. One-example worker
-outputs are temporary: Snakemake compacts them into reusable raw packs before
-feature preparation, avoiding hundreds of thousands of small scratch files.
+The Snakemake workflow in `workflow/` generates each simulation in an
+independent job, prepares diffusion-band and all-pair conditioner features per
+example, computes mergeable normalization statistics, trains JAX models, and
+evaluates held-out examples independently. One-example worker outputs are
+temporary: Snakemake compacts them into reusable raw packs before feature
+preparation, avoiding hundreds of thousands of small scratch files.
 
-Three configs are checked in:
+The production lineage is recorded in separate configs:
 
-- `workflow/config.production.yaml` records the released 61,440-example fit and
-  its 4,096-example held-out corpus. It uses MAF-conditioned island-coalescent
-  covariance simulation, topology-invariant diffusion-band features, the
-  all-pair diagonal-adjoint initializer, and the 128-channel GNN.
-- `workflow/config.example.yaml` keeps the production model structure but
-  reduces simulation sizes and optimizer steps for an executable smoke run.
-- `workflow/config.calibration.yaml` records the post-training calibration and
-  untouched verification splits.
+- `workflow/config.production.yaml` records the 61,440-example graph-balanced
+  base fit and its 4,096-example held-out corpus.
+- `workflow/config.sampling_robustness.yaml` records the counterfactual
+  sampling-mask augmentation and full-model fine-tune.
+- `workflow/config.null_surface_gate.yaml` records the final graph-level gate
+  fit with the preceding model frozen.
+- `workflow/config.surface_gate_release.yaml` records fresh posterior-SD
+  calibration, verification, and deterministic release packaging.
+- `workflow/config.example.yaml` reduces simulation sizes and optimizer steps
+  for an executable smoke run.
 
 See [workflow/README.md](workflow/README.md) for checkpoint provenance and the
 complete run procedure.
@@ -151,7 +154,7 @@ On Great Lakes, the Slurm profile uses account `jonth0`. The controller itself
 may run as one Slurm job; Snakemake submits every worker:
 
 ```bash
-DREEMS_RUN_ROOT=/scratch/jonth_root/jonth1/jonth/dreems/conditioned_diffusion_bands \
+DREEMS_RUN_ROOT=/scratch/jonth_root/jonth0/jonth/dreems/conditioned_diffusion_bands \
 workflow/run_great_lakes.sh
 ```
 
@@ -247,7 +250,11 @@ neural posterior summaries; the latter has geometric mean one. By default,
 reported posterior SD belongs to the neural posterior, not to the refined
 point estimate. It is multiplicatively calibrated by sampled-node density on
 held-out simulations; `edge_log_migration_sd_raw` retains the uncalibrated
-value when the two differ. Pass `refine=False` to skip refinement.
+value when the two differ. `surface.attrs["dreems_surface_weight"]` reports the
+learned graph-level shrinkage weight: zero is a homogeneous centered surface,
+and one retains the full predicted contrast. The lower-level
+`DREEMSResult.surface_weight` field exposes the same value. Pass `refine=False`
+to skip refinement.
 
 The lower-level numpy API remains available through `DREEMSInput`,
 `NodeCovarianceInput`, and `load_model`.
@@ -266,7 +273,7 @@ dreems \
 
 Pass `--checkpoint path/to/checkpoint.dreems.zip` or
 `dreems.load_model("path/to/checkpoint.dreems.zip")` to override the packaged
-topology-invariant diffusion-band checkpoint.
+topology-invariant diffusion-band surface-gate checkpoint.
 
 For testing against exact FEEMS, use `--feems` with a genotype matrix. Official
 FEEMS fitting requires genotypes/SNPs, not just a covariance matrix:
@@ -302,10 +309,11 @@ dreems --feems \
 The manuscript is in
 [`reports/dreems_genetics_manuscript`](reports/dreems_genetics_manuscript).
 Its committed data snapshots, figures, and tables are the evidence used in the
-compiled paper. They correspond to checkpoint SHA-256
+compiled paper. They correspond to the predecessor checkpoint SHA-256
 `f0b677d2cc028252002d15fac843ca7347b1b352eb2286a18bd202b724aa92b4`
 and the 512-example FEEMS leave-one-observed-deme-out comparison recorded in
-`workflow/h2h.Snakefile`.
+`workflow/h2h.Snakefile`. The packaged production checkpoint is newer; the
+frozen manuscript results must be regenerated before attributing them to it.
 
 Install the manuscript dependencies and rebuild the PDF from the committed
 assets with:

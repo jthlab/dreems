@@ -1,0 +1,41 @@
+# Paired evaluation of the released and broad SNP-count checkpoints.
+source_root: results/dreems_snp_range_experiment
+outdir: results/dreems_snp_range_checkpoint_comparison_work
+publish_dir: results/dreems_snp_range_checkpoint_comparison
+router_publish_dir: results/dreems_snp_range_router
+router_threshold: 512
+router_h2h_publish_dir: results/dreems_snp_range_router_h2h
+router_h2h_reference_gallery: results/released_graph_balanced_loo_h2h/gallery
+router_h2h_reference_rows: results/released_graph_balanced_loo_h2h/rows.csv
+
+test_examples: 4096
+pack_size: 64
+raw_pack_pattern: results/dreems_snp_range_experiment/raw/test/pack_{pack}.pkl
+raw_metadata_pattern: results/dreems_snp_range_experiment/raw/test/pack_{pack}.metadata.json
+feature_config: results/dreems_snp_range_experiment/config/features.cf4eb139bd1f8730.json
+
+old_checkpoint: src/dreems/data/dreems_diffusion_bands.dreems.zip
+new_checkpoint: results/dreems_snp_range_experiment/model/checkpoint.best.node_covariance.dreems.zip
+
+# The first 1,024 test examples were retained as packed validation inputs.
+reused_prepared_dir: results/dreems_snp_range_experiment/prepared_batches/validation
+reused_prepared_packs: 16
+
+uv_cache_dir: null
+uv_run_args: --frozen --no-sync
+partition: standard
+prepare_threads: 1
+prepare_mem_mb: 2000
+prepare_runtime: 30m
+eval_threads: 1
+eval_mem_mb: 6000
+eval_runtime: 60m
+eval_batch_size: 4
+gallery_threads: 2
+gallery_mem_mb: 12000
+gallery_runtime: 120m
+router_gallery_threads: 2
+router_gallery_mem_mb: 4000
+router_gallery_runtime: 30m
+router_h2h_gallery_mem_mb: 2000
+router_h2h_gallery_runtime: 20m

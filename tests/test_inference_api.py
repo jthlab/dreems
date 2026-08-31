@@ -219,6 +219,7 @@ def test_node_covariance_checkpoint_migration_preserves_parameters_and_predictio
     np.testing.assert_array_equal(after.edge_sd[0], before.edge_sd[0])
     np.testing.assert_array_equal(after.node_log_q_mean[0], before.node_log_q_mean[0])
     np.testing.assert_array_equal(after.node_log_q_sd[0], before.node_log_q_sd[0])
+    assert after.surface_weight == before.surface_weight == [1.0]
 
 
 def test_packaged_default_checkpoint_loads() -> None:
@@ -231,6 +232,16 @@ def test_packaged_default_checkpoint_loads() -> None:
         "kind": "topology_diffusion_bands_v2",
         "covariance_components": 20,
     }
+    assert predictor.checkpoint.model["architecture"] == {
+        "context_layers": 3,
+        "hidden_channels": 128,
+        "initializer_gate": True,
+        "kind": "diffusion_band_surface_gate_v3",
+        "layers": 10,
+        "surface_gate": True,
+    }
+    assert predictor.checkpoint.params.surface_gate_hidden is not None
+    assert predictor.checkpoint.params.surface_gate_out is not None
 
 
 def test_predict_uses_packaged_default_checkpoint() -> None:
@@ -247,6 +258,7 @@ def test_predict_uses_packaged_default_checkpoint() -> None:
     )
 
     assert result.edge_log_mean.shape == (raw["graph"]["edges"].shape[0],)
+    assert 0.0 <= result.surface_weight <= 1.0
 
 
 def test_packaged_checkpoint_is_coordinate_frame_invariant() -> None:
@@ -273,6 +285,7 @@ def test_packaged_checkpoint_is_coordinate_frame_invariant() -> None:
 
     np.testing.assert_allclose(aligned_mean, reference.edge_mean[0], atol=2e-6)
     np.testing.assert_allclose(aligned_sd, reference.edge_sd[0], atol=2e-6)
+    np.testing.assert_allclose(changed.surface_weight, reference.surface_weight, atol=2e-6)
 
 
 def test_released_feature_and_prediction_contract() -> None:
@@ -296,22 +309,23 @@ def test_released_feature_and_prediction_contract() -> None:
     prediction = checkpoints.predict_examples(checkpoints.load_checkpoint(), [raw])
     np.testing.assert_allclose(
         prediction.edge_mean[0],
-        [-0.05598392, -0.18179727, 0.02896221, 0.05115841, -0.07394514, 0.23160577],
+        [-0.00980676, -0.01296327, 0.00417129, 0.01218971, -0.01021037, 0.01661941],
         rtol=2e-5,
         atol=2e-6,
     )
     np.testing.assert_allclose(
         prediction.edge_sd[0],
-        [2.25838019, 2.43032788, 2.32765086, 2.45003227, 2.33918366, 2.07290669],
+        [1.30176003, 1.41529447, 1.35983055, 1.39948622, 1.35995925, 1.19587870],
         rtol=2e-5,
         atol=2e-6,
     )
     np.testing.assert_allclose(
         prediction.raw_edge_sd[0],
-        [1.18292467, 1.27298975, 1.21920819, 1.28331077, 1.22524900, 1.08577488],
+        [1.20213786, 1.30698365, 1.25576431, 1.29238518, 1.25588316, 1.10435951],
         rtol=2e-5,
         atol=2e-6,
     )
+    assert prediction.surface_weight[0] == pytest.approx(0.113678813)
 
 
 def test_checkpoint_calibration_preserves_parameters_and_exposes_raw_sd(tmp_path) -> None:

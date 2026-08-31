@@ -1,15 +1,15 @@
-# Exact corpus and training recipe for the packaged graph-balanced
-# diffusion-band model. Posterior-SD calibration is recorded separately in
-# config.calibration.yaml.
+# Exact corpus and training recipe for the graph-balanced base model. The
+# released model adds the sampling-robustness and surface-gate stages recorded
+# by config.sampling_robustness.yaml, config.null_surface_gate.yaml, and
+# config.surface_gate_release.yaml.
 outdir: results/dreems_production
 uv_cache_dir: null
 uv_run_args: --frozen --no-sync
 xla_mem_fraction: "0.35"
 
 provenance:
-  released_checkpoint: src/dreems/data/dreems_diffusion_bands.dreems.zip
-  released_checkpoint_sha256: f0b677d2cc028252002d15fac843ca7347b1b352eb2286a18bd202b724aa92b4
-  released_params_sha256: d7899a6bb419e4d017e093af958ab9750c2a947ccc72087ccf7bfcd18a3c2984
+  base_checkpoint_sha256: f0b677d2cc028252002d15fac843ca7347b1b352eb2286a18bd202b724aa92b4
+  base_params_sha256: d7899a6bb419e4d017e093af958ab9750c2a947ccc72087ccf7bfcd18a3c2984
   source_checkpoint_sha256: f237554026432e2874a293b5f3c5dfbe680c4506d2075d4e0a7f728d480e4ff4
   trained_checkpoint_sha256: 038632b1e11a8a4dc9ac858967c1f7cfa56c45920a1ec589a41823757c4a2bfe
   source_run: graph_balanced_retrain_20260821

@@ -16,7 +16,7 @@ from typing import Any
 import numpy as np
 from scipy.stats import binomtest
 
-from dreems import feems, metrics
+from dreems import features, feems, metrics
 from dreems.inference import InferenceExample, load_model
 from dreems.refinement import DREEMSMapRefinementConfig
 from dreems.workflow_io import json_ready
@@ -31,6 +31,7 @@ FEEMS_CV_SOURCE = (
 FEEMS_PINNED_COMMIT = "aa890b0e8ef583dd657a6a696af591b732d1d8be"
 
 CASE_METADATA_KEYS = (
+    "simulator",
     "surface_kind",
     "sample_design",
     "sample_regime",
@@ -43,6 +44,14 @@ CASE_METADATA_KEYS = (
     "sampling_association_strength",
     "sampling_count_migration_correlation",
     "sampling_inclusion_migration_correlation",
+    "scenario_truth",
+    "scenario_mask",
+    "scenario_replicate",
+    "scenario_seed",
+    "scenario_source_notebook_sha256",
+    "scenario_raw_snps",
+    "scenario_biallelic_snps",
+    "scenario_random_sample_fraction",
 )
 
 
@@ -121,6 +130,12 @@ def _base_row(
 
 def _metric_fields(prefix: str, truth: np.ndarray, estimate: np.ndarray) -> dict[str, float]:
     return metrics.edge_log_metrics(truth, estimate).to_prefixed_dict(prefix)
+
+
+def _centered_rms(values: np.ndarray) -> float:
+    centered = metrics.centered(np.asarray(values, dtype=np.float64))
+    finite = centered[np.isfinite(centered)]
+    return float(np.sqrt(np.mean(finite * finite))) if finite.size else float("nan")
 
 
 def _sha256(path: Path) -> str:
@@ -213,6 +228,8 @@ def run_feems_case(args: argparse.Namespace) -> None:
         "cv_mode": result.cv_mode,
         "n_snps_after_filter": int(result.n_snps_after_filter),
         "train_loss": float(result.train_loss),
+        "truth_edge_log_rms": _centered_rms(truth),
+        "feems_edge_log_rms": _centered_rms(estimate),
         **_metric_fields("feems_edge_log", truth, estimate),
     }
     sample_count = np.bincount(sample_nodes, minlength=positions.shape[0]).astype(np.int32)
@@ -252,9 +269,16 @@ def run_dreems_case(args: argparse.Namespace) -> None:
     started = time.perf_counter()
     predictor = load_model(args.checkpoint)
     loaded_seconds = time.perf_counter() - started
+    conditioner_started = time.perf_counter()
+    conditioner, conditioner_info = features.fit_linearized_resistance_proxy(
+        payload,
+        predictor.checkpoint.model,
+    )
+    conditioner_seconds = time.perf_counter() - conditioner_started
     refinement_config = DREEMSMapRefinementConfig()
+    prediction_started = time.perf_counter()
     result = predictor.predict(example, refinement_config=refinement_config)
-    prediction_seconds = time.perf_counter() - started - loaded_seconds
+    prediction_seconds = time.perf_counter() - prediction_started
     neural = result.centered_edge_log_mean
     refined = result.centered_refined_edge_log_mean
     if refined is None:
@@ -272,13 +296,27 @@ def run_dreems_case(args: argparse.Namespace) -> None:
         "method": "dreems",
         "checkpoint": str(args.checkpoint.resolve()),
         "checkpoint_load_seconds": float(loaded_seconds),
+        "conditioner_seconds": float(conditioner_seconds),
+        "conditioner_observed_nodes": int(conditioner_info.get("n_observed_nodes", 0)),
+        "conditioner_observed_pairs": int(conditioner_info.get("n_pairs", 0)),
+        "conditioner_baseline_pair_log_corr": float(
+            conditioner_info.get("baseline_pair_log_corr", float("nan"))
+        ),
+        "conditioner_pair_residual_sd": float(
+            conditioner_info.get("pair_residual_sd", float("nan"))
+        ),
         "prediction_seconds": float(prediction_seconds),
         "elapsed_seconds": float(time.perf_counter() - started),
         "posterior_sd_mean": float(np.mean(edge_sd)),
         "posterior_sd_median": float(np.median(edge_sd)),
+        "truth_edge_log_rms": _centered_rms(truth),
+        "conditioner_edge_log_rms": _centered_rms(conditioner),
+        "dreems_edge_log_rms": _centered_rms(neural),
+        "dreems_map_edge_log_rms": _centered_rms(refined),
         "neural_50_coverage": _coverage(truth, neural, edge_sd, 0.67448975),
         "neural_80_coverage": _coverage(truth, neural, edge_sd, 1.28155157),
         "neural_95_coverage": _coverage(truth, neural, edge_sd, 1.95996398),
+        **_metric_fields("conditioner_edge_log", truth, conditioner),
         **_metric_fields("dreems_edge_log", truth, neural),
         **_metric_fields("dreems_map_edge_log", truth, refined),
     }
@@ -297,6 +335,7 @@ def run_dreems_case(args: argparse.Namespace) -> None:
         positions=positions,
         edges=edges,
         truth=metrics.centered(truth),
+        conditioner=metrics.centered(conditioner),
         dreems=neural,
         dreems_map=refined,
         edge_sd=edge_sd,
@@ -414,6 +453,7 @@ def protocol_manifest(
     source_commit: str,
     input_pattern: str,
     metadata_pattern: str,
+    feems_result_source: str = "computed",
 ) -> dict[str, Any]:
     config = feems.recommended_loo_config()
     feems.require_recommended_loo(config)
@@ -436,6 +476,7 @@ def protocol_manifest(
             "final_refit_log_weight_bounds": "unbounded",
             "random_state": config.random_state,
             "fold_execution": cv_execution,
+            "result_source": feems_result_source,
             "fold_parallelism_only": True,
             "final_refit": "all samples at jointly selected lambda and lambda_q",
             "pinned_commit": FEEMS_PINNED_COMMIT,
@@ -532,6 +573,7 @@ def aggregate(args: argparse.Namespace) -> None:
         source_commit=args.source_commit,
         input_pattern=args.input_pattern,
         metadata_pattern=args.metadata_pattern,
+        feems_result_source=getattr(args, "feems_result_source", "computed"),
     )
     summary = {
         "examples": len(rows),
@@ -587,6 +629,11 @@ def build_parser() -> argparse.ArgumentParser:
     aggregate_parser.add_argument("--dreems-json", type=Path, nargs="+", required=True)
     aggregate_parser.add_argument("--checkpoint", type=Path, required=True)
     aggregate_parser.add_argument("--cv-execution", required=True)
+    aggregate_parser.add_argument(
+        "--feems-result-source",
+        choices=("computed", "verified_archive"),
+        default="computed",
+    )
     aggregate_parser.add_argument("--source-commit", required=True)
     aggregate_parser.add_argument("--input-pattern", required=True)
     aggregate_parser.add_argument("--metadata-pattern", required=True)

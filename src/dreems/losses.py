@@ -5,7 +5,7 @@ from typing import TypeAlias
 
 import jax
 import jax.numpy as jnp
-from jaxtyping import Array, Float
+from jaxtyping import Array, Float, Int
 
 LossArray: TypeAlias = Float[Array, "batch items"]
 Scalar: TypeAlias = Float[Array, ""]
@@ -43,6 +43,64 @@ def masked_mean_squared_error(
     return _mean_over_examples(per_example, active)
 
 
+def masked_initializer_regret_loss(
+    prediction: LossArray,
+    target: LossArray,
+    initializer: LossArray,
+    initializer_valid: LossArray,
+    mask: LossArray,
+    *,
+    margin: float = 0.0,
+) -> Scalar:
+    """Penalize a graph only when it is worse than its valid initializer."""
+
+    valid_mask = ((mask > 0.0) & (initializer_valid > 0.0) & jnp.isfinite(initializer)).astype(
+        prediction.dtype
+    )
+    safe_initializer = jnp.where(valid_mask > 0.0, initializer, target)
+    count = jnp.sum(valid_mask, axis=1)
+    active = (count > 0.0).astype(prediction.dtype)
+    prediction_mse = jnp.sum(((prediction - target) ** 2) * valid_mask, axis=1)
+    initializer_mse = jnp.sum(((safe_initializer - target) ** 2) * valid_mask, axis=1)
+    prediction_mse /= jnp.maximum(count, 1.0)
+    initializer_mse /= jnp.maximum(count, 1.0)
+    regret = jnp.maximum(prediction_mse - jax.lax.stop_gradient(initializer_mse) - margin, 0.0)
+    return _mean_over_examples(regret, active)
+
+
+def counterfactual_anchor_consistency_loss(
+    prediction: LossArray,
+    mask: LossArray,
+    group: Int[Array, "batch"],
+    anchor: Float[Array, "batch"],
+) -> Scalar:
+    """Match paired subsamples to the richer observation from the same simulation."""
+
+    batch_size = prediction.shape[0]
+    index = jnp.arange(batch_size)
+    same_group = group[:, None] == group[None, :]
+    valid_group = (group[:, None] >= 0) & (group[None, :] >= 0)
+    left_is_anchor = anchor[:, None] > 0.0
+    right_is_anchor = anchor[None, :] > 0.0
+    anchor_pair = left_is_anchor ^ right_is_anchor
+    upper_triangle = index[:, None] < index[None, :]
+    pair_active = same_group & valid_group & anchor_pair & upper_triangle
+
+    shared_mask = mask[:, None, :] * mask[None, :, :]
+    count = jnp.sum(shared_mask, axis=2)
+    left = prediction[:, None, :]
+    right = prediction[None, :, :]
+    teacher = jnp.where(left_is_anchor[:, :, None], left, right)
+    student = jnp.where(left_is_anchor[:, :, None], right, left)
+    squared_difference = (student - jax.lax.stop_gradient(teacher)) ** 2
+    pair_mse = jnp.sum(squared_difference * shared_mask, axis=2) / jnp.maximum(count, 1.0)
+    pair_active_float = pair_active.astype(prediction.dtype) * (count > 0.0)
+    return jnp.sum(pair_mse * pair_active_float) / jnp.maximum(
+        jnp.sum(pair_active_float),
+        1.0,
+    )
+
+
 def masked_gaussian_nll(
     prediction: LossArray,
     target: LossArray,
@@ -59,6 +117,26 @@ def masked_gaussian_nll(
     active = (count > 0.0).astype(prediction.dtype)
     per_example = jnp.sum(terms, axis=1) / jnp.maximum(count, 1.0)
     return _mean_over_examples(per_example, active)
+
+
+def surface_gate_binary_cross_entropy(
+    surface_weight: Float[Array, "batch"],
+    target: LossArray,
+    mask: LossArray,
+    *,
+    target_floor: float,
+    eps: float = 1e-6,
+) -> Scalar:
+    """Classify whether a graph has nonconstant relative migration."""
+
+    count = jnp.sum(mask, axis=1)
+    active = (count > 0.0).astype(target.dtype)
+    target_rms = jnp.sqrt(jnp.sum(target * target * mask, axis=1) / jnp.maximum(count, 1.0))
+    structured = (target_rms > target_floor).astype(target.dtype)
+    probability = jnp.clip(surface_weight, eps, 1.0 - eps)
+    cross_entropy = -structured * jnp.log(probability)
+    cross_entropy -= (1.0 - structured) * jnp.log1p(-probability)
+    return _mean_over_examples(cross_entropy, active)
 
 
 def masked_regression_slope_loss(

@@ -22,6 +22,23 @@ OneOutput: TypeAlias = tuple[
     Float[Array, "nodes"],
     Float[Array, "nodes"],
 ]
+OneOutputWithGate: TypeAlias = tuple[
+    Float[Array, "edges"],
+    Float[Array, "edges"],
+    Float[Array, "edges"],
+    Float[Array, "nodes"],
+    Float[Array, "nodes"],
+    Float[Array, "edges"],
+]
+OneOutputWithDiagnostics: TypeAlias = tuple[
+    Float[Array, "edges"],
+    Float[Array, "edges"],
+    Float[Array, "edges"],
+    Float[Array, "nodes"],
+    Float[Array, "nodes"],
+    Float[Array, "edges"],
+    Float[Array, ""],
+]
 
 
 class DREEMSBatch(TypedDict):
@@ -47,11 +64,35 @@ BatchOutput: TypeAlias = tuple[
     Float[Array, "batch nodes"],
     Float[Array, "batch nodes"],
 ]
+BatchOutputWithGate: TypeAlias = tuple[
+    Float[Array, "batch edges"],
+    Float[Array, "batch edges"],
+    Float[Array, "batch edges"],
+    Float[Array, "batch nodes"],
+    Float[Array, "batch nodes"],
+    Float[Array, "batch edges"],
+]
+BatchOutputWithDiagnostics: TypeAlias = tuple[
+    Float[Array, "batch edges"],
+    Float[Array, "batch edges"],
+    Float[Array, "batch edges"],
+    Float[Array, "batch nodes"],
+    Float[Array, "batch nodes"],
+    Float[Array, "batch edges"],
+    Float[Array, "batch"],
+]
 PredictionOutput: TypeAlias = tuple[
     Float[np.ndarray, "batch edges"],
     Float[np.ndarray, "batch edges"],
     Float[np.ndarray, "batch nodes"],
     Float[np.ndarray, "batch nodes"],
+]
+PredictionOutputWithDiagnostics: TypeAlias = tuple[
+    Float[np.ndarray, "batch edges"],
+    Float[np.ndarray, "batch edges"],
+    Float[np.ndarray, "batch nodes"],
+    Float[np.ndarray, "batch nodes"],
+    Float[np.ndarray, "batch"],
 ]
 
 DREEMS_BATCH_FIELDS = itemgetter("node_x", "edge_x", "edges", "node_mask", "edge_mask")
@@ -95,6 +136,10 @@ class DREEMS(eqx.Module):
     edge_feature_gate: eqx.nn.Linear
     edge_message_layers: tuple[eqx.nn.Linear, ...]
     edge_gate_layers: tuple[eqx.nn.Linear, ...]
+    initializer_gate_hidden: eqx.nn.Linear | None
+    initializer_gate_out: eqx.nn.Linear | None
+    surface_gate_hidden: eqx.nn.Linear | None
+    surface_gate_out: eqx.nn.Linear | None
 
     def __init__(
         self,
@@ -105,6 +150,10 @@ class DREEMS(eqx.Module):
         hidden_channels: int,
         layers: int,
         context_layers: int,
+        initializer_gate: bool = False,
+        initializer_gate_initial_logit: float = 6.0,
+        surface_gate: bool = False,
+        surface_gate_initial_logit: float = 6.0,
     ) -> None:
         def next_key() -> PRNGKeyArray:
             nonlocal key
@@ -169,6 +218,42 @@ class DREEMS(eqx.Module):
         self.edge_gate_layers = tuple(
             eqx.nn.Linear(edge_dim, hidden_channels, key=next_key()) for _ in range(layers)
         )
+        if initializer_gate:
+            self.initializer_gate_hidden = eqx.nn.Linear(
+                hidden_channels,
+                hidden_channels,
+                key=next_key(),
+            )
+            initializer_gate_out = eqx.nn.Linear(hidden_channels, 1, key=next_key())
+            self.initializer_gate_out = eqx.tree_at(
+                lambda layer: (layer.weight, layer.bias),
+                initializer_gate_out,
+                (
+                    jnp.zeros_like(initializer_gate_out.weight),
+                    jnp.full_like(initializer_gate_out.bias, initializer_gate_initial_logit),
+                ),
+            )
+        else:
+            self.initializer_gate_hidden = None
+            self.initializer_gate_out = None
+        if surface_gate:
+            self.surface_gate_hidden = eqx.nn.Linear(
+                2 * hidden_channels + 3,
+                hidden_channels,
+                key=next_key(),
+            )
+            surface_gate_out = eqx.nn.Linear(hidden_channels, 1, key=next_key())
+            self.surface_gate_out = eqx.tree_at(
+                lambda layer: (layer.weight, layer.bias),
+                surface_gate_out,
+                (
+                    jnp.zeros_like(surface_gate_out.weight),
+                    jnp.full_like(surface_gate_out.bias, surface_gate_initial_logit),
+                ),
+            )
+        else:
+            self.surface_gate_hidden = None
+            self.surface_gate_out = None
 
     @staticmethod
     def _propagate(
@@ -212,7 +297,50 @@ class DREEMS(eqx.Module):
         edges: Edges,
         node_mask: NodeMask,
         edge_mask: EdgeMask,
+        edge_initializer: EdgeMask | None = None,
+        edge_initializer_valid: EdgeMask | None = None,
     ) -> OneOutput:
+        output = self.apply_one_with_diagnostics(
+            node_x,
+            edge_x,
+            edges,
+            node_mask,
+            edge_mask,
+            edge_initializer,
+            edge_initializer_valid,
+        )
+        return output[:5]
+
+    def apply_one_with_gate(
+        self,
+        node_x: NodeX,
+        edge_x: EdgeX,
+        edges: Edges,
+        node_mask: NodeMask,
+        edge_mask: EdgeMask,
+        edge_initializer: EdgeMask | None = None,
+        edge_initializer_valid: EdgeMask | None = None,
+    ) -> OneOutputWithGate:
+        return self.apply_one_with_diagnostics(
+            node_x,
+            edge_x,
+            edges,
+            node_mask,
+            edge_mask,
+            edge_initializer,
+            edge_initializer_valid,
+        )[:6]
+
+    def apply_one_with_diagnostics(
+        self,
+        node_x: NodeX,
+        edge_x: EdgeX,
+        edges: Edges,
+        node_mask: NodeMask,
+        edge_mask: EdgeMask,
+        edge_initializer: EdgeMask | None = None,
+        edge_initializer_valid: EdgeMask | None = None,
+    ) -> OneOutputWithDiagnostics:
         z = jax.nn.gelu(jax.vmap(self.input)(node_x)) * node_mask[:, None]
         z = self._propagate(
             z,
@@ -282,14 +410,233 @@ class DREEMS(eqx.Module):
         edge_gate = jax.nn.sigmoid(jax.vmap(self.edge_feature_gate)(edge_x))
         hidden += edge_gate * edge_condition * edge_mask[:, None]
 
-        pred = jnp.squeeze(jax.vmap(self.edge_out)(hidden), axis=1)
-        pred -= jnp.sum(pred * edge_mask) / jnp.maximum(jnp.sum(edge_mask), 1.0)
+        proposal = jnp.squeeze(jax.vmap(self.edge_out)(hidden), axis=1)
+        proposal -= jnp.sum(proposal * edge_mask) / jnp.maximum(jnp.sum(edge_mask), 1.0)
+        proposal *= edge_mask
+        if edge_initializer is None:
+            edge_initializer = jnp.zeros_like(edge_mask)
+        if edge_initializer_valid is None:
+            edge_initializer_valid = jnp.zeros_like(edge_mask)
+        initializer_valid = (
+            (edge_initializer_valid > 0.0) & jnp.isfinite(edge_initializer)
+        ).astype(edge_mask.dtype)
+        safe_initializer = jnp.where(initializer_valid > 0.0, edge_initializer, 0.0)
+        if self.initializer_gate_hidden is None or self.initializer_gate_out is None:
+            pred = proposal
+            neural_weight = edge_mask
+        else:
+            gate_hidden = jax.nn.gelu(jax.vmap(self.initializer_gate_hidden)(hidden))
+            gate_logit = jnp.squeeze(jax.vmap(self.initializer_gate_out)(gate_hidden), axis=1)
+            neural_weight = jax.nn.sigmoid(gate_logit)
+            neural_weight = (
+                initializer_valid * neural_weight + (1.0 - initializer_valid)
+            ) * edge_mask
+            pred = safe_initializer + neural_weight * (proposal - safe_initializer)
+            pred -= jnp.sum(pred * edge_mask) / jnp.maximum(jnp.sum(edge_mask), 1.0)
+            pred *= edge_mask
         edge_logvar = jnp.squeeze(jax.vmap(self.edge_logvar_out)(hidden), axis=1)
-        return pred * edge_mask, edge_logvar * edge_mask, context_pred, q_pred, q_logvar * node_mask
+        if self.surface_gate_hidden is None or self.surface_gate_out is None:
+            surface_weight = jnp.asarray(1.0, dtype=pred.dtype)
+        else:
+            edge_count = jnp.maximum(jnp.sum(edge_mask), 1.0)
+            hidden_mean = jnp.sum(hidden * edge_mask[:, None], axis=0) / edge_count
+            hidden_rms = jnp.sqrt(
+                jnp.sum(hidden * hidden * edge_mask[:, None], axis=0) / edge_count + 1e-8
+            )
+            signal_rms = jnp.sqrt(jnp.sum(pred * pred * edge_mask) / edge_count + 1e-8)
+            mean_logvar = jnp.sum(edge_logvar * edge_mask) / edge_count
+            valid_fraction = jnp.sum(initializer_valid * edge_mask) / edge_count
+            summary = jnp.concatenate(
+                [
+                    hidden_mean,
+                    hidden_rms,
+                    jnp.stack(
+                        [
+                            jnp.log(signal_rms + 1e-6),
+                            jnp.log(signal_rms + 1e-6) - 0.5 * mean_logvar,
+                            valid_fraction,
+                        ]
+                    ),
+                ]
+            )
+            surface_hidden = jax.nn.gelu(self.surface_gate_hidden(summary))
+            surface_logit = jnp.squeeze(self.surface_gate_out(surface_hidden), axis=0)
+            surface_weight = jax.nn.sigmoid(surface_logit)
+            pred *= surface_weight
+            pred *= edge_mask
+        return (
+            pred,
+            edge_logvar * edge_mask,
+            context_pred,
+            q_pred,
+            q_logvar * node_mask,
+            neural_weight,
+            surface_weight,
+        )
 
 
 def apply_batch(model: DREEMS, batch: DREEMSBatch) -> BatchOutput:
-    return jax.vmap(model.apply_one)(*DREEMS_BATCH_FIELDS(batch))
+    return apply_batch_with_gate(model, batch)[:5]
+
+
+def apply_batch_with_gate(model: DREEMS, batch: DREEMSBatch) -> BatchOutputWithGate:
+    edge_mask = batch["edge_mask"]
+    edge_initializer = batch.get("edge_initializer", jnp.zeros_like(edge_mask))
+    edge_initializer_valid = batch.get(
+        "edge_initializer_valid",
+        jnp.zeros_like(edge_mask),
+    )
+    return jax.vmap(model.apply_one_with_gate)(
+        *DREEMS_BATCH_FIELDS(batch),
+        edge_initializer,
+        edge_initializer_valid,
+    )
+
+
+def apply_batch_with_diagnostics(
+    model: DREEMS,
+    batch: DREEMSBatch,
+) -> BatchOutputWithDiagnostics:
+    edge_mask = batch["edge_mask"]
+    edge_initializer = batch.get("edge_initializer", jnp.zeros_like(edge_mask))
+    edge_initializer_valid = batch.get(
+        "edge_initializer_valid",
+        jnp.zeros_like(edge_mask),
+    )
+    return jax.vmap(model.apply_one_with_diagnostics)(
+        *DREEMS_BATCH_FIELDS(batch),
+        edge_initializer,
+        edge_initializer_valid,
+    )
+
+
+def add_initializer_gate(
+    source: DREEMS,
+    *,
+    key: PRNGKeyArray,
+    node_dim: int,
+    edge_dim: int,
+    hidden_channels: int,
+    layers: int,
+    context_layers: int,
+    initial_logit: float,
+) -> DREEMS:
+    """Add a gate while copying every parameter from an existing v1 model."""
+
+    if source.initializer_gate_hidden is not None or source.initializer_gate_out is not None:
+        return source
+    target = DREEMS(
+        key,
+        node_dim=node_dim,
+        edge_dim=edge_dim,
+        hidden_channels=hidden_channels,
+        layers=layers,
+        context_layers=context_layers,
+        initializer_gate=True,
+        initializer_gate_initial_logit=initial_logit,
+        surface_gate=source.surface_gate_hidden is not None,
+    )
+    core_fields = (
+        "input",
+        "self_layers",
+        "neigh_layers",
+        "context_self_layers",
+        "context_neigh_layers",
+        "fusion",
+        "context_edge_hidden",
+        "context_edge_out",
+        "global_query",
+        "global_key",
+        "global_value",
+        "edge_hidden",
+        "edge_out",
+        "edge_logvar_out",
+        "node_q_hidden",
+        "node_q_out",
+        "node_q_logvar_out",
+        "edge_feature_hidden",
+        "edge_feature_gate",
+        "edge_message_layers",
+        "edge_gate_layers",
+    )
+    result = eqx.tree_at(
+        lambda candidate: tuple(getattr(candidate, name) for name in core_fields),
+        target,
+        tuple(getattr(source, name) for name in core_fields),
+    )
+    if source.surface_gate_hidden is not None and source.surface_gate_out is not None:
+        result = eqx.tree_at(
+            lambda candidate: (candidate.surface_gate_hidden, candidate.surface_gate_out),
+            result,
+            (source.surface_gate_hidden, source.surface_gate_out),
+        )
+    return result
+
+
+def add_surface_gate(
+    source: DREEMS,
+    *,
+    key: PRNGKeyArray,
+    node_dim: int,
+    edge_dim: int,
+    hidden_channels: int,
+    layers: int,
+    context_layers: int,
+    initial_logit: float,
+) -> DREEMS:
+    """Add a graph-level surface gate while preserving existing parameters."""
+
+    if source.surface_gate_hidden is not None or source.surface_gate_out is not None:
+        return source
+    target = DREEMS(
+        key,
+        node_dim=node_dim,
+        edge_dim=edge_dim,
+        hidden_channels=hidden_channels,
+        layers=layers,
+        context_layers=context_layers,
+        initializer_gate=source.initializer_gate_hidden is not None,
+        surface_gate=True,
+        surface_gate_initial_logit=initial_logit,
+    )
+    existing_fields = (
+        "input",
+        "self_layers",
+        "neigh_layers",
+        "context_self_layers",
+        "context_neigh_layers",
+        "fusion",
+        "context_edge_hidden",
+        "context_edge_out",
+        "global_query",
+        "global_key",
+        "global_value",
+        "edge_hidden",
+        "edge_out",
+        "edge_logvar_out",
+        "node_q_hidden",
+        "node_q_out",
+        "node_q_logvar_out",
+        "edge_feature_hidden",
+        "edge_feature_gate",
+        "edge_message_layers",
+        "edge_gate_layers",
+    )
+    result = eqx.tree_at(
+        lambda candidate: tuple(getattr(candidate, name) for name in existing_fields),
+        target,
+        tuple(getattr(source, name) for name in existing_fields),
+    )
+    if source.initializer_gate_hidden is not None and source.initializer_gate_out is not None:
+        result = eqx.tree_at(
+            lambda candidate: (
+                candidate.initializer_gate_hidden,
+                candidate.initializer_gate_out,
+            ),
+            result,
+            (source.initializer_gate_hidden, source.initializer_gate_out),
+        )
+    return result
 
 
 def model_logvar_bounds(metadata: dict[str, Any]) -> tuple[float | None, float | None]:
@@ -317,7 +664,11 @@ def validate_production_model_metadata(metadata: dict[str, Any]) -> None:
         raise ValueError("checkpoint is missing feature metadata")
     if not isinstance(conditioner, dict):
         raise ValueError("checkpoint is missing edge conditioner metadata")
-    if architecture.get("kind") != "diffusion_band_gnn_v1":
+    if architecture.get("kind") not in {
+        "diffusion_band_gnn_v1",
+        "diffusion_band_initializer_gate_v2",
+        "diffusion_band_surface_gate_v3",
+    }:
         raise ValueError("checkpoint does not use the released DREEMS architecture")
     if feature_metadata.get("kind") not in {
         "diffusion_bands_v1",
@@ -337,10 +688,32 @@ def predict(
     q_y_scale: float,
     model: dict[str, Any],
 ) -> PredictionOutput:
+    pred, edge_logvar, q_pred, q_logvar, _surface_weight = predict_with_diagnostics(
+        params,
+        arrays,
+        y_scale=y_scale,
+        q_y_scale=q_y_scale,
+        model=model,
+    )
+    return pred, edge_logvar, q_pred, q_logvar
+
+
+def predict_with_diagnostics(
+    params: DREEMS,
+    arrays: DREEMSArrays,
+    *,
+    y_scale: float,
+    q_y_scale: float,
+    model: dict[str, Any],
+) -> PredictionOutputWithDiagnostics:
+    """Run inference and return the graph-level surface gate weight."""
+
     batch = {name: jax.device_put(jnp.asarray(value)) for name, value in arrays.items()}
-    pred, edge_logvar, _context_pred, q_pred, q_logvar = apply_batch(
-        tree_to_jax(params),
-        batch,
+    pred, edge_logvar, _context_pred, q_pred, q_logvar, _neural_weight, surface_weight = (
+        apply_batch_with_diagnostics(
+            tree_to_jax(params),
+            batch,
+        )
     )
     edge_logvar = np.asarray(edge_logvar)
     q_logvar = np.asarray(q_logvar)
@@ -350,4 +723,10 @@ def predict(
         q_logvar = np.clip(q_logvar, minimum, maximum)
     edge_logvar += 2.0 * np.log(np.maximum(y_scale, 1e-12))
     q_logvar += 2.0 * np.log(np.maximum(q_y_scale, 1e-12))
-    return np.asarray(pred) * y_scale, edge_logvar, np.asarray(q_pred) * q_y_scale, q_logvar
+    return (
+        np.asarray(pred) * y_scale,
+        edge_logvar,
+        np.asarray(q_pred) * q_y_scale,
+        q_logvar,
+        np.asarray(surface_weight),
+    )

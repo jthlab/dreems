@@ -38,6 +38,8 @@ def test_h2h_config_exposes_resources_but_not_feems_statistics() -> None:
     assert "feems_results.tar.gz.sha256" in snakefile
     assert "snakemake_one_job_per_observed_deme" in snakefile
     assert "--cv-checkpoint-dir" in snakefile
+    assert "feems_archive_checksum" in snakefile
+    assert "sha256sum -c" in snakefile
 
 
 def test_h2h_aggregate_requires_and_records_documented_loo(tmp_path: Path) -> None:
@@ -119,6 +121,7 @@ def test_h2h_aggregate_requires_and_records_documented_loo(tmp_path: Path) -> No
     assert protocol["feems"]["lambda_grid"] == list(feems.FEEMS_RECOMMENDED_LAMBDAS)
     assert protocol["feems"]["cv_factr"] == 1e10
     assert protocol["feems"]["fold_execution"] == "snakemake_one_job_per_observed_deme"
+    assert protocol["feems"]["result_source"] == "computed"
     assert protocol["feems"]["final_refit_factr"] == 1e7
     assert protocol["feems"]["final_refit_log_weight_bounds"] == "unbounded"
     assert summary["paired_comparisons"]["dreems_neural_corr_vs_feems"][

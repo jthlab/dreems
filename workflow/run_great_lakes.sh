@@ -10,8 +10,11 @@
 
 set -euo pipefail
 
-PROJECT_ROOT="${DREEMS_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROJECT_ROOT="${DREEMS_REPO:-${SLURM_SUBMIT_DIR:-$SCRIPT_ROOT}}"
 CONFIG="${DREEMS_CONFIG:-workflow/config.production.yaml}"
+CONFIG_FILES_RAW="${DREEMS_CONFIG_FILES:-}"
+SNAKEFILE="${DREEMS_SNAKEFILE:-workflow/Snakefile}"
 
 cd "$PROJECT_ROOT"
 mkdir -p logs/slurm
@@ -40,9 +43,14 @@ if [[ -n "${DREEMS_RUN_ROOT:-}" ]]; then
     extra_config=(--config "outdir=${DREEMS_RUN_ROOT}")
 fi
 
+config_files=("$CONFIG")
+if [[ -n "$CONFIG_FILES_RAW" ]]; then
+    IFS=':' read -r -a config_files <<< "$CONFIG_FILES_RAW"
+fi
+
 exec uv run --frozen --no-sync snakemake \
-    -s workflow/Snakefile \
-    --configfile "$CONFIG" \
+    -s "$SNAKEFILE" \
+    --configfile "${config_files[@]}" \
     --profile workflow/profiles/slurm \
     "${extra_config[@]}" \
     --rerun-incomplete \

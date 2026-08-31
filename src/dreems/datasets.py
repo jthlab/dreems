@@ -306,6 +306,7 @@ def result_to_dataset(dataset: xr.Dataset, result: DREEMSResult) -> xr.Dataset:
                 else str(result.checkpoint_path)
             ),
             "dreems_refinement_applied": bool(result.refinement_applied),
+            "dreems_surface_weight": float(result.surface_weight),
         }
     )
     if result.refinement_diagnostics is not None:

@@ -1,0 +1,63 @@
+# Crossed diagnostic derived from feems_scenarios.ipynb. The same four
+# sampling masks are applied to each truth, which separates sampling geometry
+# from the migration surface.
+outdir: /scratch/jonth_root/jonth0/jonth/dreems/feems_scenario_audit_20260830/work
+publish_dir: /home/jonth/turbo/dreems/feems_scenario_audit_20260830
+input_pattern: /scratch/jonth_root/jonth0/jonth/dreems/feems_scenario_audit_20260830/inputs/example_{example}.pkl
+metadata_pattern: /scratch/jonth_root/jonth0/jonth/dreems/feems_scenario_audit_20260830/inputs/example_{example}.metadata.json
+checkpoint: src/dreems/data/dreems_diffusion_bands.dreems.zip
+
+first_example: 0
+example_count: 36
+example_ids: null
+scenario_config: workflow/config.feems_scenarios.yaml
+gallery_command: scenario-gallery
+
+scenario_audit:
+  seed: 20260830
+  replicates: 3
+  truths: [barrier, anisotropy, homogeneous]
+  masks: [full, random_10pct, outer_slabs, left_missing]
+  rows: 8
+  columns: 12
+  barrier_start: 2.5
+  barrier_end: 8.5
+  barrier_rate: 0.1
+  corridor_rate: 0.5
+  anisotropy_scaler: 5.0
+  random_sample_fraction: 0.10
+  diploids_per_sampled_node: 10
+  num_snps: 1000
+  ploidy: 2
+  mutation_rate: 0.01
+  marker_model: conditioned_random_marker
+  min_allele_frequency: 0.05
+  max_allele_frequency: 0.95
+
+scenario_threads: 1
+scenario_mem_mb: 4000
+scenario_runtime: 60m
+scenario_partition: standard
+
+# FEEMS uses the documented v2 joint lambda/lambda_q leave-one-deme-out
+# protocol. Every held-out deme is an independent Snakemake job.
+feems_fold_mem_mb: 4000
+feems_fold_runtime: 60m
+feems_final_mem_mb: 8000
+feems_final_runtime: 60m
+feems_partition: standard
+protocol_check_partition: standard
+
+dreems_threads: 2
+dreems_mem_mb: 6000
+dreems_runtime: 30m
+dreems_partition: standard
+
+aggregate_mem_mb: 4000
+aggregate_runtime: 30m
+aggregate_partition: standard
+gallery_threads: 1
+gallery_mem_mb: 6000
+gallery_runtime: 60m
+archive_mem_mb: 1000
+archive_runtime: 15m

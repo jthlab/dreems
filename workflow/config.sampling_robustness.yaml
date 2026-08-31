@@ -1,0 +1,94 @@
+# Focused repair for sampling-mask generalization. It reuses existing raw
+# covariance simulations and never regenerates SNPs.
+outdir: /scratch/jonth_root/jonth0/jonth/dreems/sampling_robustness_20260830
+source_corpus: /scratch/jonth_root/jonth1/jonth/dreems_snp_range
+base_checkpoint: src/dreems/data/dreems_diffusion_bands.dreems.zip
+uv_cache_dir: null
+uv_run_args: --frozen --no-sync
+xla_mem_fraction: "0.55"
+
+counterfactual_augmentation:
+  train_base_examples: 2048
+  validation_base_examples: 128
+  train_replay_packs: 128
+  validation_replay_packs: 8
+  groups_per_pack: 16
+  min_sampled_fraction: 0.99
+  min_sampled_nodes: 12
+  selection_seed: 20260831
+  mask_seed: 20260901
+
+prepare_threads: 1
+prepare_mem_mb: 6000
+prepare_runtime: 60m
+prepare_partition: standard
+
+train_threads: 4
+train_mem_mb: 32000
+train_partition: gpu_mig40,spgpu,gpu
+gate_train_runtime: 12h
+finetune_train_runtime: 24h
+
+dreems:
+  architecture:
+    hidden_channels: 128
+    layers: 10
+    context_layers: 3
+    initializer_gate: true
+    initializer_gate_initial_logit: 4.0
+  features:
+    covariance_components: 20
+    normalization_std_floor: 0.2
+    spatial_encoding: topology_node_covariance
+  edge_conditioner:
+    smoothness: 0.01
+    ridge_scale: 0.001
+    pair_weight_power: 0.0
+    length_weighted_baseline: true
+    output_sd: 1.0
+    batch_size: 256
+  loss:
+    min_logvar: -7.0
+    max_logvar: 5.0
+    context_weight: 0.5
+    q_weight: 0.5
+    slope_weight: 0.25
+    slope_target: 1.0
+    slope_target_floor: 0.05
+    slope_huber_delta: 1.0
+    correlation_weight: 0.2
+    correlation_target_floor: 0.05
+    orientation_weight: 0.35
+    orientation_target_floor: 0.05
+    orientation_margin_fraction: 0.5
+    initializer_regret_weight: 0.5
+    initializer_regret_margin: 0.0
+    counterfactual_consistency_weight: 0.1
+
+gate_optimizer:
+  seed: 20260911
+  steps: 8000
+  batch_size: 8
+  learning_rate: 5.0e-4
+  gradient_clip_norm: 1.0
+  log_every: 250
+  early_stopping_patience: 12
+  early_stopping_min_delta: 0.0001
+  early_stopping_warmup_steps: 1500
+  early_stopping_metric: validation_loss
+  restore_best_validation: true
+  trainable_scope: initializer_gate
+
+finetune_optimizer:
+  seed: 20260912
+  steps: 25000
+  batch_size: 8
+  learning_rate: 1.0e-5
+  gradient_clip_norm: 1.0
+  log_every: 500
+  early_stopping_patience: 12
+  early_stopping_min_delta: 0.0001
+  early_stopping_warmup_steps: 5000
+  early_stopping_metric: validation_loss
+  restore_best_validation: true
+  trainable_scope: all

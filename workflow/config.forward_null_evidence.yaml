@@ -1,0 +1,24 @@
+outdir: /scratch/jonth_root/jonth0/jonth/dreems/forward_null_evidence_20260831
+publish_dir: /home/jonth/turbo/dreems/null_surface_gate_20260831
+
+raw_pack_pattern: /scratch/jonth_root/jonth1/jonth/dreems_snp_range/raw/test/pack_{pack}.pkl
+prediction_pattern: /scratch/jonth_root/jonth0/jonth/dreems/null_surface_gate_independent_20260831/evaluation/baseline/pack_{pack}/predictions.npz
+selection: /scratch/jonth_root/jonth0/jonth/dreems/sampling_robustness_20260830/selection/validation.json
+exact_input_pattern: /scratch/jonth_root/jonth0/jonth/dreems/feems_scenarios_exact_h2h_20260830/work/inputs/example_{example}.pkl
+checkpoint: /home/jonth/turbo/dreems/sampling_robustness_20260830/dreems_sampling_robustness_candidate.dreems.zip
+independent_gate_rows: /home/jonth/turbo/dreems/null_surface_gate_20260831/independent_rows.csv
+baseline_exact_pattern: /scratch/jonth_root/jonth0/jonth/dreems/feems_scenarios_exact_h2h_20260830/work/dreems/example_{example}.npz
+gated_exact_pattern: /scratch/jonth_root/jonth0/jonth/dreems/null_surface_gate_20260831/evaluation/exact/example_{example}.npz
+
+pack_ids: [0, 2, 4, 5, 6, 7, 8, 10, 11, 13, 15]
+exact_example_ids: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+
+partition: standard
+pack_mem_mb: 8000
+pack_runtime: 60m
+exact_mem_mb: 8000
+exact_runtime: 30m
+aggregate_mem_mb: 8000
+aggregate_runtime: 30m
+absolute_fit_null_quantile: 0.05
+uv_run_args: --frozen --no-sync

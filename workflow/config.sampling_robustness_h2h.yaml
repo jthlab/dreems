@@ -1,0 +1,36 @@
+# Final audit for the sampling-robustness candidate. The synthetic inputs and
+# FEEMS LOO fits are the immutable artifacts used by the released 512-case H2H.
+outdir: /scratch/jonth_root/jonth0/jonth/dreems/sampling_robustness_h2h_20260830/work
+publish_dir: /home/jonth/turbo/dreems/sampling_robustness_h2h_20260830
+input_pattern: /home/jonth/turbo/dreems/current_release_global_landscape_h2h512_20260724/validated_examples/example_{example}.pkl
+metadata_pattern: /home/jonth/turbo/dreems/current_release_global_landscape_h2h512_20260724/validated_examples/example_{example}.metadata.json
+checkpoint: /home/jonth/turbo/dreems/sampling_robustness_20260830/dreems_sampling_robustness_candidate.dreems.zip
+
+first_example: 0
+example_count: 512
+example_ids: null
+
+feems_archive: /home/jonth/turbo/dreems/released_graph_balanced_loo_h2h_20260822/feems_results.tar.gz
+feems_archive_checksum: /home/jonth/turbo/dreems/released_graph_balanced_loo_h2h_20260822/feems_results.tar.gz.sha256
+
+# FEEMS results are extracted from the verified archive; these resources do
+# not trigger CV or refitting.
+feems_final_mem_mb: 2000
+feems_final_runtime: 15m
+feems_partition: standard
+protocol_check_partition: standard
+
+dreems_threads: 2
+dreems_mem_mb: 6000
+dreems_runtime: 60m
+dreems_partition: standard
+
+aggregate_mem_mb: 4000
+aggregate_runtime: 30m
+aggregate_partition: standard
+gallery_threads: 2
+gallery_mem_mb: 8000
+gallery_runtime: 120m
+
+archive_mem_mb: 1000
+archive_runtime: 15m

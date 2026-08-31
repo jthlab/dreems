@@ -1,0 +1,21 @@
+# DREEMS-only broad verification for the learned null-surface gate. Baseline
+# DREEMS and FEEMS are immutable inputs; neither method is rerun here.
+outdir: /scratch/jonth_root/jonth0/jonth/dreems/null_surface_gate_broad_20260831
+publish_dir: /home/jonth/turbo/dreems/null_surface_gate_20260831
+checkpoint: /home/jonth/turbo/dreems/null_surface_gate_20260831/dreems_null_surface_gate.dreems.zip
+input_pattern: /home/jonth/turbo/dreems/current_release_global_landscape_h2h512_20260724/validated_examples/example_{example}.pkl
+metadata_pattern: /home/jonth/turbo/dreems/current_release_global_landscape_h2h512_20260724/validated_examples/example_{example}.metadata.json
+baseline_json_pattern: /scratch/jonth_root/jonth0/jonth/dreems/sampling_robustness_h2h_20260830/work/dreems/example_{example}.json
+baseline_npz_pattern: /scratch/jonth_root/jonth0/jonth/dreems/sampling_robustness_h2h_20260830/work/dreems/example_{example}.npz
+feems_json_pattern: /scratch/jonth_root/jonth0/jonth/dreems/sampling_robustness_h2h_20260830/work/feems/example_{example}.json
+example_count: 512
+
+uv_run_args: --frozen --no-sync
+eval_threads: 1
+eval_mem_mb: 6000
+eval_runtime: 30m
+eval_partition: standard
+analysis_threads: 1
+analysis_mem_mb: 8000
+analysis_runtime: 30m
+analysis_partition: standard

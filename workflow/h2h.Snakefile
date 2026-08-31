@@ -11,7 +11,17 @@ PUBLISH_DIR = str(config.get("publish_dir", f"{OUTDIR}/report"))
 INPUT_PATTERN = str(config["input_pattern"])
 METADATA_PATTERN = str(config["metadata_pattern"])
 CHECKPOINT = str(config["checkpoint"])
+SCENARIO_CONFIG = config.get("scenario_config")
+NOTEBOOK_SCENARIO_CONFIG = config.get("notebook_scenario_config")
+NOTEBOOK_BASES_PRECOMPUTED = bool(config.get("notebook_scenario_bases_precomputed", False))
+NOTEBOOK_CASES_PRECOMPUTED = bool(config.get("notebook_scenario_cases_precomputed", False))
+GALLERY_COMMAND = str(config.get("gallery_command", "h2h-gallery"))
+FEEMS_ARCHIVE = str(config.get("feems_archive", "")).strip()
+FEEMS_ARCHIVE_CHECKSUM = str(config.get("feems_archive_checksum", "")).strip()
+if bool(FEEMS_ARCHIVE) != bool(FEEMS_ARCHIVE_CHECKSUM):
+    raise ValueError("feems_archive and feems_archive_checksum must be configured together")
 CV_EXECUTION = "snakemake_one_job_per_observed_deme"
+FEEMS_RESULT_SOURCE = "verified_archive" if FEEMS_ARCHIVE else "computed"
 SOURCE_COMMIT = subprocess.check_output(
     ["git", "rev-parse", "HEAD"],
     text=True,
@@ -26,6 +36,32 @@ else:
     EXAMPLES = list(range(first, first + count))
 if not EXAMPLES or len(EXAMPLES) != len(set(EXAMPLES)):
     raise ValueError("H2H example IDs must be nonempty and unique")
+if GALLERY_COMMAND not in {"h2h-gallery", "scenario-gallery"}:
+    raise ValueError(f"unsupported gallery_command: {GALLERY_COMMAND!r}")
+if SCENARIO_CONFIG and NOTEBOOK_SCENARIO_CONFIG:
+    raise ValueError("scenario_config and notebook_scenario_config are mutually exclusive")
+if SCENARIO_CONFIG:
+    from dreems.scenario_audit import observed_node_count, scenario_count
+
+    if EXAMPLES != list(range(scenario_count(config))):
+        raise ValueError(
+            "scenario audit example IDs must cover the complete zero-based crossed design"
+        )
+if NOTEBOOK_SCENARIO_CONFIG:
+    from dreems.notebook_scenarios import (
+        observed_node_count as notebook_observed_node_count,
+        scenario_count as notebook_scenario_count,
+        scenario_spec as notebook_scenario_spec,
+    )
+
+    if EXAMPLES != list(range(notebook_scenario_count(config))):
+        raise ValueError(
+            "notebook scenario IDs must cover the complete zero-based notebook design"
+        )
+
+NOTEBOOK_BASE_PATTERN = str(
+    config.get("notebook_scenario_base_pattern", f"{OUTDIR}/inputs/base_{{truth}}.npz")
+)
 
 
 def source_path(pattern, example):
@@ -65,7 +101,14 @@ def feems_cv_fold(example, fold):
 
 
 def feems_cv_folds(wildcards):
-    count = int(example_metadata(wildcards.example)["num_sampled_nodes"])
+    if FEEMS_ARCHIVE:
+        return []
+    if SCENARIO_CONFIG:
+        count = observed_node_count(config, int(wildcards.example))
+    elif NOTEBOOK_SCENARIO_CONFIG:
+        count = notebook_observed_node_count(config, int(wildcards.example))
+    else:
+        count = int(example_metadata(wildcards.example)["num_sampled_nodes"])
     return [feems_cv_fold(wildcards.example, fold) for fold in range(count)]
 
 
@@ -79,6 +122,110 @@ rule all:
         f"{PUBLISH_DIR}/protocol.json",
         f"{PUBLISH_DIR}/feems_results.tar.gz",
         f"{PUBLISH_DIR}/feems_results.tar.gz.sha256",
+        f"{PUBLISH_DIR}/gallery",
+
+
+if SCENARIO_CONFIG:
+    rule generate_scenario_case:
+        input:
+            config=str(SCENARIO_CONFIG),
+            runner="src/dreems/scenario_audit.py",
+        output:
+            example=INPUT_PATTERN,
+            metadata=METADATA_PATTERN,
+        benchmark:
+            f"{OUTDIR}/benchmarks/generate/example_{{example}}.tsv"
+        wildcard_constraints:
+            example="\\d+"
+        threads: int(config.get("scenario_threads", 1))
+        resources:
+            mem_mb=int(config.get("scenario_mem_mb", 4000)),
+            runtime=str(config.get("scenario_runtime", "60m")),
+            slurm_partition=str(config.get("scenario_partition", "standard")),
+            slurm_account="jonth0",
+        shell:
+            """
+            set -euo pipefail
+            export OMP_NUM_THREADS={threads}
+            export OPENBLAS_NUM_THREADS={threads}
+            export MKL_NUM_THREADS={threads}
+            uv run --frozen --no-sync python -m dreems.scenario_audit \
+                --config {input.config:q} \
+                --example-id {wildcards.example} \
+                --output {output.example:q} \
+                --metadata {output.metadata:q}
+            """
+
+
+if NOTEBOOK_SCENARIO_CONFIG:
+    def notebook_base_for_example(example):
+        truth = notebook_scenario_spec(config, int(example)).truth
+        return NOTEBOOK_BASE_PATTERN.format(truth=truth)
+
+
+if NOTEBOOK_SCENARIO_CONFIG and not NOTEBOOK_BASES_PRECOMPUTED:
+    rule generate_notebook_scenario_base:
+        input:
+            config=str(NOTEBOOK_SCENARIO_CONFIG),
+            notebook=lambda _wildcards: str(config["notebook_scenarios"]["source_notebook"]),
+            runner="src/dreems/notebook_scenarios.py",
+        output:
+            NOTEBOOK_BASE_PATTERN
+        benchmark:
+            f"{OUTDIR}/benchmarks/generate_base/{{truth}}.tsv"
+        wildcard_constraints:
+            truth="barrier|anisotropy|homogeneous"
+        threads: int(config.get("notebook_base_threads", 1))
+        resources:
+            mem_mb=int(config.get("notebook_base_mem_mb", 8000)),
+            runtime=str(config.get("notebook_base_runtime", "4h")),
+            slurm_partition=str(config.get("notebook_base_partition", "standard")),
+            slurm_account="jonth0",
+        shell:
+            """
+            set -euo pipefail
+            export OMP_NUM_THREADS={threads}
+            export OPENBLAS_NUM_THREADS={threads}
+            export MKL_NUM_THREADS={threads}
+            uv run --frozen --no-sync python -m dreems.notebook_scenarios generate-base \
+                --config {input.config:q} \
+                --truth {wildcards.truth:q} \
+                --output {output:q}
+            """
+
+
+if NOTEBOOK_SCENARIO_CONFIG and not NOTEBOOK_CASES_PRECOMPUTED:
+    rule derive_notebook_scenario_case:
+        input:
+            base=lambda wildcards: notebook_base_for_example(wildcards.example),
+            config=str(NOTEBOOK_SCENARIO_CONFIG),
+            runner="src/dreems/notebook_scenarios.py",
+        output:
+            example=INPUT_PATTERN,
+            metadata=METADATA_PATTERN,
+        benchmark:
+            f"{OUTDIR}/benchmarks/derive/example_{{example}}.tsv"
+        wildcard_constraints:
+            example="\\d+"
+        threads: 1
+        resources:
+            mem_mb=int(config.get("notebook_derive_mem_mb", 8000)),
+            runtime=str(config.get("notebook_derive_runtime", "30m")),
+            slurm_partition=str(config.get("notebook_base_partition", "standard")),
+            slurm_account="jonth0",
+        shell:
+            """
+            set -euo pipefail
+            export OMP_NUM_THREADS=1
+            export OPENBLAS_NUM_THREADS=1
+            export MKL_NUM_THREADS=1
+            uv run --frozen --no-sync python -m dreems.notebook_scenarios derive-case \
+                --config {input.config:q} \
+                --example-id {wildcards.example} \
+                --base {input.base:q} \
+                --output {output.example:q} \
+                --metadata {output.metadata:q}
+            """
 
 
 rule feems_official_parity:
@@ -146,6 +293,10 @@ rule feems_case:
         example=lambda wildcards: source_path(INPUT_PATTERN, wildcards.example),
         metadata=lambda wildcards: source_path(METADATA_PATTERN, wildcards.example),
         folds=feems_cv_folds,
+        archive=lambda _wildcards: [FEEMS_ARCHIVE] if FEEMS_ARCHIVE else [],
+        archive_checksum=lambda _wildcards: (
+            [FEEMS_ARCHIVE_CHECKSUM] if FEEMS_ARCHIVE_CHECKSUM else []
+        ),
         runner="src/dreems/h2h.py",
         adapter="src/dreems/feems.py",
     output:
@@ -157,6 +308,7 @@ rule feems_case:
         example="\\d+"
     params:
         cv_checkpoint_dir=lambda wildcards: feems_cv_checkpoint_dir(wildcards.example),
+        use_archive="1" if FEEMS_ARCHIVE else "0",
     threads: 1
     resources:
         mem_mb=int(config.get("feems_final_mem_mb", 8000)),
@@ -170,13 +322,30 @@ rule feems_case:
         export OPENBLAS_NUM_THREADS=1
         export MKL_NUM_THREADS=1
         export NUMEXPR_NUM_THREADS=1
-        uv run --frozen --no-sync python -m dreems.h2h feems-case \
-            --input {input.example:q} \
-            --index {wildcards.example} \
-            --cv-jobs 1 \
-            --cv-checkpoint-dir {params.cv_checkpoint_dir:q} \
-            --output-json {output.json:q} \
-            --output-npz {output.npz:q}
+        if [[ {params.use_archive:q} == "1" ]]; then
+            archive={input.archive:q}
+            checksum={input.archive_checksum:q}
+            (
+                cd "$(dirname "$archive")"
+                sha256sum -c "$(basename "$checksum")"
+            )
+            mkdir -p "$(dirname {output.json:q})"
+            json_tmp={output.json:q}.tmp
+            npz_tmp={output.npz:q}.tmp
+            trap 'rm -f "$json_tmp" "$npz_tmp"' EXIT
+            tar -xOf "$archive" "feems/example_{wildcards.example}.json" > "$json_tmp"
+            tar -xOf "$archive" "feems/example_{wildcards.example}.npz" > "$npz_tmp"
+            mv "$json_tmp" {output.json:q}
+            mv "$npz_tmp" {output.npz:q}
+        else
+            uv run --frozen --no-sync python -m dreems.h2h feems-case \
+                --input {input.example:q} \
+                --index {wildcards.example} \
+                --cv-jobs 1 \
+                --cv-checkpoint-dir {params.cv_checkpoint_dir:q} \
+                --output-json {output.json:q} \
+                --output-npz {output.npz:q}
+        fi
         """
 
 
@@ -246,6 +415,7 @@ rule aggregate:
             --dreems-json {input.dreems:q} \
             --checkpoint {input.checkpoint:q} \
             --cv-execution {CV_EXECUTION:q} \
+            --feems-result-source {FEEMS_RESULT_SOURCE:q} \
             --source-commit {SOURCE_COMMIT:q} \
             --input-pattern {INPUT_PATTERN:q} \
             --metadata-pattern {METADATA_PATTERN:q} \
@@ -297,4 +467,40 @@ rule archive_feems:
             "$(sha256sum {output.archive:q} | cut -d ' ' -f 1)" \
             "$(basename {output.archive:q})" > "$checksum_tmp"
         mv "$checksum_tmp" {output.checksum:q}
+        """
+
+
+rule gallery:
+    input:
+        rows=f"{PUBLISH_DIR}/rows.csv",
+        summary=f"{PUBLISH_DIR}/summary.json",
+        dreems=[dreems_npz(example) for example in EXAMPLES],
+        feems=[feems_npz(example) for example in EXAMPLES],
+        renderer="src/dreems/benchmark_gallery.py",
+    output:
+        directory(f"{PUBLISH_DIR}/gallery"),
+    benchmark:
+        f"{PUBLISH_DIR}/benchmarks/gallery.tsv"
+    threads: int(config.get("gallery_threads", 1))
+    resources:
+        mem_mb=int(config.get("gallery_mem_mb", 2000)),
+        runtime=str(config.get("gallery_runtime", "120m")),
+        slurm_partition=str(config.get("aggregate_partition", "standard")),
+        slurm_account="jonth0",
+    params:
+        dreems_pattern=lambda _wildcards: f"{OUTDIR}/dreems/example_{{example}}.npz",
+        feems_pattern=lambda _wildcards: f"{OUTDIR}/feems/example_{{example}}.npz",
+        command=GALLERY_COMMAND,
+    shell:
+        """
+        set -euo pipefail
+        export MPLCONFIGDIR="${{TMPDIR:-/tmp}}/matplotlib-${{SLURM_JOB_ID:-local}}"
+        export OMP_NUM_THREADS={threads}
+        export OPENBLAS_NUM_THREADS={threads}
+        export MKL_NUM_THREADS={threads}
+        uv run --frozen --no-sync python -m dreems.benchmark_gallery {params.command:q} \
+            --rows {input.rows:q} \
+            --dreems-pattern {params.dreems_pattern:q} \
+            --feems-pattern {params.feems_pattern:q} \
+            --output-dir {output:q}
         """
