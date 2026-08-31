@@ -17,7 +17,7 @@
 \newcommand{\feems}{FEEMS\xspace}
 \newcommand{\vect}[1]{\boldsymbol{#1}}
 
-\title{Deep recovery of effective migration surfaces}
+\title{Deep Recovery of Effective Migration Surfaces}
 \author{Jonathan Terhorst\\
 Department of Statistics, University of Michigan}
 \date{}
@@ -31,7 +31,7 @@ rate at which genetic similarity decays can vary across a habitat. EEMS and
 \feems visualize this heterogeneity as a surface of relative effective
 migration. \feems obtains a surface by penalized optimization and selects its
 spatial regularization separately for each dataset, which can require many
-fits. Here we introduce Deep Resistance Estimation of Effective Migration
+fits. Here we introduce Deep Recovery of Effective Migration
 Surfaces (\dreems), a simulation-trained graph neural network that estimates
 relative migration from genetic covariance and a geographic graph. \dreems
 uses graph signals at several spatial scales, an approximate resistance
@@ -90,7 +90,7 @@ clear: the answer depends on the training distribution. A network can perform
 well on average and still fail when the graph, sampling design, or demographic
 history differs from its simulations.
 
-We introduce Deep Resistance Estimation of Effective Migration Surfaces
+We introduce Deep Recovery of Effective Migration Surfaces
 (\dreems). The method takes a genetic covariance matrix, sample locations, and
 a geographic graph. It first computes a linearized approximation to the
 conductance inverse problem. It then represents covariance and sampling
@@ -304,7 +304,7 @@ by an oracle selector at prediction time.
 
 \begin{figure}[p]
 \centering
-\includegraphics[width=\linewidth]{h2h_examples_random.png}
+\includegraphics[width=\linewidth]{h2h_examples_random.pdf}
 \caption{Random examples from the 512-landscape benchmark. Each row shows the
 true surface, refined \dreems estimate, and \feems estimate on one centered
 edge-log scale. Circles mark sampled nodes.}
@@ -313,7 +313,7 @@ edge-log scale. Circles mark sampled nodes.}
 
 \begin{figure}[p]
 \centering
-\includegraphics[width=\linewidth]{h2h_examples_worst_mse.png}
+\includegraphics[width=\linewidth]{h2h_examples_worst_mse.pdf}
 \caption{Examples with the largest MSE disadvantage for refined \dreems. This
 deliberately unfavorable selection illustrates failure modes and does not
 summarize average performance.}

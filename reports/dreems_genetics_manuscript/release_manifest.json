@@ -5,9 +5,9 @@
   "h2h_examples": 512,
   "records": [
     {
-      "bytes": 1782,
+      "bytes": 2246,
       "path": "reports/dreems_genetics_manuscript/README.md",
-      "sha256": "7cb44630bbe55baabe72db933df19febe76de42185c7cfa5dae334c64b6a75b3"
+      "sha256": "17c6a2ee10324f3771991e662b1bd40a1419409832a508477f0242e76836d4d3"
     },
     {
       "bytes": 702,
@@ -15,9 +15,9 @@
       "sha256": "b9927fa1c8194bec0cbfefba97e7a4af8a89012ec5b313bcf67e56373fd0e8af"
     },
     {
-      "bytes": 29214,
+      "bytes": 29188,
       "path": "reports/dreems_genetics_manuscript/main.tex",
-      "sha256": "1da0409c7f55b9c119c40d801543b8428bb1adefc987b1c29db491e10f919d42"
+      "sha256": "978c84ce9c48ddf0f819714ef2201772047756614920025d6b2fe3783012ea7a"
     },
     {
       "bytes": 22806,
@@ -30,19 +30,14 @@
       "sha256": "8c6859c7b72cba6dd47dd2ef80156af6a6b5d528cc0dce847eab24c6b28f80c5"
     },
     {
-      "bytes": 65060,
+      "bytes": 64180,
       "path": "reports/dreems_genetics_manuscript/build_assets.py",
-      "sha256": "87e1f7792339af0a12bf0ba62b2c223070c6f78febf7626fe5122a7811f36064"
+      "sha256": "a4f4da30a0e8da0d09748aff97708845bdba5b1267463513ad345daca0cf8e7f"
     },
     {
-      "bytes": 14589,
+      "bytes": 14725,
       "path": "reports/dreems_genetics_manuscript/check_manuscript.py",
-      "sha256": "4f10c990ad54068aa8830e0c4436682675318d196dda73bb1e318f1801955082"
-    },
-    {
-      "bytes": 5263841,
-      "path": "src/dreems/data/dreems_diffusion_bands.dreems.zip",
-      "sha256": "f0b677d2cc028252002d15fac843ca7347b1b352eb2286a18bd202b724aa92b4"
+      "sha256": "78bd627c85a2b834b6160a0f49a8b862265ca68a77b2a4d8eec338954a0d53aa"
     },
     {
       "bytes": 555319,
@@ -140,171 +135,6 @@
       "sha256": "cf682a07a5fd0081a416fc23750fde7d96264808a43268a93ba816cee4c67c01"
     },
     {
-      "bytes": 2135,
-      "path": "src/dreems/__init__.py",
-      "sha256": "647a3db1dff41dea51eeb879459d0c2258ef0b7aae5de6351beaef7815d0c3f5"
-    },
-    {
-      "bytes": 7528,
-      "path": "src/dreems/calibration.py",
-      "sha256": "461250a75c9f8a1c25e74d31f6107a26830edd4cf3f140dfe325410028bf7cbe"
-    },
-    {
-      "bytes": 12450,
-      "path": "src/dreems/checkpoints.py",
-      "sha256": "38f0768a10e0505a5a4f8e3ceb2debdf7f6b7d7c108ef57b24f18fffb60dd9ad"
-    },
-    {
-      "bytes": 7095,
-      "path": "src/dreems/cli.py",
-      "sha256": "728f4c0f924450a8ee76064e6deb688e6ec66b60f93344aa7af1e369b178ef8c"
-    },
-    {
-      "bytes": 5644,
-      "path": "src/dreems/coalescent.py",
-      "sha256": "d9f8ebbda1d421244ee95b588b68ece319914eee67a007f77d7accb551f5f680"
-    },
-    {
-      "bytes": 9948,
-      "path": "src/dreems/corpus.py",
-      "sha256": "3fc7a7bdb42c81bc6659b1e8090c63e4cd202b14052a04cc5f8f9346f0c3f0a6"
-    },
-    {
-      "bytes": 13814,
-      "path": "src/dreems/datasets.py",
-      "sha256": "83892bb3c4e068f58090e0f99d75ca00faa858c7626bd9eb1d12842cd2672776"
-    },
-    {
-      "bytes": 54316,
-      "path": "src/dreems/features.py",
-      "sha256": "0af38d4ce5276839cd7e7cd0028e56cecc3bc1b356d16e1814afe536e4a6fb33"
-    },
-    {
-      "bytes": 31287,
-      "path": "src/dreems/feems.py",
-      "sha256": "c4748db82419038f271c2c60ce41b30eec2b1a0db52d7333e32e83e641ef7e3b"
-    },
-    {
-      "bytes": 15912,
-      "path": "src/dreems/genotypes.py",
-      "sha256": "016a7816d37c8050d7ed77c9839a7d66cc674d74f60cdf3dd15cdffec9e7d612"
-    },
-    {
-      "bytes": 36063,
-      "path": "src/dreems/geography.py",
-      "sha256": "0bb3b829ce2c3d8b5ced5f2b9c10752b626d706ee28910936c61acc781013366"
-    },
-    {
-      "bytes": 23299,
-      "path": "src/dreems/h2h.py",
-      "sha256": "6bc2e1e2dc991b772eb2ff494bb5cc74f5b0b276ec5ebb354d16b2338a4a86cf"
-    },
-    {
-      "bytes": 34112,
-      "path": "src/dreems/inference.py",
-      "sha256": "7fc328abb374be18ff8198403c387153488df4348e14cfa1d3827b3cbf9d7595"
-    },
-    {
-      "bytes": 24816,
-      "path": "src/dreems/island_sim.py",
-      "sha256": "3ebfefac599968ec82d19b2bf7f8304cc4dd8ca3e30b20fbd69d7f8bc1f71efb"
-    },
-    {
-      "bytes": 12321,
-      "path": "src/dreems/linearized.py",
-      "sha256": "8929069534b5c3ee86f370c89c5e8695b9a309b6f8cf73e192009ad8a06059b3"
-    },
-    {
-      "bytes": 5853,
-      "path": "src/dreems/losses.py",
-      "sha256": "efd73cf3310403eba5d2b6eddf974911bb325beaeca85b6d86b778cb10403eda"
-    },
-    {
-      "bytes": 3009,
-      "path": "src/dreems/metrics.py",
-      "sha256": "b137b79f1dc3d14648356592158178e4a7bde1a52d2143c3b420c3adfea18536"
-    },
-    {
-      "bytes": 14139,
-      "path": "src/dreems/model.py",
-      "sha256": "16bf329ce85a4364733c5eb2f14cba5756e4d64cfa4499ec788a2ff8be4d529c"
-    },
-    {
-      "bytes": 45921,
-      "path": "src/dreems/motifs.py",
-      "sha256": "a2711bfa4d63a76f8e5c3e4cdfdf42e7e1c761790baf66a3de33f247e7e4eb37"
-    },
-    {
-      "bytes": 49067,
-      "path": "src/dreems/pipeline.py",
-      "sha256": "1f355d85577e74d12fad27a0b96c2e54f84bd7ff4b61138e6b8f5cb32c42fab5"
-    },
-    {
-      "bytes": 29154,
-      "path": "src/dreems/refinement.py",
-      "sha256": "3e439921ae0e9b77119173e2759976428e9120731170dc2964c6265a64893870"
-    },
-    {
-      "bytes": 9602,
-      "path": "src/dreems/simulation.py",
-      "sha256": "7ab6a3a1c9aa0ee2ad83bd81b1e3693f977a3b44c0fdb898ff0a7171c15df78d"
-    },
-    {
-      "bytes": 17350,
-      "path": "src/dreems/simulation_config.py",
-      "sha256": "effd76df64bcc77a9f314338286efa9d1998682b1ba4f2d2e2f5a33b90508d45"
-    },
-    {
-      "bytes": 23328,
-      "path": "src/dreems/train.py",
-      "sha256": "38eb79d4b29d49ab556b43f81b73362f20588da1f63ce349b1c707f6ae065179"
-    },
-    {
-      "bytes": 2441,
-      "path": "src/dreems/workflow_io.py",
-      "sha256": "bbd0e86508342c1d6d2cdb4561fe9f58186f766f92b4173d7b9b8b19b954dfc7"
-    },
-    {
-      "bytes": 1495,
-      "path": "pyproject.toml",
-      "sha256": "5495e24a3c73e5d4e2f58e81e0875dc31b713a68b5229b2aba64ddbfd961bd52"
-    },
-    {
-      "bytes": 716342,
-      "path": "uv.lock",
-      "sha256": "1eed446cbcc04c5af07af34cd94b1655a2f9b1aa008f8a569b2afa1612460a7c"
-    },
-    {
-      "bytes": 31457,
-      "path": "workflow/Snakefile",
-      "sha256": "5306e7e5c77743cd2a7cb1c7fb1fa4ea3b00d74c48144eb394e1c29cce07f06e"
-    },
-    {
-      "bytes": 6682,
-      "path": "workflow/calibration.Snakefile",
-      "sha256": "52a90ed3ded15bf1b742a13bfdf54c69d264936926696160cba99b1eb7e75148"
-    },
-    {
-      "bytes": 10033,
-      "path": "workflow/h2h.Snakefile",
-      "sha256": "1c9fd3300c52099ce968de5367da54c5fc2685b02f14553acc0c91645121708d"
-    },
-    {
-      "bytes": 8488,
-      "path": "workflow/config.production.yaml",
-      "sha256": "ca9847e718d6829e71ac95719f6de82c29cbab47eefbbcb90449701d2c9ebef5"
-    },
-    {
-      "bytes": 525,
-      "path": "workflow/config.calibration.yaml",
-      "sha256": "9a76f1bff247d6c1d9d3a81b02eb69a405df9d4e43e6a24aaf6efe6527a0434b"
-    },
-    {
-      "bytes": 1356,
-      "path": "workflow/config.h2h.yaml",
-      "sha256": "eb2700c4991a9545193ad40557cee3c03b22cec97f255f760c1dbfa4ebf5fcb5"
-    },
-    {
       "bytes": 781,
       "path": "reports/dreems_genetics_manuscript/tables/model_setup.tex",
       "sha256": "859f0f0af13ae2cd1a6569691c50840d055a69d77edc3895bcb3f74a39b0ed5f"
@@ -365,114 +195,64 @@
       "sha256": "b00687336662fb309f5ff5bc78b8c304e84cef34fee6259e1e4be361d50a5155"
     },
     {
-      "bytes": 24515,
+      "bytes": 27845,
       "path": "reports/dreems_genetics_manuscript/figures/method_overview.pdf",
-      "sha256": "e1a2018de0e0c6880f8844971ec6dea544581f257a63b4f3fa3df33428da0ba4"
+      "sha256": "f5f851fe134a5a18032705d07f9e067095954774b487e3ed7e100bfd83492e15"
     },
     {
-      "bytes": 128764,
-      "path": "reports/dreems_genetics_manuscript/figures/method_overview.png",
-      "sha256": "e0bb3946c78def83d274869cb54b72e44a6daebf6f5e546824f632aa6a388ee5"
-    },
-    {
-      "bytes": 15137,
+      "bytes": 16324,
       "path": "reports/dreems_genetics_manuscript/figures/training_curve.pdf",
-      "sha256": "36ffe29df0bee676f8e18e72f1c09928d6bfd860cf4c643a578b99b46708d2a6"
+      "sha256": "ecdd3787dd0615d629d8a2063a824156ecf40e324b48a84af01d66411bd2e08b"
     },
     {
-      "bytes": 175636,
-      "path": "reports/dreems_genetics_manuscript/figures/training_curve.png",
-      "sha256": "30704dcceff697b27de641e47397807fa26ea88093a09b4129ab3784995ba158"
-    },
-    {
-      "bytes": 41628,
+      "bytes": 43269,
       "path": "reports/dreems_genetics_manuscript/figures/h2h_scatter_corr_mse.pdf",
-      "sha256": "c8b2412eb9e4660a9557ede990eff9b9369bc7619ad7aa904cc0ca644c6f41ab"
+      "sha256": "22cef5e869a63848216ca4d80c682adf481fe4ca8077f272b7ccb7021d0e2735"
     },
     {
-      "bytes": 379450,
-      "path": "reports/dreems_genetics_manuscript/figures/h2h_scatter_corr_mse.png",
-      "sha256": "25f38cf3d07927d017b8862225e7f6519217cd3b161d5369c1c73fd63bdb6a2e"
-    },
-    {
-      "bytes": 18133,
+      "bytes": 18591,
       "path": "reports/dreems_genetics_manuscript/figures/h2h_regime_delta_bars.pdf",
-      "sha256": "c3fec9c07ebe7a47f0b5efd3a52607caf4228bd34cf56a0f9ce2a7eb90cd3294"
+      "sha256": "7aceae01638e1614bbe37eccc37b09c243f37503692f86474ea3de9ca80a0e60"
     },
     {
-      "bytes": 149845,
-      "path": "reports/dreems_genetics_manuscript/figures/h2h_regime_delta_bars.png",
-      "sha256": "a50446ee2bbd6194137afc5a82fef3747f0be37a09566ee1f7fac1a28df1401a"
+      "bytes": 1113282,
+      "path": "reports/dreems_genetics_manuscript/figures/h2h_examples_random.pdf",
+      "sha256": "36a2ffea572b879cb04d26b10c1f4daf466968aba4f592ed81bc4b2ea6a801c7"
     },
     {
-      "bytes": 2801880,
-      "path": "reports/dreems_genetics_manuscript/figures/h2h_examples_random.png",
-      "sha256": "a47d0a373f0e01bc2a8c2f35f36d948455e919f160891d212d562c3a03eb3291"
+      "bytes": 1034486,
+      "path": "reports/dreems_genetics_manuscript/figures/h2h_examples_worst_mse.pdf",
+      "sha256": "a4b0f84956a9dfefa9b8a85456c390bfe56bb005e14f404439a92c7b66cb7798"
     },
     {
-      "bytes": 2693631,
-      "path": "reports/dreems_genetics_manuscript/figures/h2h_examples_worst_mse.png",
-      "sha256": "742ccc2cc6927e6441347f730236d3b867273e115336ce85ba937364701d69e5"
-    },
-    {
-      "bytes": 32798,
+      "bytes": 33062,
       "path": "reports/dreems_genetics_manuscript/figures/runtime_scaling.pdf",
-      "sha256": "49132ddb50d8d363626754f6a0d3823e5828019a045a4fb216cd31cb10c280ed"
+      "sha256": "fbae1276c29e4f66660311de7e17ed0350632a02e9e0c2157b823632868b3686"
     },
     {
-      "bytes": 191975,
-      "path": "reports/dreems_genetics_manuscript/figures/runtime_scaling.png",
-      "sha256": "d49562d38744719f84c1e739809e660772bc1c88681548c1ff88e4bda10ec84e"
-    },
-    {
-      "bytes": 22915,
+      "bytes": 24486,
       "path": "reports/dreems_genetics_manuscript/figures/calibration_utility.pdf",
-      "sha256": "e151e5ae3b172acd5e739cacd115d7f4b10d8c645d5ccc0cf7b8096c354f7a43"
+      "sha256": "f87b2941b4057c830db96802fc44530897480a63cc335e708421d903f5df57c3"
     },
     {
-      "bytes": 285375,
-      "path": "reports/dreems_genetics_manuscript/figures/calibration_utility.png",
-      "sha256": "2573754f23b647f1b6b767e972663c2c285e5e28250623929f52a65421b46277"
-    },
-    {
-      "bytes": 2481181,
+      "bytes": 2481213,
       "path": "reports/dreems_genetics_manuscript/figures/empirical_dreems_gallery.pdf",
-      "sha256": "6e6a4bf29a4dd893456f89a858ec46e8fdfe071f2b910e4eeff3874657674afc"
+      "sha256": "7e0e086d33d78090716b942a3cc50229281ec2c595ff3987d83412ae8f6bd7d1"
     },
     {
-      "bytes": 2929000,
-      "path": "reports/dreems_genetics_manuscript/figures/empirical_dreems_gallery.png",
-      "sha256": "3486b8e45e7815cb070b369f944cf8ea6884098f3a91a58f1414c52e5dc06149"
-    },
-    {
-      "bytes": 3810589,
+      "bytes": 3804583,
       "path": "reports/dreems_genetics_manuscript/figures/empirical_published_comparison.pdf",
-      "sha256": "72d0ffb516a0213c47844adcbaeef34576226c48dd118ac06879e498c0e8009f"
+      "sha256": "9db72f569116a968c8f05e2641266aebfbd2e69924ba776659f907f2bc5102c5"
     },
     {
-      "bytes": 4581853,
-      "path": "reports/dreems_genetics_manuscript/figures/empirical_published_comparison.png",
-      "sha256": "fbc02d78b6648db772ca8b0680da43c5cddf5191c312cde301221a0fb501d9ce"
-    },
-    {
-      "bytes": 4283596,
-      "path": "reports/dreems_genetics_manuscript/figures/empirical_overview.png",
-      "sha256": "48b833feb976389e155889412df3dc230f663a787cfd69ec649ea68730388fb7"
-    },
-    {
-      "bytes": 800347,
+      "bytes": 799361,
       "path": "reports/dreems_genetics_manuscript/figures/wolf_comparison.pdf",
-      "sha256": "0336667eb4e7d614130e63736590b148efb187bab21725df8016806bd6b1b53d"
+      "sha256": "0cfcc2bda8d04a90b8bb40e6711d48812145a255186b2c43134315bd97354118"
     },
     {
-      "bytes": 924800,
-      "path": "reports/dreems_genetics_manuscript/figures/wolf_comparison.png",
-      "sha256": "de218784989e3a84a4436f9dcd9a40421af89692b0388cef71cbb5151effc02a"
-    },
-    {
-      "bytes": 13241289,
+      "bytes": 9671545,
       "path": "reports/dreems_genetics_manuscript/main.pdf",
-      "sha256": "a4aac4f27a3e857d0458fa0f5e02251b4b76e56cfc8172d880cf21068673d263"
+      "sha256": "4f475838b74ee9f43d79068a2bbed3a66cb7cac690a54d09e5842110fb4f64ee"
     }
   ]
 }

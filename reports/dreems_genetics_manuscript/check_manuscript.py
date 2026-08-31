@@ -33,8 +33,8 @@ REQUIRED_FIGURES = (
     "training_curve.pdf",
     "h2h_scatter_corr_mse.pdf",
     "h2h_regime_delta_bars.pdf",
-    "h2h_examples_random.png",
-    "h2h_examples_worst_mse.png",
+    "h2h_examples_random.pdf",
+    "h2h_examples_worst_mse.pdf",
     "runtime_scaling.pdf",
     "calibration_utility.pdf",
     "empirical_dreems_gallery.pdf",
@@ -102,6 +102,8 @@ def check_required_files(errors: list[str]) -> None:
     for name in REQUIRED_FIGURES:
         if not (ROOT / "figures" / name).is_file():
             errors.append(f"missing required figure: {name}")
+    for path in sorted((ROOT / "figures").glob("*.png")):
+        errors.append(f"manuscript figure must be PDF, not PNG: {path.name}")
 
 
 def check_manifest(errors: list[str]) -> None:

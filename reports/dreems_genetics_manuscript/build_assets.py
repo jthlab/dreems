@@ -5,7 +5,6 @@ import hashlib
 import json
 import math
 import os
-import shutil
 import zipfile
 from collections import Counter
 from pathlib import Path
@@ -122,26 +121,16 @@ EXPECTED_TABLES = (
 )
 EXPECTED_FIGURES = (
     "method_overview.pdf",
-    "method_overview.png",
     "training_curve.pdf",
-    "training_curve.png",
     "h2h_scatter_corr_mse.pdf",
-    "h2h_scatter_corr_mse.png",
     "h2h_regime_delta_bars.pdf",
-    "h2h_regime_delta_bars.png",
-    "h2h_examples_random.png",
-    "h2h_examples_worst_mse.png",
+    "h2h_examples_random.pdf",
+    "h2h_examples_worst_mse.pdf",
     "runtime_scaling.pdf",
-    "runtime_scaling.png",
     "calibration_utility.pdf",
-    "calibration_utility.png",
     "empirical_dreems_gallery.pdf",
-    "empirical_dreems_gallery.png",
     "empirical_published_comparison.pdf",
-    "empirical_published_comparison.png",
-    "empirical_overview.png",
     "wolf_comparison.pdf",
-    "wolf_comparison.png",
 )
 STALE_GENERATED_OUTPUTS = (
     "figures/h2h_delta_vs_sampling_and_size.pdf",
@@ -198,7 +187,8 @@ def copy_snapshot(source: Path, destination: Path) -> None:
         raise FileNotFoundError(source)
     destination.parent.mkdir(parents=True, exist_ok=True)
     if source.resolve() != destination.resolve():
-        shutil.copy2(source, destination)
+        destination.write_text(source.read_text())
+        destination.chmod(0o644)
 
 
 def latex_escape(value: object) -> str:
@@ -247,7 +237,6 @@ def fmt_p(value: float) -> str:
 def save_figure(fig: plt.Figure, stem: str) -> None:
     FIGURES.mkdir(parents=True, exist_ok=True)
     fig.savefig(FIGURES / f"{stem}.pdf")
-    fig.savefig(FIGURES / f"{stem}.png")
     plt.close(fig)
 
 
@@ -371,7 +360,7 @@ def build_method_overview() -> None:
 
 def load_checkpoint_metadata() -> dict[str, Any]:
     if sha256(CHECKPOINT_SOURCE) != EXPECTED_CHECKPOINT_SHA256:
-        raise ValueError("the manuscript checkpoint is not the released checkpoint")
+        raise ValueError("the source checkpoint does not match the frozen manuscript checkpoint")
     with zipfile.ZipFile(CHECKPOINT_SOURCE) as archive:
         return json.loads(archive.read("metadata.json"))
 
@@ -1382,8 +1371,6 @@ def build_empirical_figures(records: list[dict[str, Any]]) -> None:
     fig.tight_layout(pad=0.4)
     save_figure(fig, "wolf_comparison")
 
-    shutil.copy2(REAL_GALLERY / "overview.png", FIGURES / "empirical_overview.png")
-
 
 def build_h2h_scatter(frame: pd.DataFrame) -> None:
     density = frame["sampled_node_fraction"].to_numpy(dtype=np.float64)
@@ -1580,7 +1567,7 @@ def _load_h2h_arrays(index: int) -> dict[str, np.ndarray]:
     return arrays
 
 
-def _build_h2h_example_gallery(rows: pd.DataFrame, filename: str) -> None:
+def _build_h2h_example_gallery(rows: pd.DataFrame, stem: str) -> None:
     fig, axes = plt.subplots(len(rows), 3, figsize=(7.2, 2.25 * len(rows)), squeeze=False)
     for local_row, (_, row) in enumerate(rows.iterrows()):
         index = int(row["index"])
@@ -1611,8 +1598,7 @@ def _build_h2h_example_gallery(rows: pd.DataFrame, filename: str) -> None:
                 title=title,
             )
     fig.tight_layout(pad=0.55)
-    fig.savefig(FIGURES / filename, dpi=300)
-    plt.close(fig)
+    save_figure(fig, stem)
 
 
 def build_h2h_figures(frame: pd.DataFrame, summary: dict[str, Any]) -> None:
@@ -1635,8 +1621,8 @@ def build_h2h_figures(frame: pd.DataFrame, summary: dict[str, Any]) -> None:
             "worst_mse_examples": [int(value) for value in worst_rows["index"]],
         },
     )
-    _build_h2h_example_gallery(random_rows, "h2h_examples_random.png")
-    _build_h2h_example_gallery(worst_rows, "h2h_examples_worst_mse.png")
+    _build_h2h_example_gallery(random_rows, "h2h_examples_random")
+    _build_h2h_example_gallery(worst_rows, "h2h_examples_worst_mse")
 
 
 def release_manifest() -> None:
@@ -1648,7 +1634,6 @@ def release_manifest() -> None:
         ROOT / "references.bib",
         ROOT / "build_assets.py",
         ROOT / "check_manuscript.py",
-        CHECKPOINT_SOURCE,
         H2H_ROWS_SNAPSHOT,
         H2H_PROTOCOL_SNAPSHOT,
         H2H_RELEASE_SUMMARY_SNAPSHOT,
@@ -1669,20 +1654,6 @@ def release_manifest() -> None:
         ROOT / "analysis_summary.json",
         ROOT / "asset_summary.json",
     ]
-    artifacts.extend(sorted((REPO_ROOT / "src/dreems").glob("*.py")))
-    artifacts.extend(
-        REPO_ROOT / relative
-        for relative in (
-            "pyproject.toml",
-            "uv.lock",
-            "workflow/Snakefile",
-            "workflow/calibration.Snakefile",
-            "workflow/h2h.Snakefile",
-            "workflow/config.production.yaml",
-            "workflow/config.calibration.yaml",
-            "workflow/config.h2h.yaml",
-        )
-    )
     artifacts.extend(TABLES / name for name in EXPECTED_TABLES)
     artifacts.extend(FIGURES / name for name in EXPECTED_FIGURES)
     if (ROOT / "main.pdf").is_file():
@@ -1719,6 +1690,8 @@ def build_assets(*, refresh_corpus: bool) -> None:
     DATA.mkdir(parents=True, exist_ok=True)
     FIGURES.mkdir(parents=True, exist_ok=True)
     TABLES.mkdir(parents=True, exist_ok=True)
+    for path in FIGURES.glob("*.png"):
+        path.unlink()
     for relative in STALE_GENERATED_OUTPUTS:
         (ROOT / relative).unlink(missing_ok=True)
     checkpoint = load_checkpoint_metadata()
