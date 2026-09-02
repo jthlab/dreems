@@ -86,6 +86,9 @@ TRAINING_CONFIG, TRAINING_CONFIG_TEXT = config_snapshot(
     "training",
     {
         "dreems": config["dreems"],
+        "base_validation_examples": config.get(
+            "base_validation_examples", config["train_validation_examples"]
+        ),
         "train_validation_examples": config["train_validation_examples"],
         "train_pack_size": config.get("train_pack_size", 64),
         "validation_pack_size": config.get(
@@ -93,6 +96,7 @@ TRAINING_CONFIG, TRAINING_CONFIG_TEXT = config_snapshot(
         ),
         "prepared_pack_source_dir": config.get("prepared_pack_source_dir"),
         "normalization_source": config.get("normalization_source"),
+        "supplemental_prepared_packs": config.get("supplemental_prepared_packs", {}),
     },
 )
 TRAIN_EXAMPLES = int(config["train_examples"])
@@ -103,7 +107,9 @@ TRAIN_PACK_SIZE = int(config.get("train_pack_size", 64))
 VALIDATION_PACK_SIZE = int(config.get("validation_pack_size", TRAIN_PACK_SIZE))
 PREPARE_BATCH_SIZE = int(config.get("prepare_batch_size", 1))
 RAW_PACK_SIZE = int(config.get("raw_pack_size", TRAIN_PACK_SIZE))
-VALIDATION_EXAMPLES = int(config["train_validation_examples"])
+VALIDATION_EXAMPLES = int(
+    config.get("base_validation_examples", config["train_validation_examples"])
+)
 if (
     TRAIN_PACK_SIZE <= 0
     or VALIDATION_PACK_SIZE <= 0
@@ -121,12 +127,26 @@ if USE_BATCHED_PREPARATION and (
         "validation_pack_size"
     )
 if not 0 < VALIDATION_EXAMPLES <= TEST_EXAMPLES:
-    raise ValueError("train_validation_examples must be in [1, test_examples]")
+    raise ValueError("base validation examples must be in [1, test_examples]")
 
 
 def project_path(value):
     path = Path(str(value)).expanduser()
     return str(path if path.is_absolute() else Path(PROJECT_ROOT, path).resolve())
+
+
+def supplemental_pack_paths(role):
+    specification = config.get("supplemental_prepared_packs", {}).get(role)
+    if specification is None:
+        return []
+    if not isinstance(specification, dict):
+        raise ValueError(f"supplemental_prepared_packs.{role} must be a mapping")
+    pattern = project_path(specification["pattern"])
+    start = int(specification.get("start", 0))
+    count = int(specification["count"])
+    if start < 0 or count < 0:
+        raise ValueError("supplemental prepared pack start and count must be nonnegative")
+    return [pattern.format(pack=pack) for pack in range(start, start + count)]
 
 
 RAW_SOURCE_DIR = (
@@ -149,6 +169,10 @@ NORMALIZATION_SOURCE = (
     if config.get("normalization_source")
     else None
 )
+SUPPLEMENTAL_PACKS = {
+    role: supplemental_pack_paths(role) for role in ("train", "validation")
+}
+PUBLISH_DIR = project_path(config["publish_dir"]) if config.get("publish_dir") else None
 
 
 CARTOPY_DATA_DIR = project_path(config["simulation"]["global_landscape_cartopy_data_dir"])
@@ -435,7 +459,8 @@ def training_accelerator_ready_path():
 
 
 def training_manifest_inputs(wildcards):
-    return packed_paths(str(wildcards.role))
+    role = str(wildcards.role)
+    return [*packed_paths(role), *SUPPLEMENTAL_PACKS[role]]
 
 
 def eval_chunk_summary_path(chunk):
@@ -467,10 +492,24 @@ def production_tranche_inputs(wildcards):
     return [prepared_path(split, chunk) for chunk in chunks]
 
 
+ALL_TARGETS = [
+    f"{OUTDIR}/model/training_summary.json",
+    f"{OUTDIR}/eval/summary.json",
+]
+if PUBLISH_DIR is not None:
+    ALL_TARGETS.extend(
+        [
+            f"{PUBLISH_DIR}/checkpoint.best.dreems.zip",
+            f"{PUBLISH_DIR}/checkpoint.best.summary.json",
+            f"{PUBLISH_DIR}/training_summary.json",
+            f"{PUBLISH_DIR}/training_history.jsonl",
+        ]
+    )
+
+
 rule all:
     input:
-        f"{OUTDIR}/model/training_summary.json",
-        f"{OUTDIR}/eval/summary.json",
+        ALL_TARGETS
 
 
 rule write_simulation_config:
@@ -850,6 +889,7 @@ rule train:
         best=f"{OUTDIR}/model/checkpoint.best.dreems.zip",
         best_summary=f"{OUTDIR}/model/checkpoint.best.summary.json",
         summary=f"{OUTDIR}/model/training_summary.json",
+        history=f"{OUTDIR}/model/training_history.jsonl",
     benchmark:
         f"{OUTDIR}/benchmarks/train.tsv"
     params:
@@ -877,6 +917,35 @@ rule train:
             --summary {output.summary:q} \
             --stream
         """
+
+
+if PUBLISH_DIR is not None:
+
+    rule publish_training:
+        input:
+            checkpoint=f"{OUTDIR}/model/checkpoint.best.dreems.zip",
+            best_summary=f"{OUTDIR}/model/checkpoint.best.summary.json",
+            summary=f"{OUTDIR}/model/training_summary.json",
+            history=f"{OUTDIR}/model/training_history.jsonl",
+        output:
+            checkpoint=f"{PUBLISH_DIR}/checkpoint.best.dreems.zip",
+            best_summary=f"{PUBLISH_DIR}/checkpoint.best.summary.json",
+            summary=f"{PUBLISH_DIR}/training_summary.json",
+            history=f"{PUBLISH_DIR}/training_history.jsonl",
+        shell:
+            """
+            mkdir -p {PUBLISH_DIR:q}
+            for pair in \
+                {input.checkpoint:q}:{output.checkpoint:q} \
+                {input.best_summary:q}:{output.best_summary:q} \
+                {input.summary:q}:{output.summary:q} \
+                {input.history:q}:{output.history:q}; do
+                source_path="${{pair%%:*}}"
+                destination_path="${{pair#*:}}"
+                cp "$source_path" "$destination_path.tmp"
+                mv "$destination_path.tmp" "$destination_path"
+            done
+            """
 
 
 rule evaluate_chunk:

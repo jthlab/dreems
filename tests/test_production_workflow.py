@@ -14,6 +14,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PRODUCTION_CONFIG = REPO_ROOT / "workflow" / "config.production.yaml"
 EXAMPLE_CONFIG = REPO_ROOT / "workflow" / "config.example.yaml"
 SNP_RANGE_CONFIG = REPO_ROOT / "workflow" / "config.snp_range_experiment.yaml"
+FULL_RETRAIN_CONFIG = REPO_ROOT / "workflow" / "config.full_retrain.yaml"
 CALIBRATION_CONFIG = REPO_ROOT / "workflow" / "config.calibration.yaml"
 SURFACE_GATE_CONFIG = REPO_ROOT / "workflow" / "config.null_surface_gate.yaml"
 RELEASE_CONFIG = REPO_ROOT / "workflow" / "config.surface_gate_release.yaml"
@@ -37,6 +38,7 @@ def test_great_lakes_launcher_uses_slurm_submit_directory() -> None:
 
     assert "SLURM_SUBMIT_DIR" in launcher
     assert 'PROJECT_ROOT="${DREEMS_REPO:-${SLURM_SUBMIT_DIR:-$SCRIPT_ROOT}}"' in launcher
+    assert "#SBATCH --account=jonth0" in launcher
 
 
 def checkpoint_metadata() -> dict[str, Any]:
@@ -148,6 +150,30 @@ def test_snp_range_experiment_matches_production_except_snp_distribution() -> No
         }
     )
     assert experiment["simulation"] == expected_simulation
+
+
+def test_full_retrain_is_joint_and_counterfactuals_are_a_minority() -> None:
+    experiment = load_yaml(SNP_RANGE_CONFIG)
+    retrain = load_yaml(FULL_RETRAIN_CONFIG)
+
+    train_supplement = retrain["supplemental_prepared_packs"]["train"]
+    validation_supplement = retrain["supplemental_prepared_packs"]["validation"]
+    counterfactual_examples = train_supplement["count"] * experiment["train_pack_size"]
+    total_examples = experiment["train_examples"] + counterfactual_examples
+
+    assert retrain["outdir"].startswith("/scratch/jonth_root/jonth0/")
+    assert retrain["raw_source_dir"].endswith("/dreems_snp_range/raw")
+    assert counterfactual_examples == 8_192
+    assert counterfactual_examples / total_examples < 0.12
+    assert validation_supplement["count"] == 2
+    assert retrain["base_validation_examples"] == 1_024
+    assert retrain["train_validation_examples"] == 1_152
+
+    architecture = retrain["dreems"]["architecture"]
+    assert architecture["initializer_gate"] is True
+    assert architecture["surface_gate"] is True
+    assert retrain["dreems"]["features"]["spatial_encoding"] == ("topology_node_covariance")
+    assert retrain["dreems"]["optimizer"]["trainable_scope"] == "all"
 
 
 def test_example_config_preserves_production_model_and_conditioning() -> None:

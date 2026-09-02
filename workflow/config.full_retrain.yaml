@@ -1,0 +1,80 @@
+# Overlay this file after config.snp_range_experiment.yaml. It trains the
+# released architecture from random initialization on the full broad corpus,
+# with sampling-mask counterfactuals kept as a minority of the stream.
+outdir: /scratch/jonth_root/jonth0/jonth/dreems/full_retrain_20260902
+publish_dir: /home/jonth/turbo/dreems/full_retrain_20260902
+raw_source_dir: /scratch/jonth_root/jonth1/jonth/dreems_snp_range/raw
+raw_source_layout: packs
+
+# The base corpus contributes 61,440 ordinary examples. These 128 packs add
+# 8,192 counterfactual views, or 11.8% of the combined training stream. Two
+# validation packs preserve the same approximate mixture: 1,024 + 128 views.
+supplemental_prepared_packs:
+  train:
+    pattern: /scratch/jonth_root/jonth0/jonth/dreems/sampling_robustness_20260830/prepared/counterfactual/train/pack_{pack}.pkl
+    count: 128
+  validation:
+    pattern: /scratch/jonth_root/jonth0/jonth/dreems/sampling_robustness_20260830/prepared/counterfactual/validation/pack_{pack}.pkl
+    count: 2
+
+base_validation_examples: 1024
+train_validation_examples: 1152
+xla_mem_fraction: "0.55"
+prepare_batch_mem_mb: 6000
+prepare_batch_runtime: 60m
+train_mem_mb: 32000
+train_runtime: 48h
+train_partition: gpu_mig40,spgpu,gpu
+
+dreems:
+  architecture:
+    hidden_channels: 128
+    layers: 10
+    context_layers: 3
+    initializer_gate: true
+    initializer_gate_initial_logit: 4.0
+    surface_gate: true
+    surface_gate_initial_logit: 6.0
+  features:
+    covariance_components: 20
+    normalization_std_floor: 0.2
+    spatial_encoding: topology_node_covariance
+  edge_conditioner:
+    smoothness: 0.01
+    ridge_scale: 0.001
+    pair_weight_power: 0.0
+    length_weighted_baseline: true
+    output_sd: 1.0
+    batch_size: 256
+  loss:
+    min_logvar: -7.0
+    max_logvar: 5.0
+    context_weight: 0.5
+    q_weight: 0.5
+    slope_weight: 0.25
+    slope_target: 1.0
+    slope_target_floor: 0.05
+    slope_huber_delta: 1.0
+    correlation_weight: 0.2
+    correlation_target_floor: 0.05
+    orientation_weight: 0.35
+    orientation_target_floor: 0.05
+    orientation_margin_fraction: 0.5
+    initializer_regret_weight: 0.5
+    initializer_regret_margin: 0.0
+    counterfactual_consistency_weight: 0.1
+    surface_gate_weight: 1.0
+    surface_gate_target_floor: 0.05
+  optimizer:
+    seed: 20260902
+    steps: 120000
+    batch_size: 8
+    learning_rate: 5.0e-05
+    gradient_clip_norm: 1.0
+    log_every: 1000
+    early_stopping_patience: 12
+    early_stopping_min_delta: 0.0001
+    early_stopping_warmup_steps: 20000
+    early_stopping_metric: validation_loss
+    restore_best_validation: true
+    trainable_scope: all

@@ -388,6 +388,22 @@ DREEMS_CONFIG=workflow/config.sampling_robustness.yaml \
 sbatch workflow/run_great_lakes.sh
 ```
 
+### Joint Full Retraining
+
+`config.full_retrain.yaml` is layered after `config.snp_range_experiment.yaml`.
+It reuses the saved Rust/MAF-conditioned raw covariance corpus, re-prepares all
+features with the current node-covariance convention, and trains the complete
+GNN plus initializer and surface gates from random initialization. The broad
+61,440-example corpus remains dominant; 8,192 counterfactual sampling views
+make up 11.8% of the combined stream. No checkpoint is passed to the trainer.
+
+```bash
+DREEMS_CONFIG_FILES=workflow/config.snp_range_experiment.yaml:workflow/config.full_retrain.yaml \
+DREEMS_SNAKEFILE=workflow/Snakefile \
+sbatch workflow/run_great_lakes.sh \
+  /home/jonth/turbo/dreems/full_retrain_20260902/checkpoint.best.dreems.zip
+```
+
 The source corpus path and all output paths are explicit in the config. The
 prepared masks, checkpoints, validation histories, and evaluations are managed
 as separate Snakemake artifacts. Changing a training hyperparameter therefore
