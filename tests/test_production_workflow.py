@@ -152,7 +152,7 @@ def test_snp_range_experiment_matches_production_except_snp_distribution() -> No
     assert experiment["simulation"] == expected_simulation
 
 
-def test_full_retrain_is_joint_and_counterfactuals_are_a_minority() -> None:
+def test_full_retrain_stages_surface_gate_and_keeps_counterfactuals_a_minority() -> None:
     experiment = load_yaml(SNP_RANGE_CONFIG)
     retrain = load_yaml(FULL_RETRAIN_CONFIG)
 
@@ -174,6 +174,19 @@ def test_full_retrain_is_joint_and_counterfactuals_are_a_minority() -> None:
     assert architecture["surface_gate"] is True
     assert retrain["dreems"]["features"]["spatial_encoding"] == ("topology_node_covariance")
     assert retrain["dreems"]["optimizer"]["trainable_scope"] == "all"
+
+    surface_gate = retrain["surface_gate_stage"]
+    assert surface_gate["enabled"] is True
+    assert surface_gate["validation_examples"] == 1_024
+    assert surface_gate["optimizer"]["trainable_scope"] == "surface_gate"
+    assert surface_gate["optimizer"]["learning_rate"] == 5e-4
+    assert [item["count"] for item in surface_gate["prepared_packs"]["train"]] == [
+        128,
+        128,
+    ]
+    assert [
+        item["count"] for item in surface_gate["prepared_packs"]["validation"]
+    ] == [8, 8]
 
 
 def test_example_config_preserves_production_model_and_conditioning() -> None:

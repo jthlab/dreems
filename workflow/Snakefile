@@ -3,6 +3,7 @@ import json
 import math
 import os
 import shlex
+from copy import deepcopy
 from pathlib import Path
 
 from snakemake.exceptions import WorkflowError
@@ -82,14 +83,15 @@ FEATURE_CONFIG, FEATURE_CONFIG_TEXT = config_snapshot(
         }
     },
 )
-TRAINING_CONFIG, TRAINING_CONFIG_TEXT = config_snapshot(
-    "training",
-    {
-        "dreems": config["dreems"],
+
+
+def training_config_payload(dreems_config, validation_examples, **provenance):
+    return {
+        "dreems": dreems_config,
         "base_validation_examples": config.get(
             "base_validation_examples", config["train_validation_examples"]
         ),
-        "train_validation_examples": config["train_validation_examples"],
+        "train_validation_examples": validation_examples,
         "train_pack_size": config.get("train_pack_size", 64),
         "validation_pack_size": config.get(
             "validation_pack_size", config.get("train_pack_size", 64)
@@ -97,7 +99,54 @@ TRAINING_CONFIG, TRAINING_CONFIG_TEXT = config_snapshot(
         "prepared_pack_source_dir": config.get("prepared_pack_source_dir"),
         "normalization_source": config.get("normalization_source"),
         "supplemental_prepared_packs": config.get("supplemental_prepared_packs", {}),
-    },
+        **provenance,
+    }
+
+
+SURFACE_GATE_STAGE = config.get("surface_gate_stage", {})
+if not isinstance(SURFACE_GATE_STAGE, dict):
+    raise ValueError("surface_gate_stage must be a mapping")
+USE_STAGED_SURFACE_GATE = bool(SURFACE_GATE_STAGE.get("enabled", False))
+
+core_dreems_config = deepcopy(config["dreems"])
+if USE_STAGED_SURFACE_GATE:
+    if not bool(core_dreems_config.get("architecture", {}).get("surface_gate", False)):
+        raise ValueError("staged surface-gate training requires architecture.surface_gate=true")
+    if float(core_dreems_config.get("loss", {}).get("surface_gate_weight", 0.0)) <= 0.0:
+        raise ValueError("staged surface-gate training requires a positive surface_gate_weight")
+    core_dreems_config["architecture"]["surface_gate"] = False
+    core_dreems_config["loss"]["surface_gate_weight"] = 0.0
+    core_dreems_config["optimizer"]["trainable_scope"] = "all"
+
+TRAINING_CONFIG, TRAINING_CONFIG_TEXT = config_snapshot(
+    "training",
+    training_config_payload(
+        core_dreems_config,
+        config["train_validation_examples"],
+        training_stage="core" if USE_STAGED_SURFACE_GATE else "joint",
+    ),
+)
+
+surface_gate_dreems_config = deepcopy(config["dreems"])
+surface_gate_optimizer = SURFACE_GATE_STAGE.get("optimizer", {})
+if not isinstance(surface_gate_optimizer, dict):
+    raise ValueError("surface_gate_stage.optimizer must be a mapping")
+surface_gate_dreems_config["optimizer"].update(surface_gate_optimizer)
+if USE_STAGED_SURFACE_GATE:
+    surface_gate_dreems_config["optimizer"]["trainable_scope"] = "surface_gate"
+SURFACE_GATE_VALIDATION_EXAMPLES = int(
+    SURFACE_GATE_STAGE.get("validation_examples", config["train_validation_examples"])
+)
+if SURFACE_GATE_VALIDATION_EXAMPLES <= 0:
+    raise ValueError("surface_gate_stage.validation_examples must be positive")
+SURFACE_GATE_TRAINING_CONFIG, SURFACE_GATE_TRAINING_CONFIG_TEXT = config_snapshot(
+    "surface_gate_training",
+    training_config_payload(
+        surface_gate_dreems_config,
+        SURFACE_GATE_VALIDATION_EXAMPLES,
+        surface_gate_prepared_packs=SURFACE_GATE_STAGE.get("prepared_packs", {}),
+        training_stage="surface_gate",
+    ),
 )
 TRAIN_EXAMPLES = int(config["train_examples"])
 TEST_EXAMPLES = int(config["test_examples"])
@@ -135,18 +184,36 @@ def project_path(value):
     return str(path if path.is_absolute() else Path(PROJECT_ROOT, path).resolve())
 
 
-def supplemental_pack_paths(role):
-    specification = config.get("supplemental_prepared_packs", {}).get(role)
+def configured_pack_paths(specification, label):
     if specification is None:
         return []
-    if not isinstance(specification, dict):
-        raise ValueError(f"supplemental_prepared_packs.{role} must be a mapping")
-    pattern = project_path(specification["pattern"])
-    start = int(specification.get("start", 0))
-    count = int(specification["count"])
-    if start < 0 or count < 0:
-        raise ValueError("supplemental prepared pack start and count must be nonnegative")
-    return [pattern.format(pack=pack) for pack in range(start, start + count)]
+    specifications = specification if isinstance(specification, list) else [specification]
+    paths = []
+    for item in specifications:
+        if not isinstance(item, dict):
+            raise ValueError(f"{label} entries must be mappings")
+        pattern = project_path(item["pattern"])
+        start = int(item.get("start", 0))
+        count = int(item["count"])
+        if start < 0 or count < 0:
+            raise ValueError(f"{label} start and count must be nonnegative")
+        paths.extend(pattern.format(pack=pack) for pack in range(start, start + count))
+    return paths
+
+
+def supplemental_pack_paths(role):
+    specification = config.get("supplemental_prepared_packs", {}).get(role)
+    return configured_pack_paths(specification, f"supplemental_prepared_packs.{role}")
+
+
+def surface_gate_pack_paths(role):
+    prepared_packs = SURFACE_GATE_STAGE.get("prepared_packs", {})
+    if not isinstance(prepared_packs, dict):
+        raise ValueError("surface_gate_stage.prepared_packs must be a mapping")
+    return configured_pack_paths(
+        prepared_packs.get(role),
+        f"surface_gate_stage.prepared_packs.{role}",
+    )
 
 
 RAW_SOURCE_DIR = (
@@ -172,6 +239,13 @@ NORMALIZATION_SOURCE = (
 SUPPLEMENTAL_PACKS = {
     role: supplemental_pack_paths(role) for role in ("train", "validation")
 }
+SURFACE_GATE_PACKS = {
+    role: surface_gate_pack_paths(role) for role in ("train", "validation")
+}
+if USE_STAGED_SURFACE_GATE and any(
+    not SURFACE_GATE_PACKS[role] for role in ("train", "validation")
+):
+    raise ValueError("staged surface-gate training requires train and validation packs")
 PUBLISH_DIR = project_path(config["publish_dir"]) if config.get("publish_dir") else None
 
 
@@ -208,7 +282,7 @@ TRAIN_DEVICE_ENV = (
 TRAIN_JAX_PLATFORM = "cpu" if TRAIN_ACCELERATOR == "cpu" else "gpu"
 TRAIN_GRES = f"gpu:{TRAIN_GPUS}" if TRAIN_GPUS else ""
 
-localrules: all, cache_cartopy_land, write_simulation_config, write_feature_config, write_training_config, production_tranche, write_prepared_manifest, write_normalization_manifest, write_training_input_manifest, aggregate_evaluations
+localrules: all, cache_cartopy_land, write_simulation_config, write_feature_config, write_training_config, write_surface_gate_training_config, production_tranche, write_prepared_manifest, write_normalization_manifest, write_training_input_manifest, write_surface_gate_input_manifest, aggregate_evaluations
 
 
 def slurm_time(value):
@@ -454,6 +528,10 @@ def training_input_manifest_path(role):
     return f"{OUTDIR}/manifests/{role}_packs.txt"
 
 
+def surface_gate_input_manifest_path(role):
+    return f"{OUTDIR}/manifests/surface_gate_{role}_packs.txt"
+
+
 def training_accelerator_ready_path():
     return f"{OUTDIR}/environment/{TRAIN_ACCELERATOR}.ready"
 
@@ -461,6 +539,10 @@ def training_accelerator_ready_path():
 def training_manifest_inputs(wildcards):
     role = str(wildcards.role)
     return [*packed_paths(role), *SUPPLEMENTAL_PACKS[role]]
+
+
+def surface_gate_manifest_inputs(wildcards):
+    return SURFACE_GATE_PACKS[str(wildcards.role)]
 
 
 def eval_chunk_summary_path(chunk):
@@ -537,6 +619,15 @@ rule write_training_config:
         path = Path(output[0])
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(TRAINING_CONFIG_TEXT)
+
+
+rule write_surface_gate_training_config:
+    output:
+        SURFACE_GATE_TRAINING_CONFIG,
+    run:
+        path = Path(output[0])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(SURFACE_GATE_TRAINING_CONFIG_TEXT)
 
 
 rule cache_cartopy_land:
@@ -829,6 +920,19 @@ rule write_training_input_manifest:
         path.write_text("\n".join(str(Path(item).resolve()) for item in input) + "\n")
 
 
+rule write_surface_gate_input_manifest:
+    input:
+        surface_gate_manifest_inputs,
+    output:
+        manifest=surface_gate_input_manifest_path("{role}"),
+    wildcard_constraints:
+        role="train|validation",
+    run:
+        path = Path(output.manifest)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(str(Path(item).resolve()) for item in input) + "\n")
+
+
 rule merge_normalization:
     input:
         manifest=normalization_manifest_path(),
@@ -876,47 +980,146 @@ rule check_training_accelerator:
         """
 
 
-rule train:
-    input:
-        normalization=training_normalization_path(),
-        train_manifest=training_input_manifest_path("train"),
-        validation_manifest=training_input_manifest_path("validation"),
-        accelerator=training_accelerator_ready_path(),
-        config=TRAINING_CONFIG,
-        code=TRAINING_SOURCES,
-    output:
-        checkpoint=f"{OUTDIR}/model/checkpoint.dreems.zip",
-        best=f"{OUTDIR}/model/checkpoint.best.dreems.zip",
-        best_summary=f"{OUTDIR}/model/checkpoint.best.summary.json",
-        summary=f"{OUTDIR}/model/training_summary.json",
-        history=f"{OUTDIR}/model/training_history.jsonl",
-    benchmark:
-        f"{OUTDIR}/benchmarks/train.tsv"
-    params:
-        device_env=TRAIN_DEVICE_ENV,
-        expected_platform=TRAIN_JAX_PLATFORM,
-    threads: int(config.get("train_threads", 4))
-    resources:
-        mem_mb=int(config.get("train_mem_mb", 24000)),
-        runtime=slurm_time(config.get("train_runtime", "90m")),
-        gres=TRAIN_GRES,
-        slurm_partition=str(config.get("train_partition", "gpu_mig40,spgpu,gpu")),
-    shell:
-        """
-        {params.device_env}
-        export XLA_PYTHON_CLIENT_MEM_FRACTION={config[xla_mem_fraction]}
-        {UV_RUN} python -c 'import jax; devices = jax.devices(); assert devices and all(device.platform == "{params.expected_platform}" for device in devices), devices; print("JAX devices:", devices, flush=True)'
-        CACHE_DIR="${{TMPDIR:-/tmp}}/dreems-${{SLURM_JOB_ID}}"
-        {UV_RUN} python -m dreems.pipeline train \
-            --config {input.config:q} \
-            --normalization {input.normalization:q} \
-            --input-manifest {input.train_manifest:q} \
-            --validation-input-manifest {input.validation_manifest:q} \
-            --cache-dir "$CACHE_DIR" \
-            --output {output.checkpoint:q} \
-            --summary {output.summary:q} \
-            --stream
-        """
+if USE_STAGED_SURFACE_GATE:
+
+    rule train_core:
+        input:
+            normalization=training_normalization_path(),
+            train_manifest=training_input_manifest_path("train"),
+            validation_manifest=training_input_manifest_path("validation"),
+            accelerator=training_accelerator_ready_path(),
+            config=TRAINING_CONFIG,
+            code=TRAINING_SOURCES,
+        output:
+            checkpoint=f"{OUTDIR}/model/core/checkpoint.dreems.zip",
+            best=f"{OUTDIR}/model/core/checkpoint.best.dreems.zip",
+            best_summary=f"{OUTDIR}/model/core/checkpoint.best.summary.json",
+            summary=f"{OUTDIR}/model/core/training_summary.json",
+            history=f"{OUTDIR}/model/core/training_history.jsonl",
+        benchmark:
+            f"{OUTDIR}/benchmarks/train_core.tsv"
+        params:
+            device_env=TRAIN_DEVICE_ENV,
+            expected_platform=TRAIN_JAX_PLATFORM,
+        threads: int(config.get("train_threads", 4))
+        resources:
+            mem_mb=int(config.get("train_mem_mb", 24000)),
+            runtime=slurm_time(config.get("train_runtime", "90m")),
+            gres=TRAIN_GRES,
+            slurm_partition=str(config.get("train_partition", "gpu_mig40,spgpu,gpu")),
+        shell:
+            """
+            {params.device_env}
+            export XLA_PYTHON_CLIENT_MEM_FRACTION={config[xla_mem_fraction]}
+            {UV_RUN} python -c 'import jax; devices = jax.devices(); assert devices and all(device.platform == "{params.expected_platform}" for device in devices), devices; print("JAX devices:", devices, flush=True)'
+            CACHE_DIR="${{TMPDIR:-/tmp}}/dreems-core-${{SLURM_JOB_ID}}"
+            {UV_RUN} python -m dreems.pipeline train \
+                --config {input.config:q} \
+                --normalization {input.normalization:q} \
+                --input-manifest {input.train_manifest:q} \
+                --validation-input-manifest {input.validation_manifest:q} \
+                --cache-dir "$CACHE_DIR" \
+                --output {output.checkpoint:q} \
+                --summary {output.summary:q} \
+                --stream
+            """
+
+
+    rule train_surface_gate:
+        input:
+            normalization=training_normalization_path(),
+            train_manifest=surface_gate_input_manifest_path("train"),
+            validation_manifest=surface_gate_input_manifest_path("validation"),
+            accelerator=training_accelerator_ready_path(),
+            config=SURFACE_GATE_TRAINING_CONFIG,
+            init=f"{OUTDIR}/model/core/checkpoint.best.dreems.zip",
+            code=TRAINING_SOURCES,
+        output:
+            checkpoint=f"{OUTDIR}/model/checkpoint.dreems.zip",
+            best=f"{OUTDIR}/model/checkpoint.best.dreems.zip",
+            best_summary=f"{OUTDIR}/model/checkpoint.best.summary.json",
+            summary=f"{OUTDIR}/model/training_summary.json",
+            history=f"{OUTDIR}/model/training_history.jsonl",
+        benchmark:
+            f"{OUTDIR}/benchmarks/train_surface_gate.tsv"
+        params:
+            device_env=TRAIN_DEVICE_ENV,
+            expected_platform=TRAIN_JAX_PLATFORM,
+        threads: int(SURFACE_GATE_STAGE.get("threads", config.get("train_threads", 4)))
+        resources:
+            mem_mb=int(
+                SURFACE_GATE_STAGE.get("mem_mb", config.get("train_mem_mb", 24000))
+            ),
+            runtime=slurm_time(
+                SURFACE_GATE_STAGE.get("runtime", config.get("train_runtime", "90m"))
+            ),
+            gres=TRAIN_GRES,
+            slurm_partition=str(
+                SURFACE_GATE_STAGE.get(
+                    "partition", config.get("train_partition", "gpu_mig40,spgpu,gpu")
+                )
+            ),
+        shell:
+            """
+            {params.device_env}
+            export XLA_PYTHON_CLIENT_MEM_FRACTION={config[xla_mem_fraction]}
+            {UV_RUN} python -c 'import jax; devices = jax.devices(); assert devices and all(device.platform == "{params.expected_platform}" for device in devices), devices; print("JAX devices:", devices, flush=True)'
+            CACHE_DIR="${{TMPDIR:-/tmp}}/dreems-surface-gate-${{SLURM_JOB_ID}}"
+            {UV_RUN} python -m dreems.pipeline train \
+                --config {input.config:q} \
+                --normalization {input.normalization:q} \
+                --input-manifest {input.train_manifest:q} \
+                --validation-input-manifest {input.validation_manifest:q} \
+                --init-checkpoint {input.init:q} \
+                --cache-dir "$CACHE_DIR" \
+                --output {output.checkpoint:q} \
+                --summary {output.summary:q} \
+                --stream
+            """
+
+else:
+
+    rule train:
+        input:
+            normalization=training_normalization_path(),
+            train_manifest=training_input_manifest_path("train"),
+            validation_manifest=training_input_manifest_path("validation"),
+            accelerator=training_accelerator_ready_path(),
+            config=TRAINING_CONFIG,
+            code=TRAINING_SOURCES,
+        output:
+            checkpoint=f"{OUTDIR}/model/checkpoint.dreems.zip",
+            best=f"{OUTDIR}/model/checkpoint.best.dreems.zip",
+            best_summary=f"{OUTDIR}/model/checkpoint.best.summary.json",
+            summary=f"{OUTDIR}/model/training_summary.json",
+            history=f"{OUTDIR}/model/training_history.jsonl",
+        benchmark:
+            f"{OUTDIR}/benchmarks/train.tsv"
+        params:
+            device_env=TRAIN_DEVICE_ENV,
+            expected_platform=TRAIN_JAX_PLATFORM,
+        threads: int(config.get("train_threads", 4))
+        resources:
+            mem_mb=int(config.get("train_mem_mb", 24000)),
+            runtime=slurm_time(config.get("train_runtime", "90m")),
+            gres=TRAIN_GRES,
+            slurm_partition=str(config.get("train_partition", "gpu_mig40,spgpu,gpu")),
+        shell:
+            """
+            {params.device_env}
+            export XLA_PYTHON_CLIENT_MEM_FRACTION={config[xla_mem_fraction]}
+            {UV_RUN} python -c 'import jax; devices = jax.devices(); assert devices and all(device.platform == "{params.expected_platform}" for device in devices), devices; print("JAX devices:", devices, flush=True)'
+            CACHE_DIR="${{TMPDIR:-/tmp}}/dreems-${{SLURM_JOB_ID}}"
+            {UV_RUN} python -m dreems.pipeline train \
+                --config {input.config:q} \
+                --normalization {input.normalization:q} \
+                --input-manifest {input.train_manifest:q} \
+                --validation-input-manifest {input.validation_manifest:q} \
+                --cache-dir "$CACHE_DIR" \
+                --output {output.checkpoint:q} \
+                --summary {output.summary:q} \
+                --stream
+            """
 
 
 if PUBLISH_DIR is not None:

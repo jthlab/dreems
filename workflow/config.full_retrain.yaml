@@ -1,6 +1,7 @@
-# Overlay this file after config.snp_range_experiment.yaml. It trains the
-# released architecture from random initialization on the full broad corpus,
-# with sampling-mask counterfactuals kept as a minority of the stream.
+# Overlay this file after config.snp_range_experiment.yaml. It trains the core
+# model and initializer gate from random initialization on the full broad
+# corpus, with sampling-mask counterfactuals kept as a minority of the stream.
+# The surface gate is added afterward while the trained core remains frozen.
 outdir: /scratch/jonth_root/jonth0/jonth/dreems/full_retrain_20260902
 publish_dir: /home/jonth/turbo/dreems/full_retrain_20260902
 raw_source_dir: /scratch/jonth_root/jonth1/jonth/dreems_snp_range/raw
@@ -25,6 +26,41 @@ prepare_batch_runtime: 60m
 train_mem_mb: 32000
 train_runtime: 48h
 train_partition: gpu_mig40,spgpu,gpu
+
+# Joint surface-gate training destabilizes the core once the gate leaves its
+# near-identity initialization. The released gate was learned safely as a
+# separate frozen-core stage on balanced original/counterfactual views.
+surface_gate_stage:
+  enabled: true
+  validation_examples: 1024
+  prepared_packs:
+    train:
+      - pattern: /scratch/jonth_root/jonth0/jonth/dreems/sampling_robustness_20260830/prepared/counterfactual/train/pack_{pack}.pkl
+        count: 128
+      - pattern: /scratch/jonth_root/jonth0/jonth/dreems/sampling_robustness_20260830/prepared/replay/train/pack_{pack}.pkl
+        count: 128
+    validation:
+      - pattern: /scratch/jonth_root/jonth0/jonth/dreems/sampling_robustness_20260830/prepared/counterfactual/validation/pack_{pack}.pkl
+        count: 8
+      - pattern: /scratch/jonth_root/jonth0/jonth/dreems/sampling_robustness_20260830/prepared/replay/validation/pack_{pack}.pkl
+        count: 8
+  threads: 4
+  mem_mb: 32000
+  runtime: 12h
+  partition: gpu_mig40,spgpu,gpu
+  optimizer:
+    seed: 20260903
+    steps: 10000
+    batch_size: 8
+    learning_rate: 5.0e-04
+    gradient_clip_norm: 1.0
+    log_every: 250
+    early_stopping_patience: 12
+    early_stopping_min_delta: 0.0001
+    early_stopping_warmup_steps: 1500
+    early_stopping_metric: validation_loss
+    restore_best_validation: true
+    trainable_scope: surface_gate
 
 dreems:
   architecture:
