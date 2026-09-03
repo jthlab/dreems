@@ -794,7 +794,8 @@ def render_case(args: argparse.Namespace) -> None:
         maximum_pixels=int(args.topo_max_pixels),
         fetch_topo=fetch_topo,
     )
-    vlim = robust_limit(np.concatenate((prior_edge_log, refined_edge_log)))
+    prior_vlim = robust_limit(prior_edge_log)
+    map_vlim = robust_limit(refined_edge_log)
     sd_vmax = robust_limit(edge_log_sd)
     fig, axes = plt.subplots(
         1,
@@ -817,7 +818,7 @@ def render_case(args: argparse.Namespace) -> None:
         sample_nodes=sample_nodes,
         values=refined_edge_log,
         extent=extent,
-        vlim=vlim,
+        vlim=map_vlim,
         basemap=basemap,
         data_crs=data_crs,
         fetch_topo=fetch_topo,
@@ -830,8 +831,8 @@ def render_case(args: argparse.Namespace) -> None:
         values=prior_edge_log,
         extent=extent,
         grid_side=int(args.grid_side),
-        vmin=-vlim,
-        vmax=vlim,
+        vmin=-prior_vlim,
+        vmax=prior_vlim,
         cmap=SIGNED_CMAP,
         basemap=basemap,
         title="DREEMS neural-prior heatmap",
@@ -847,8 +848,8 @@ def render_case(args: argparse.Namespace) -> None:
         values=refined_edge_log,
         extent=extent,
         grid_side=int(args.grid_side),
-        vmin=-vlim,
-        vmax=vlim,
+        vmin=-map_vlim,
+        vmax=map_vlim,
         cmap=SIGNED_CMAP,
         basemap=basemap,
         title="DREEMS MAP-refined contours",
@@ -874,30 +875,29 @@ def render_case(args: argparse.Namespace) -> None:
         fetch_topo=fetch_topo,
     )
 
-    signed = plt.cm.ScalarMappable(
-        cmap=SIGNED_CMAP,
-        norm=plt.Normalize(-vlim, vlim),
+    colorbar_specs = (
+        (SIGNED_CMAP, -map_vlim, map_vlim, "MAP edge-log migration"),
+        (SIGNED_CMAP, -prior_vlim, prior_vlim, "neural-prior edge-log migration"),
+        (SIGNED_CMAP, -map_vlim, map_vlim, "MAP contour edge-log migration"),
+        (SD_CMAP, 0.0, sd_vmax, "posterior SD"),
     )
-    signed.set_array([])
-    signed_axis = fig.add_axes([0.14, 0.075, 0.55, 0.032])
-    fig.colorbar(
-        signed,
-        cax=signed_axis,
-        orientation="horizontal",
-        label="centered edge-log relative migration",
-    )
-    uncertainty = plt.cm.ScalarMappable(
-        cmap=SD_CMAP,
-        norm=plt.Normalize(0.0, sd_vmax),
-    )
-    uncertainty.set_array([])
-    uncertainty_axis = fig.add_axes([0.76, 0.075, 0.18, 0.032])
-    fig.colorbar(
-        uncertainty,
-        cax=uncertainty_axis,
-        orientation="horizontal",
-        label="posterior SD",
-    )
+    for axis, (cmap, vmin, vmax, label) in zip(axes, colorbar_specs, strict=True):
+        bounds = axis.get_position()
+        colorbar_axis = fig.add_axes(
+            [bounds.x0 + 0.035, 0.075, max(bounds.width - 0.07, 0.08), 0.032]
+        )
+        mappable = plt.cm.ScalarMappable(
+            cmap=cmap,
+            norm=plt.Normalize(vmin, vmax),
+        )
+        mappable.set_array([])
+        colorbar = fig.colorbar(
+            mappable,
+            cax=colorbar_axis,
+            orientation="horizontal",
+        )
+        colorbar.ax.tick_params(labelsize=7.0)
+        colorbar.set_label(label, fontsize=8.0)
     fig.suptitle(
         (
             f"{metadata['title']}\n"
@@ -923,6 +923,8 @@ def render_case(args: argparse.Namespace) -> None:
         "prepared_json": str(args.prepared_json),
         "prior_edge_log_sd": float(np.std(prior_edge_log)),
         "refined_edge_log_sd": float(np.std(refined_edge_log)),
+        "prior_edge_log_display_limit": prior_vlim,
+        "map_edge_log_display_limit": map_vlim,
         "posterior_sd_median": float(np.median(edge_log_sd)),
         "posterior_sd_p95": float(np.percentile(edge_log_sd, 95.0)),
     }
@@ -1141,7 +1143,8 @@ settings, so the figures are intended for visual comparison only.</p>
 <p class="note">In the DREEMS panels, red indicates lower relative migration and blue
 indicates higher relative migration. Values near the mean are transparent. White dots
 mark sampled nodes, and larger dots indicate more samples. The heatmaps and contours
-are smoothed views of the underlying edge estimates.</p>
+are smoothed views of the underlying edge estimates. The neural-prior and MAP panels
+use separate centered color scales, shown beneath each panel.</p>
 <p><a href="overview.png">DREEMS overview</a> |
 <a href="{html.escape(args.output_literature_report.name)}">literature candidates</a> |
 <a href="manifest.csv">manifest.csv</a> |
