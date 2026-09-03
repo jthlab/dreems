@@ -1,0 +1,35 @@
+# Real-data reanalysis using the same prepared, source-QC inputs and published
+# comparison figures as the previous gallery.
+outdir: /scratch/jonth_root/jonth0/jonth/dreems/full_retrain_real_data_20260903
+publish_dir: /home/jonth/turbo/dreems/real_data_full_retrain_20260903
+prepared_dir: /home/jonth/turbo/dreems/real_data_surface_gate_20260902/prepared
+checkpoint: /home/jonth/turbo/dreems/full_retrain_20260902/checkpoint.best.dreems.zip
+render_config: /home/jonth/turbo/dreems/real_data_published_comparison_surface_gate_20260902/provenance/published_config.yaml
+literature_report: /home/jonth/dreems_release_20260727/workflows/real_data_published/LITERATURE_CANDIDATES.md
+topo_cache: /home/jonth/turbo/dreems/real_world_gallery_20260724/gallery/topo_tile_cache
+
+datasets:
+  - north_american_gray_wolf
+  - blacklegged_ticks_midwest
+  - brazil_conopophaga_cearae
+  - brazil_sclerurus_cearensis
+  - flat_tailed_horned_lizard
+  - poplar_feems_packaged
+  - allohistium_darters
+  - sulphur_crested_cockatoo
+  - queensland_fruit_fly
+  - eastern_red_backed_salamander
+  - arabian_hemidactylus_hajarensis
+  - arabian_hemidactylus_luqueorum
+  - leopard_frog_complex
+  - erigeron_canadensis
+  - stilpnia_cayana
+
+inference_threads: 4
+inference_mem_mb: 16000
+inference_runtime: 120m
+render_mem_mb: 12000
+render_runtime: 90m
+assemble_mem_mb: 8000
+assemble_runtime: 60m
+partition: standard

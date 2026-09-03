@@ -112,7 +112,10 @@ def feems_cv_folds(wildcards):
     return [feems_cv_fold(wildcards.example, fold) for fold in range(count)]
 
 
-localrules: all
+if FEEMS_ARCHIVE:
+    localrules: all, extract_feems_archive, archive_feems
+else:
+    localrules: all
 
 
 rule all:
@@ -288,56 +291,77 @@ rule feems_cv_fold:
         """
 
 
-rule feems_case:
-    input:
-        example=lambda wildcards: source_path(INPUT_PATTERN, wildcards.example),
-        metadata=lambda wildcards: source_path(METADATA_PATTERN, wildcards.example),
-        folds=feems_cv_folds,
-        archive=lambda _wildcards: [FEEMS_ARCHIVE] if FEEMS_ARCHIVE else [],
-        archive_checksum=lambda _wildcards: (
-            [FEEMS_ARCHIVE_CHECKSUM] if FEEMS_ARCHIVE_CHECKSUM else []
-        ),
-        runner="src/dreems/h2h.py",
-        adapter="src/dreems/feems.py",
-    output:
-        json=f"{OUTDIR}/feems/example_{{example}}.json",
-        npz=f"{OUTDIR}/feems/example_{{example}}.npz",
-    benchmark:
-        f"{OUTDIR}/benchmarks/feems/example_{{example}}.tsv"
-    wildcard_constraints:
-        example="\\d+"
-    params:
-        cv_checkpoint_dir=lambda wildcards: feems_cv_checkpoint_dir(wildcards.example),
-        use_archive="1" if FEEMS_ARCHIVE else "0",
-    threads: 1
-    resources:
-        mem_mb=int(config.get("feems_final_mem_mb", 8000)),
-        runtime=str(config.get("feems_final_runtime", "60m")),
-        slurm_partition=str(config.get("feems_partition", "standard")),
-        slurm_account="jonth0",
-    shell:
-        """
-        set -euo pipefail
-        export OMP_NUM_THREADS=1
-        export OPENBLAS_NUM_THREADS=1
-        export MKL_NUM_THREADS=1
-        export NUMEXPR_NUM_THREADS=1
-        if [[ {params.use_archive:q} == "1" ]]; then
+if FEEMS_ARCHIVE:
+    rule extract_feems_archive:
+        input:
+            archive=FEEMS_ARCHIVE,
+            checksum=FEEMS_ARCHIVE_CHECKSUM,
+        output:
+            json=[feems_json(example) for example in EXAMPLES],
+            npz=[feems_npz(example) for example in EXAMPLES],
+        benchmark:
+            f"{OUTDIR}/benchmarks/extract_feems.tsv"
+        params:
+            target=f"{OUTDIR}/feems",
+            staging=f"{OUTDIR}/.feems-archive-staging",
+            examples=" ".join(str(example) for example in EXAMPLES),
+        threads: 1
+        resources:
+            mem_mb=1000,
+            runtime="15m",
+        shell:
+            """
+            set -euo pipefail
             archive={input.archive:q}
-            checksum={input.archive_checksum:q}
+            checksum={input.checksum:q}
             (
                 cd "$(dirname "$archive")"
                 sha256sum -c "$(basename "$checksum")"
             )
-            mkdir -p "$(dirname {output.json:q})"
-            json_tmp={output.json:q}.tmp
-            npz_tmp={output.npz:q}.tmp
-            trap 'rm -f "$json_tmp" "$npz_tmp"' EXIT
-            tar -xOf "$archive" "feems/example_{wildcards.example}.json" > "$json_tmp"
-            tar -xOf "$archive" "feems/example_{wildcards.example}.npz" > "$npz_tmp"
-            mv "$json_tmp" {output.json:q}
-            mv "$npz_tmp" {output.npz:q}
-        else
+            rm -rf {params.staging:q}
+            mkdir -p {params.staging:q}
+            trap 'rm -rf {params.staging:q}' EXIT
+            tar -xzf "$archive" -C {params.staging:q}
+            for example in {params.examples}; do
+                test -s {params.staging:q}/feems/example_${{example}}.json
+                test -s {params.staging:q}/feems/example_${{example}}.npz
+            done
+            rm -rf {params.target:q}
+            mkdir -p "$(dirname {params.target:q})"
+            mv {params.staging:q}/feems {params.target:q}
+            """
+else:
+    rule feems_case:
+        input:
+            example=lambda wildcards: source_path(INPUT_PATTERN, wildcards.example),
+            metadata=lambda wildcards: source_path(METADATA_PATTERN, wildcards.example),
+            folds=feems_cv_folds,
+            runner="src/dreems/h2h.py",
+            adapter="src/dreems/feems.py",
+        output:
+            json=f"{OUTDIR}/feems/example_{{example}}.json",
+            npz=f"{OUTDIR}/feems/example_{{example}}.npz",
+        benchmark:
+            f"{OUTDIR}/benchmarks/feems/example_{{example}}.tsv"
+        wildcard_constraints:
+            example="\\d+"
+        params:
+            cv_checkpoint_dir=lambda wildcards: feems_cv_checkpoint_dir(
+                wildcards.example
+            ),
+        threads: 1
+        resources:
+            mem_mb=int(config.get("feems_final_mem_mb", 8000)),
+            runtime=str(config.get("feems_final_runtime", "60m")),
+            slurm_partition=str(config.get("feems_partition", "standard")),
+            slurm_account="jonth0",
+        shell:
+            """
+            set -euo pipefail
+            export OMP_NUM_THREADS=1
+            export OPENBLAS_NUM_THREADS=1
+            export MKL_NUM_THREADS=1
+            export NUMEXPR_NUM_THREADS=1
             uv run --frozen --no-sync python -m dreems.h2h feems-case \
                 --input {input.example:q} \
                 --index {wildcards.example} \
@@ -345,8 +369,7 @@ rule feems_case:
                 --cv-checkpoint-dir {params.cv_checkpoint_dir:q} \
                 --output-json {output.json:q} \
                 --output-npz {output.npz:q}
-        fi
-        """
+            """
 
 
 rule dreems_case:
@@ -425,49 +448,73 @@ rule aggregate:
         """
 
 
-rule archive_feems:
-    input:
-        json=[feems_json(example) for example in EXAMPLES],
-        npz=[feems_npz(example) for example in EXAMPLES],
-    output:
-        archive=f"{PUBLISH_DIR}/feems_results.tar.gz",
-        checksum=f"{PUBLISH_DIR}/feems_results.tar.gz.sha256",
-    benchmark:
-        f"{PUBLISH_DIR}/benchmarks/archive_feems.tsv"
-    threads: 1
-    resources:
-        mem_mb=int(config.get("archive_mem_mb", 1000)),
-        runtime=str(config.get("archive_runtime", "15m")),
-        slurm_partition=str(config.get("aggregate_partition", "standard")),
-        slurm_account="jonth0",
-    params:
-        source_dir=OUTDIR,
-    shell:
-        """
-        set -euo pipefail
-        mkdir -p "$(dirname {output.archive:q})"
-        list="$(mktemp)"
-        archive_tmp="{output.archive}.tmp"
-        checksum_tmp="{output.checksum}.tmp"
-        trap 'rm -f "$list" "$archive_tmp" "$checksum_tmp"' EXIT
-        printf '%s\n' {input.json:q} {input.npz:q} \
-            | sed 's|^{params.source_dir:q}/||' \
-            | LC_ALL=C sort > "$list"
-        tar \
-            --sort=name \
-            --mtime='UTC 1970-01-01' \
-            --owner=0 \
-            --group=0 \
-            --numeric-owner \
-            -C {params.source_dir:q} \
-            -czf "$archive_tmp" \
-            -T "$list"
-        mv "$archive_tmp" {output.archive:q}
-        printf '%s  %s\n' \
-            "$(sha256sum {output.archive:q} | cut -d ' ' -f 1)" \
-            "$(basename {output.archive:q})" > "$checksum_tmp"
-        mv "$checksum_tmp" {output.checksum:q}
-        """
+if FEEMS_ARCHIVE:
+    rule archive_feems:
+        input:
+            archive=FEEMS_ARCHIVE,
+            checksum=FEEMS_ARCHIVE_CHECKSUM,
+        output:
+            archive=f"{PUBLISH_DIR}/feems_results.tar.gz",
+            checksum=f"{PUBLISH_DIR}/feems_results.tar.gz.sha256",
+        benchmark:
+            f"{PUBLISH_DIR}/benchmarks/archive_feems.tsv"
+        threads: 1
+        resources:
+            mem_mb=1000,
+            runtime="15m",
+        shell:
+            """
+            set -euo pipefail
+            mkdir -p "$(dirname {output.archive:q})"
+            cp {input.archive:q} {output.archive:q}.tmp
+            cp {input.checksum:q} {output.checksum:q}.tmp
+            mv {output.archive:q}.tmp {output.archive:q}
+            mv {output.checksum:q}.tmp {output.checksum:q}
+            """
+else:
+    rule archive_feems:
+        input:
+            json=[feems_json(example) for example in EXAMPLES],
+            npz=[feems_npz(example) for example in EXAMPLES],
+        output:
+            archive=f"{PUBLISH_DIR}/feems_results.tar.gz",
+            checksum=f"{PUBLISH_DIR}/feems_results.tar.gz.sha256",
+        benchmark:
+            f"{PUBLISH_DIR}/benchmarks/archive_feems.tsv"
+        threads: 1
+        resources:
+            mem_mb=int(config.get("archive_mem_mb", 1000)),
+            runtime=str(config.get("archive_runtime", "15m")),
+            slurm_partition=str(config.get("aggregate_partition", "standard")),
+            slurm_account="jonth0",
+        params:
+            source_dir=OUTDIR,
+        shell:
+            """
+            set -euo pipefail
+            mkdir -p "$(dirname {output.archive:q})"
+            list="$(mktemp)"
+            archive_tmp="{output.archive}.tmp"
+            checksum_tmp="{output.checksum}.tmp"
+            trap 'rm -f "$list" "$archive_tmp" "$checksum_tmp"' EXIT
+            printf '%s\n' {input.json:q} {input.npz:q} \
+                | sed 's|^{params.source_dir:q}/||' \
+                | LC_ALL=C sort > "$list"
+            tar \
+                --sort=name \
+                --mtime='UTC 1970-01-01' \
+                --owner=0 \
+                --group=0 \
+                --numeric-owner \
+                -C {params.source_dir:q} \
+                -czf "$archive_tmp" \
+                -T "$list"
+            mv "$archive_tmp" {output.archive:q}
+            printf '%s  %s\n' \
+                "$(sha256sum {output.archive:q} | cut -d ' ' -f 1)" \
+                "$(basename {output.archive:q})" > "$checksum_tmp"
+            mv "$checksum_tmp" {output.checksum:q}
+            """
 
 
 rule gallery:

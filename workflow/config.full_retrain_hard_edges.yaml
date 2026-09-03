@@ -1,0 +1,42 @@
+# Rerun the exact twelve FEEMS-notebook sharp-transition cases with the staged
+# full-retrain checkpoint. Simulation inputs and FEEMS LOO fits are immutable.
+outdir: /scratch/jonth_root/jonth0/jonth/dreems/full_retrain_hard_edges_20260903/work
+publish_dir: /home/jonth/turbo/dreems/full_retrain_hard_edges_20260903
+input_pattern: /scratch/jonth_root/jonth0/jonth/dreems/feems_scenarios_exact_h2h_20260830/work/inputs/example_{example}.pkl
+metadata_pattern: /scratch/jonth_root/jonth0/jonth/dreems/feems_scenarios_exact_h2h_20260830/work/inputs/example_{example}.metadata.json
+notebook_scenario_base_pattern: /scratch/jonth_root/jonth0/jonth/dreems/feems_scenarios_exact_h2h_20260830/work/inputs/base_{truth}.npz
+checkpoint: /home/jonth/turbo/dreems/full_retrain_20260902/checkpoint.best.dreems.zip
+
+first_example: 0
+example_count: 12
+example_ids: null
+notebook_scenario_config: workflow/config.full_retrain_hard_edges.yaml
+notebook_scenario_bases_precomputed: true
+notebook_scenario_cases_precomputed: true
+gallery_command: scenario-gallery
+
+notebook_scenarios:
+  source_notebook: /home/jonth/turbo/dreems/feems_scenarios_source_20260830.ipynb
+  source_notebook_sha256: 27dcf6241a92fa1c685eddb15f4645e451a82a0c273a3e12d39c25c4f54ad974
+  num_snps: 1000
+
+feems_archive: /home/jonth/turbo/dreems/feems_scenarios_exact_h2h_20260830/feems_results.tar.gz
+feems_archive_checksum: /home/jonth/turbo/dreems/feems_scenarios_exact_h2h_20260830/feems_results.tar.gz.sha256
+feems_final_mem_mb: 2000
+feems_final_runtime: 15m
+feems_partition: standard
+protocol_check_partition: standard
+
+dreems_threads: 2
+dreems_mem_mb: 6000
+dreems_runtime: 30m
+dreems_partition: standard
+
+aggregate_mem_mb: 4000
+aggregate_runtime: 30m
+aggregate_partition: standard
+gallery_threads: 1
+gallery_mem_mb: 8000
+gallery_runtime: 90m
+archive_mem_mb: 1000
+archive_runtime: 15m

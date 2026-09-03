@@ -40,6 +40,8 @@ def test_h2h_config_exposes_resources_but_not_feems_statistics() -> None:
     assert "--cv-checkpoint-dir" in snakefile
     assert "feems_archive_checksum" in snakefile
     assert "sha256sum -c" in snakefile
+    assert "rule extract_feems_archive:" in snakefile
+    assert "localrules: all, extract_feems_archive, archive_feems" in snakefile
 
 
 def test_h2h_aggregate_requires_and_records_documented_loo(tmp_path: Path) -> None:
