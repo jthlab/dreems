@@ -85,12 +85,10 @@ preparation, avoiding hundreds of thousands of small scratch files.
 
 The production lineage is recorded in separate configs:
 
-- `workflow/config.production.yaml` records the 61,440-example graph-balanced
-  base fit and its 4,096-example held-out corpus.
-- `workflow/config.sampling_robustness.yaml` records the counterfactual
-  sampling-mask augmentation and full-model fine-tune.
-- `workflow/config.null_surface_gate.yaml` records the final graph-level gate
-  fit with the preceding model frozen.
+- `workflow/config.snp_range_experiment.yaml` records the 61,440-example
+  broad-SNP corpus and its 4,096-example held-out corpus.
+- `workflow/config.full_retrain.yaml` records the from-scratch core fit,
+  sampling-mask counterfactuals, and frozen graph-level gate fit.
 - `workflow/config.surface_gate_release.yaml` records fresh posterior-SD
   calibration, verification, and deterministic release packaging.
 - `workflow/config.example.yaml` reduces simulation sizes and optimizer steps

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import re
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -33,18 +34,49 @@ def load_included_rows(path: Path) -> dict[int, dict[str, Any]]:
         rows = [dict(row) for row in csv.DictReader(stream)]
     if not rows:
         raise ValueError(f"{path} has no independent examples")
-    return {int(row["example"]): row for row in rows}
+    result = {}
+    for row in rows:
+        index_value = row.get("example", row.get("index"))
+        family = row.get("family", row.get("surface_kind"))
+        if index_value is None or family is None:
+            raise ValueError(f"{path} must contain example/index and family/surface_kind")
+        index = int(index_value)
+        if index in result:
+            raise ValueError(f"duplicate row for example {index}")
+        row["family"] = family
+        result[index] = row
+    return result
+
+
+def prediction_index(path: Path) -> int:
+    match = re.search(r"example_(\d+)$", path.stem)
+    if match is None:
+        raise ValueError(f"cannot infer example index from {path}")
+    return int(match.group(1))
 
 
 def load_predictions(paths: list[Path]) -> dict[int, dict[str, np.ndarray]]:
     result: dict[int, dict[str, np.ndarray]] = {}
     for path in paths:
         with np.load(path, allow_pickle=False) as archive:
-            replicates = np.asarray(archive["replicate"], dtype=np.int64)
-            offsets = np.asarray(archive["edge_offsets"], dtype=np.int64)
-            truth = np.asarray(archive["edge_truth"], dtype=np.float64)
-            mean = np.asarray(archive["edge_mean"], dtype=np.float64)
-            sd = np.asarray(archive["edge_sd"], dtype=np.float64)
+            if {"replicate", "edge_offsets", "edge_truth", "edge_mean", "edge_sd"} <= set(
+                archive.files
+            ):
+                replicates = np.asarray(archive["replicate"], dtype=np.int64)
+                offsets = np.asarray(archive["edge_offsets"], dtype=np.int64)
+                truth = np.asarray(archive["edge_truth"], dtype=np.float64)
+                mean = np.asarray(archive["edge_mean"], dtype=np.float64)
+                sd = np.asarray(archive["edge_sd"], dtype=np.float64)
+            elif {"truth", "dreems", "edge_sd"} <= set(archive.files):
+                replicates = np.asarray([prediction_index(path)], dtype=np.int64)
+                truth = np.asarray(archive["truth"], dtype=np.float64)
+                mean = np.asarray(archive["dreems"], dtype=np.float64)
+                sd = np.asarray(archive["edge_sd"], dtype=np.float64)
+                offsets = np.asarray([0, truth.size], dtype=np.int64)
+            else:
+                raise ValueError(f"{path} is not a recognized prediction archive")
+        if truth.shape != mean.shape or truth.shape != sd.shape:
+            raise ValueError(f"truth, mean, and SD shapes disagree in {path}")
         for local_index, replicate in enumerate(replicates):
             start, stop = int(offsets[local_index]), int(offsets[local_index + 1])
             index = int(replicate)

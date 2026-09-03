@@ -309,23 +309,23 @@ def test_released_feature_and_prediction_contract() -> None:
     prediction = checkpoints.predict_examples(checkpoints.load_checkpoint(), [raw])
     np.testing.assert_allclose(
         prediction.edge_mean[0],
-        [-0.00980676, -0.01296327, 0.00417129, 0.01218971, -0.01021037, 0.01661941],
+        [0.01196847, -0.01295716, 0.00660560, -0.00490301, -0.00585365, 0.00513974],
         rtol=2e-5,
         atol=2e-6,
     )
     np.testing.assert_allclose(
         prediction.edge_sd[0],
-        [1.30176003, 1.41529447, 1.35983055, 1.39948622, 1.35995925, 1.19587870],
+        [1.09670546, 1.11194005, 1.14263821, 1.19255759, 1.16527384, 1.05273488],
         rtol=2e-5,
         atol=2e-6,
     )
     np.testing.assert_allclose(
         prediction.raw_edge_sd[0],
-        [1.20213786, 1.30698365, 1.25576431, 1.29238518, 1.25588316, 1.10435951],
+        [1.19506136, 1.21166223, 1.24511350, 1.29950980, 1.26977916, 1.14714736],
         rtol=2e-5,
         atol=2e-6,
     )
-    assert prediction.surface_weight[0] == pytest.approx(0.113678813)
+    assert prediction.surface_weight[0] == pytest.approx(0.0644742474)
 
 
 def test_checkpoint_calibration_preserves_parameters_and_exposes_raw_sd(tmp_path) -> None:

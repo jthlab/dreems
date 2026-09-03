@@ -2,11 +2,10 @@
 
 This directory contains the Snakemake paths used to generate the synthetic
 corpus, construct DREEMS features, fit the model, and evaluate held-out
-simulations. The production release has four explicit stages:
-`config.production.yaml` records the graph-balanced base fit,
-`config.sampling_robustness.yaml` records the counterfactual sampling-mask
-fine-tune, `config.null_surface_gate.yaml` records the frozen-core surface-gate
-fit, and `config.surface_gate_release.yaml` records fresh SD calibration and
+simulations. The production release has three explicit configs:
+`config.snp_range_experiment.yaml` records the broad-SNP corpus,
+`config.full_retrain.yaml` records the from-scratch core and frozen surface-gate
+fits, and `config.surface_gate_release.yaml` records fresh SD calibration and
 release packaging. `config.example.yaml` is a small CPU smoke run.
 
 ## Released Model Provenance
@@ -15,34 +14,37 @@ The packaged checkpoint is
 `src/dreems/data/dreems_diffusion_bands.dreems.zip`. Its archive SHA-256 is:
 
 ```text
-10d21a6326e848f48a7eccdd1a508d86f54effc55f79774486a626037a9e3530
+454cb50f4c7ef1213e001d700d1bf9e9f6a353b5c8be5619aae06e9d7a22cc15
 ```
 
 The serialized Equinox parameters have SHA-256
-`d46045e3a5bbdc870427e2ca93b07daaac5a1d94ff7bbaa25e8f82972e3bec76`.
-The package version is 0.2.0.
+`19a12e428d54e6b437ba7928e935cd1dbb8434ec83c34d506949b5fed84952ec`.
+The package version is 0.3.0.
 
 The model lineage is:
 
-1. The graph-balanced base model was fit from scratch on 61,440 simulations,
-   with 1,024 of 4,096 held-out simulations used for validation. Its archive
-   SHA-256 was `f0b677d2cc028252002d15fac843ca7347b1b352eb2286a18bd202b724aa92b4`.
-2. `sampling_robustness.Snakefile` added structured sampling masks and replayed
-   ordinary examples, then fine-tuned the complete v2 initializer-gate model.
-   The selected candidate SHA-256 is
-   `0e3e56c2c3098c3f0b04d0dfdad067ddb6bb1a928c79ca9048dec505763c61d3`.
-3. `null_surface_gate.Snakefile` froze that candidate and trained only a
-   graph-level gate. The raw gate checkpoint SHA-256 is
-   `df21d92755edeb9f37ac1dcc4251f4f1523f0096ce3ea5c6f914dec41075bdfc`.
-   The selected validation loss was `0.14434671436902136` at step 9,250; the
-   run completed 10,000 steps and restored the selected state.
+1. The broad corpus contains 61,440 Rust coalescent simulations spanning
+   50-10,000 retained SNPs. The core training stream adds 8,192 structured
+   sampling-mask views, while 1,152 held-out graphs drive early stopping.
+2. `Snakefile` fit the v2 initializer-gate model from random initialization.
+   Its selected checkpoint SHA-256 is
+   `86cd7b1aecf36ce5bf0cf3a709cc3b7be721baa4b356d9578595ad3d9d0cc671`.
+   Validation loss was lowest at step 38,000; training stopped at step 50,000
+   and restored that state.
+3. The same workflow froze the core and trained only the graph-level surface
+   gate. The selected checkpoint SHA-256 is
+   `7ad003203fa3cfe9e3f196d3f724a1cdfc984bdfd77bf3bb21630e9d51c7cf5c`.
+   Validation loss was lowest at step 9,000; the run completed 10,000 steps
+   and restored that state.
 4. `surface_gate_release.Snakefile` fit SD calibration on cached independent
    predictions and wrote the deterministic production archive above.
 
 `promote_surface_gate.py` verifies exact equality of every pre-gate Equinox
-parameter between stages 2 and 3, checks the complete 41-point gate training
-history, and verifies that calibration changes metadata but not parameter
-bytes. `tests/test_production_workflow.py` pins the final hashes and contract.
+parameter between stages 2 and 3, checks the complete 51-point core and
+41-point gate histories, confirms that the broad and hard-case reports used
+the selected checkpoint, and verifies that calibration changes metadata but
+not parameter bytes. `tests/test_production_workflow.py` pins the final hashes
+and contract.
 
 ## Statistical Recipe
 
@@ -53,7 +55,7 @@ The base production corpus uses:
 - direct sample-covariance output rather than retained genotype matrices;
 - symmetric migration and diploid samples;
 - markers conditioned on MAF 0.05-0.95;
-- 2,000-10,000 retained SNPs per example;
+- 50-10,000 retained SNPs per example, balanced across four log-scale bins;
 - masked grids, FEEMS triangular lattices, and global landmass graphs;
 - graph sizes extending to roughly 1,400 nodes, broad sampling density, and
   variable local coalescence rate `q`;
@@ -92,24 +94,25 @@ edge Gaussian NLL
   + 0.35 * high-versus-low edge-orientation loss
 ```
 
-Training uses single-device Adam with learning rate `5e-5`, global gradient
+Core training uses single-device Adam with learning rate `5e-5`, global gradient
 norm clipping at 1, batch size 8, and at most 120,000 steps. It checks
 validation every 1,000 steps, uses patience 12 after a 20,000-step warmup, and
 restores the best checkpoint.
 
-The sampling-robustness stage adds initializer-regret and paired-mask
-consistency terms while fine-tuning the complete model at learning rate
-`1e-5`. The final stage freezes those parameters and trains only the surface
-gate. Its loss includes the same prediction terms plus binary cross-entropy
-for whether the true centered edge surface has RMS greater than 0.05.
+The core loss also includes initializer-regret and paired-mask consistency
+terms. Counterfactual views are 11.8% of the core training stream. The final
+stage freezes every core parameter and trains only the surface gate for 10,000
+steps at learning rate `5e-4`. Its loss includes binary cross-entropy for
+whether the true centered edge surface has RMS greater than 0.05.
 
-Fresh posterior-SD calibration uses 688 independent gated predictions,
-stratified by simulation family and sampled-node density into 230 fit, 227
-selection, and 231 untouched verification graphs. Density-aware scaling was
-selected by graph-balanced Gaussian NLL. On verification, graph-balanced NLL
-changed from 0.0823 to 0.0212, 80% coverage changed from 80.18% to 81.55%, and
-95% coverage changed from 92.89% to 93.67%. The factorized Gaussian posterior
-should not be read as a complete joint uncertainty model.
+Fresh posterior-SD calibration uses 512 cached predictions from the immutable
+broad H2H, stratified by simulation family and sampled-node density into 171
+fit, 171 selection, and 170 untouched verification graphs. Density-aware
+scales of 0.939, 0.935, and 0.918 were selected by graph-balanced Gaussian NLL.
+On verification, graph-balanced NLL changed from 0.1033 to 0.0994, 80%
+coverage changed from 84.52% to 82.02%, and 95% coverage changed from 95.95%
+to 94.83%. The factorized Gaussian posterior should not be read as a complete
+joint uncertainty model.
 
 ## DAG And Artifacts
 
@@ -125,12 +128,12 @@ staging/raw/{split}/chunk_N.pkl               (temporary; one job per example)
     -> eval/chunks/chunk_N/summary.json        (temporary)
     -> eval/summary.{json,csv}
 
-sampling-mask replay -> v2 initializer-gate candidate
+base simulations + sampling-mask views -> v2 initializer-gate core
     -> frozen-core v3 surface-gate checkpoint
-    -> independent gated predictions
-    -> calibration fit (230 graphs)
-    -> calibration selection (227 graphs)
-    -> calibration verification (231 graphs)
+    -> immutable broad-H2H predictions
+    -> calibration fit (171 graphs)
+    -> calibration selection (171 graphs)
+    -> calibration verification (170 graphs)
     -> deterministic packaged checkpoint
 ```
 
@@ -408,21 +411,21 @@ sbatch workflow/run_great_lakes.sh \
 
 The source corpus path and all output paths are explicit in the config. Core
 and gate checkpoints, prepared masks, validation histories, and evaluations are
-separate Snakemake artifacts. Changing a training hyperparameter therefore does
-not repeat covariance simulation or mask construction.
+separate Snakemake artifacts. The publish rule copies both selected training
+stages and their complete histories to Turbo. Changing a training
+hyperparameter therefore does not repeat covariance simulation or mask
+construction.
 
 ### Surface Gate And Release
 
-`null_surface_gate.Snakefile` loads the selected sampling-robustness candidate,
-adds one graph-level gate, and freezes every preceding parameter. The gate
-learns when a homogeneous centered surface is preferable to the full edge
-prediction. Its held-out comparisons are separate from the gate-training
-validation set.
+The staged section of `Snakefile` adds one graph-level gate to the selected
+full-retrain core and freezes every preceding parameter. The gate learns when
+a homogeneous centered surface is preferable to the full edge prediction.
 
-`surface_gate_release.Snakefile` then recalibrates posterior SD from cached
-independent predictions. It uses deterministic family- and density-balanced
-fit, selection, and verification splits, checks parameter lineage, and writes
-the packaged checkpoint atomically:
+`surface_gate_release.Snakefile` recalibrates posterior SD from cached broad-H2H
+predictions. It uses deterministic family- and density-balanced fit, selection,
+and verification splits, checks parameter lineage and H2H provenance, and
+writes the packaged checkpoint atomically:
 
 ```bash
 uv run --frozen --no-sync snakemake \
@@ -432,5 +435,5 @@ uv run --frozen --no-sync snakemake \
 ```
 
 The checked-in release config records the exact archived inputs used for the
-0.2.0 package. Override its scratch and Turbo paths only when reproducing the
+0.3.0 package. Override its scratch and Turbo paths only when reproducing the
 same promotion from a relocated artifact archive.

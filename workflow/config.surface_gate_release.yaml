@@ -1,21 +1,32 @@
-outdir: /scratch/jonth_root/jonth0/jonth/dreems/surface_gate_release_20260831
-publish_dir: /home/jonth/turbo/dreems/surface_gate_release_20260831
+# Deterministic promotion of the full core retrain and its frozen surface gate.
+outdir: /scratch/jonth_root/jonth0/jonth/dreems/full_retrain_release_20260903
+publish_dir: /home/jonth/turbo/dreems/full_retrain_release_20260903
 release_checkpoint: src/dreems/data/dreems_diffusion_bands.dreems.zip
 
-sampling_robustness_checkpoint: /home/jonth/turbo/dreems/sampling_robustness_20260830/dreems_sampling_robustness_candidate.dreems.zip
-surface_gate_checkpoint: /home/jonth/turbo/dreems/null_surface_gate_20260831/dreems_null_surface_gate.dreems.zip
-surface_gate_config: workflow/config.null_surface_gate.yaml
-surface_gate_training_summary: /scratch/jonth_root/jonth0/jonth/dreems/null_surface_gate_20260831/model/training_summary.json
-surface_gate_training_history: /scratch/jonth_root/jonth0/jonth/dreems/null_surface_gate_20260831/model/training_history.jsonl
-sampling_robustness_training_summary: /home/jonth/turbo/dreems/sampling_robustness_20260830/training_summary.json
-sampling_robustness_training_history: /home/jonth/turbo/dreems/sampling_robustness_20260830/training_history.jsonl
-independent_rows: /home/jonth/turbo/dreems/null_surface_gate_20260831/independent_rows.csv
-independent_report: /home/jonth/turbo/dreems/null_surface_gate_20260831/independent_report.json
-broad_report: /home/jonth/turbo/dreems/null_surface_gate_20260831/broad_report.json
-scenario_report: /home/jonth/turbo/dreems/surface_gate_comparison_20260831/scenario_report.json
-prediction_pattern: /scratch/jonth_root/jonth0/jonth/dreems/null_surface_gate_independent_20260831/evaluation/gated/pack_{pack}/predictions.npz
-prediction_packs: [0, 2, 4, 5, 6, 7, 8, 10, 11, 13, 15]
+core_checkpoint: /home/jonth/turbo/dreems/full_retrain_20260902/core/checkpoint.best.dreems.zip
+core_training_summary: /home/jonth/turbo/dreems/full_retrain_20260902/core/training_summary.json
+core_training_history: /home/jonth/turbo/dreems/full_retrain_20260902/core/training_history.jsonl
+surface_gate_checkpoint: /home/jonth/turbo/dreems/full_retrain_20260902/checkpoint.best.dreems.zip
+surface_gate_training_summary: /home/jonth/turbo/dreems/full_retrain_20260902/training_summary.json
+surface_gate_training_history: /home/jonth/turbo/dreems/full_retrain_20260902/training_history.jsonl
+training_configs:
+  - workflow/config.snp_range_experiment.yaml
+  - workflow/config.full_retrain.yaml
+
+# These are cached raw posterior predictions from the immutable broad H2H.
+# Calibration uses balanced, disjoint fit, selection, and verification thirds.
+prediction_pattern: /scratch/jonth_root/jonth0/jonth/dreems/full_retrain_h2h_20260903/work/dreems/example_{example}.npz
+prediction_start: 0
+prediction_count: 512
+independent_rows: /home/jonth/turbo/dreems/full_retrain_h2h_20260903/rows.csv
 calibration_seed: 20261001
+
+broad_protocol: /home/jonth/turbo/dreems/full_retrain_h2h_20260903/protocol.json
+broad_report: /home/jonth/turbo/dreems/full_retrain_h2h_20260903/summary.json
+expected_broad_examples: 512
+hard_protocol: /home/jonth/turbo/dreems/full_retrain_hard_edges_20260903/protocol.json
+hard_report: /home/jonth/turbo/dreems/full_retrain_hard_edges_20260903/summary.json
+expected_hard_examples: 12
 
 threads: 2
 mem_mb: 12000

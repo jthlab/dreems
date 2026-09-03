@@ -587,6 +587,15 @@ if PUBLISH_DIR is not None:
             f"{PUBLISH_DIR}/training_history.jsonl",
         ]
     )
+    if USE_STAGED_SURFACE_GATE:
+        ALL_TARGETS.extend(
+            [
+                f"{PUBLISH_DIR}/core/checkpoint.best.dreems.zip",
+                f"{PUBLISH_DIR}/core/checkpoint.best.summary.json",
+                f"{PUBLISH_DIR}/core/training_summary.json",
+                f"{PUBLISH_DIR}/core/training_history.jsonl",
+            ]
+        )
 
 
 rule all:
@@ -1138,6 +1147,35 @@ if PUBLISH_DIR is not None:
         shell:
             """
             mkdir -p {PUBLISH_DIR:q}
+            for pair in \
+                {input.checkpoint:q}:{output.checkpoint:q} \
+                {input.best_summary:q}:{output.best_summary:q} \
+                {input.summary:q}:{output.summary:q} \
+                {input.history:q}:{output.history:q}; do
+                source_path="${{pair%%:*}}"
+                destination_path="${{pair#*:}}"
+                cp "$source_path" "$destination_path.tmp"
+                mv "$destination_path.tmp" "$destination_path"
+            done
+            """
+
+
+if PUBLISH_DIR is not None and USE_STAGED_SURFACE_GATE:
+
+    rule publish_core_training:
+        input:
+            checkpoint=f"{OUTDIR}/model/core/checkpoint.best.dreems.zip",
+            best_summary=f"{OUTDIR}/model/core/checkpoint.best.summary.json",
+            summary=f"{OUTDIR}/model/core/training_summary.json",
+            history=f"{OUTDIR}/model/core/training_history.jsonl",
+        output:
+            checkpoint=f"{PUBLISH_DIR}/core/checkpoint.best.dreems.zip",
+            best_summary=f"{PUBLISH_DIR}/core/checkpoint.best.summary.json",
+            summary=f"{PUBLISH_DIR}/core/training_summary.json",
+            history=f"{PUBLISH_DIR}/core/training_history.jsonl",
+        shell:
+            """
+            mkdir -p {PUBLISH_DIR:q}/core
             for pair in \
                 {input.checkpoint:q}:{output.checkpoint:q} \
                 {input.best_summary:q}:{output.best_summary:q} \

@@ -1,7 +1,6 @@
-# Exact corpus and training recipe for the graph-balanced base model. The
-# released model adds the sampling-robustness and surface-gate stages recorded
-# by config.sampling_robustness.yaml, config.null_surface_gate.yaml, and
-# config.surface_gate_release.yaml.
+# Exact corpus and training recipe for the earlier graph-balanced base model.
+# The current release uses the broader SNP distribution and full retrain in
+# config.snp_range_experiment.yaml and config.full_retrain.yaml.
 outdir: results/dreems_production
 uv_cache_dir: null
 uv_run_args: --frozen --no-sync
