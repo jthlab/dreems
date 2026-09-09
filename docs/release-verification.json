@@ -2,6 +2,59 @@
   "audit_commit": "463124663911453685e32023fd9e8e24bc58ad4e",
   "branch_checks": [
     {
+      "commit": "563ad028639b59638f94ed7870081eff970b3ec5",
+      "documentation_commit": "aa24c68114941fed4cc9af74a12ff9d636ff76a8",
+      "tested_revision": "aa24c68114941fed4cc9af74a12ff9d636ff76a8",
+      "date": "2026-09-09",
+      "full_suite": {
+        "tests": 1051,
+        "passed": 1051,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "duration_seconds": 1082.775,
+        "source_unchanged_during_run": true
+      },
+      "annotation_guard": {
+        "package_modules": 32,
+        "workflow_workers": 5,
+        "bare_array_annotations": 0
+      },
+      "passed_checks": [
+        "ruff check and format for src, tests, and workflow",
+        "workflow dry run and launcher syntax",
+        "quickstart notebook execution",
+        "clean CPU wheel installation and packaged checkpoint loading",
+        "fresh 66-step release workflow and reuse of saved artifacts",
+        "comparison notebook code cells with synthetic fixtures"
+      ],
+      "seeded_simulation_parity": {
+        "reference_commit": "a06c4fb5704ec3672e14f38f18113bf1370507a2",
+        "cases": 231,
+        "exact": true,
+        "dtypes_exact": true,
+        "rng_states_exact": true,
+        "case_counts": {
+          "grid_draws": 216,
+          "hex_meshes": 3,
+          "island_simulations": 12
+        }
+      },
+      "execution": {
+        "orchestrator": "snakemake",
+        "executor": "slurm",
+        "partition": "standard",
+        "account": "jonth0",
+        "full_suite_job": 60732286,
+        "full_suite_cpus": 4,
+        "full_suite_memory_mb": 8000
+      },
+      "production_regeneration": false,
+      "production_retraining": false,
+      "feems_benchmark_reruns": 0,
+      "checkpoint_sha256": "454cb50f4c7ef1213e001d700d1bf9e9f6a353b5c8be5619aae06e9d7a22cc15"
+    },
+    {
       "commit": "c3a0aed79abb180af646bd36aeeed188632cd078",
       "date": "2026-09-09",
       "full_suite_before_final_annotation_fix": {

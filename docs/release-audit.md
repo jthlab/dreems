@@ -1,8 +1,8 @@
 # Release Code Review
 
-The first refactor was verified on September 9, 2026. The checkpoint is
-unchanged. Further work on array types, documentation, and module layout is
-in progress on `refactor`.
+The refactor was verified on September 9, 2026. Array types, documentation,
+and module cleanup are complete on `refactor`. The packaged checkpoint is
+unchanged.
 
 ## Design
 
@@ -74,7 +74,7 @@ file. Those checks covered the affected modules.
 
 Commit `c3a0aed` adds array layouts to feature and training data, removes
 redundant FEEMS wrappers, and reads checkpoint dimensions from the model.
-The annotation test now covers 18 core modules. Other modules still need review.
+At that revision, the annotation test covered 18 core modules.
 
 The full test run passed 1,022 tests and found one validation regression:
 a FEEMS shape annotation raised a type error before the existing sample-count
@@ -86,6 +86,33 @@ rerun after this final annotation correction.
 Ruff, workflow dry runs, the executable notebook, and a clean CPU wheel
 installation passed again at this commit. All 66 arrays in the feature and
 prediction comparison matched `d54a795` exactly. The checkpoint is unchanged.
+
+### Final Checks
+
+Commit `563ad02` completes dimension annotations across all 32 package modules
+and five Python workflow workers. An AST test checks for bare array annotations
+throughout those files. Shared archive readers replace duplicate helpers.
+Commit `aa24c68` consolidates package documentation in the main README and
+simplifies explanations in the workflow guide.
+
+With the source held at `aa24c68` throughout the checks:
+
+- All 1,051 tests passed, with no failures, errors, or skips, in 1,082.775 seconds.
+- Ruff lint and format checks passed for the package, tests, and Python
+  workflow workers.
+- Workflow dry runs, launcher syntax checks, the quickstart notebook, and a
+  clean CPU wheel installation passed.
+- The fresh release workflow completed all 66 steps on small test fixtures.
+  Subsequent invocations reused the saved outputs.
+- All 231 seeded simulation cases matched `a06c4fb` exactly, including array
+  dtypes and subsequent RNG states. These cover grid and hex meshes, masks,
+  surface families, and the Rust and Python island simulators.
+- The packaged checkpoint SHA256 remained
+  `454cb50f4c7ef1213e001d700d1bf9e9f6a353b5c8be5619aae06e9d7a22cc15`.
+
+Numerical checks ran through Snakemake on the standard Slurm partition using
+`jonth0`. No production corpus, model training run, or FEEMS benchmark was
+repeated for this refactor.
 
 ## Limits
 
