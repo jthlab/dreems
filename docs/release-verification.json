@@ -1,0 +1,450 @@
+{
+  "audit_commit": "463124663911453685e32023fd9e8e24bc58ad4e",
+  "records": {
+    "release-api-audit-parity.json": {
+      "public_signatures_and_dataclass_fields": "unchanged",
+      "genotypes:edges": 0,
+      "genotypes:positions": 0,
+      "genotypes:edge_log_mean": 0,
+      "genotypes:edge_log_sd": 0,
+      "genotypes:raw_edge_log_sd": 0,
+      "genotypes:node_log_q_mean": 0,
+      "genotypes:node_log_q_sd": 0,
+      "sample_covariance:edges": 0,
+      "sample_covariance:positions": 0,
+      "sample_covariance:edge_log_mean": 0,
+      "sample_covariance:edge_log_sd": 0,
+      "sample_covariance:raw_edge_log_sd": 0,
+      "sample_covariance:node_log_q_mean": 0,
+      "sample_covariance:node_log_q_sd": 0,
+      "node_covariance:edges": 0,
+      "node_covariance:positions": 0,
+      "node_covariance:edge_log_mean": 0,
+      "node_covariance:edge_log_sd": 0,
+      "node_covariance:raw_edge_log_sd": 0,
+      "node_covariance:node_log_q_mean": 0,
+      "node_covariance:node_log_q_sd": 0,
+      "created_dataset": "identical",
+      "refined_edge_log_mean": 0,
+      "refinement_diagnostics_excluding_seconds": "identical",
+      "fractional_snps": "old: truncated 50.5 to 50; new: rejected",
+      "fractional_edge": "old: truncated 1.25 to 1; new: rejected",
+      "stale_refinement": "old: retained; new: removed"
+    },
+    "release-audit-parity.json": {
+      "leaves:initializer=False,surface=False": 0,
+      "prediction:initializer=False,surface=False": 0,
+      "gradient:initializer=False,surface=False": 0,
+      "add_initializer:initializer=False,surface=False": 0,
+      "add_surface:initializer=False,surface=False": 0,
+      "leaves:initializer=False,surface=True": 0,
+      "prediction:initializer=False,surface=True": 0,
+      "gradient:initializer=False,surface=True": 0,
+      "add_initializer:initializer=False,surface=True": 0,
+      "leaves:initializer=True,surface=False": 0,
+      "prediction:initializer=True,surface=False": 0,
+      "gradient:initializer=True,surface=False": 0,
+      "add_surface:initializer=True,surface=False": 0,
+      "leaves:initializer=True,surface=True": 0,
+      "prediction:initializer=True,surface=True": 0,
+      "gradient:initializer=True,surface=True": 0,
+      "loss_and_gradient:masked_mean_squared_error:0": 0,
+      "loss_and_gradient:masked_gaussian_nll:1": 0,
+      "loss_and_gradient:masked_regression_slope_loss:2": 0,
+      "loss_and_gradient:masked_regression_slope_loss:3": 0,
+      "loss_and_gradient:masked_centered_correlation_loss:4": 0,
+      "loss_and_gradient:masked_edge_orientation_loss:5": 0,
+      "loss_and_gradient:masked_initializer_regret_loss:6": 0,
+      "loss_and_gradient:counterfactual_anchor_consistency_loss:7": 0,
+      "released_checkpoint_prediction": 0,
+      "released_checkpoint_scaled_prediction": 0,
+      "previous_unbounded_predict_error": "output array is read-only",
+      "unbounded_predict_fixed": true,
+      "trained_parameters:all": 0,
+      "training_losses:all": 0,
+      "trained_parameters:initializer_gate": 0,
+      "training_losses:initializer_gate": 0,
+      "trained_parameters:surface_gate": 0,
+      "training_losses:surface_gate": 0
+    },
+    "release-benchmark-archive-audit-parity.json": {
+      "archive_input_identity": "legacy_unverified",
+      "cached_cases": 512,
+      "checkpoint_sha256": "454cb50f4c7ef1213e001d700d1bf9e9f6a353b5c8be5619aae06e9d7a22cc15",
+      "csv_byte_identical": true,
+      "feems_fits": 0,
+      "identical_restored_files": 1024,
+      "inference_runs": 0,
+      "legacy_geometry_truth_sampling_checks": "passed",
+      "numeric_summary_exact": true,
+      "original_archive_sha256": "257610a188c7ee0e318ae73314db764a5467389249b026fd14ac5a79beb2482c",
+      "paired_comparisons_exact": true,
+      "public_parameter_names_defaults_preserved": true,
+      "repacked_members_byte_identical": true
+    },
+    "release-calibration-audit-parity.json": {
+      "byte_identical_reports": 4,
+      "cached_examples": 36,
+      "exact_fits": 300,
+      "exact_metric_summaries": 300,
+      "exact_sd_arrays": 2655,
+      "parameter_bytes_unchanged": true
+    },
+    "release-calibration-audit-published.json": {
+      "cached_examples": 512,
+      "calibration": {
+        "density_breaks": [
+          0.1,
+          0.25
+        ],
+        "density_scales": [
+          0.939251605010462,
+          0.9350554887392338,
+          0.9176980330417999
+        ],
+        "global_scale": 0.9359868823775983,
+        "method": "density",
+        "schema_version": 1
+      },
+      "feems_runs": 0,
+      "inference_runs": 0,
+      "old_new_reports_byte_identical": 4,
+      "packaged_scales_equal": true,
+      "published_reports_equal": 3,
+      "source_calibration_method": "raw"
+    },
+    "release-comparison-audit-parity.json": {
+      "broad_cases_exact": 512,
+      "comparisons": {
+        "arrays": 3734,
+        "scalars": 44314
+      },
+      "metric_comparisons_exact": 3072,
+      "notebook_cases_exact": 12,
+      "notebook_demographies_exact": 3,
+      "notes": [
+        "No simulations, model training, or FEEMS fits were regenerated.",
+        "Twelve sampling views were rederived from three retained msprime genotype matrices.",
+        "The reference worker uses the archived pre-QC genotype reader. The interim signed-only reader rejected its unsigned calls; the current worker converts them explicitly.",
+        "Scenario report prose now describes reused sampling views; numerical summaries are unchanged."
+      ],
+      "pixel_identical_figures": 6,
+      "public_parameter_names_defaults_and_saved_fields_preserved": true,
+      "scenario_bundle_arrays_exact": 31,
+      "scenario_csv_byte_identical": true,
+      "scenario_report_numerics_exact": true,
+      "seconds": 105.88107707491145,
+      "unchanged_packaged_checkpoint_sha256": "454cb50f4c7ef1213e001d700d1bf9e9f6a353b5c8be5619aae06e9d7a22cc15"
+    },
+    "release-corpus-audit-parity.json": {
+      "recipes": 4,
+      "draw_sequences_compared": 1000,
+      "rng_state_preserved": true,
+      "exact_comparisons": 212897,
+      "raw_examples": 6,
+      "byte_identical_files": 10,
+      "explicit_seed_config_hashes_preserved": true,
+      "public_parameter_names_defaults_preserved": true,
+      "checkpoint_sha256": "454cb50f4c7ef1213e001d700d1bf9e9f6a353b5c8be5619aae06e9d7a22cc15"
+    },
+    "release-dag-audit-parity.json": {
+      "exact_array_comparisons": 88,
+      "paired_views_compared": 8,
+      "replay_selections_equal": 2,
+      "selection_manifests_equal": 2
+    },
+    "release-dependencies-audit-parity.json": {
+      "cached_cases": 512,
+      "checkpoint_sha256": "454cb50f4c7ef1213e001d700d1bf9e9f6a353b5c8be5619aae06e9d7a22cc15",
+      "comparisons": "exact",
+      "datasets": 3,
+      "edge_record_exports": 3,
+      "feems_fits": 0,
+      "identical_aggregate_reports": 3,
+      "identical_cli_tables": 6,
+      "identical_feems_files": 6,
+      "inference_runs": 0,
+      "input_arrays": 15
+    },
+    "release-feature-audit-parity.json": {
+      "status": "passed",
+      "examples": 18,
+      "encodings": 3,
+      "arrays_compared": 1443,
+      "nonidentical_arrays": [],
+      "max_absolute_difference": 0,
+      "checkpoint": "/home/jonth/phleems_laplace/src/dreems/data/dreems_diffusion_bands.dreems.zip"
+    },
+    "release-feems-inputs-audit-parity.json": {
+      "arrays_byte_identical": 4838,
+      "complex_covariance_truncation_reproduced_and_fixed": true,
+      "fold_npz_byte_identical": true,
+      "fractional_worker_truncation_reproduced_and_fixed": true,
+      "genotype_dataset_qc_output_identical": true,
+      "mock_protocol_pairs": 32,
+      "official_small_fit_pairs": 4,
+      "packaged_checkpoint_sha256": "454cb50f4c7ef1213e001d700d1bf9e9f6a353b5c8be5619aae06e9d7a22cc15",
+      "packaged_model_examples": 2,
+      "production_training_or_feems_benchmark_runs": 0,
+      "public_parameter_names_defaults_and_dataclass_fields_preserved": true,
+      "retained_benchmark_inputs": 512,
+      "scalar_comparisons": 1886
+    },
+    "release-gallery-audit-parity.json": {
+      "checkpoint_rows_exact": 4096,
+      "packed_slices_exact": 128,
+      "broad_cases_exact": 512,
+      "scenario_cases_exact": 24,
+      "snp_pairs_exact": 12,
+      "checkpoint_csv_byte_identical": true,
+      "statistics_exact": true,
+      "pixel_identical_figures": 10,
+      "rendering_dpi": 70,
+      "public_parameters_and_defaults_preserved": true,
+      "selection_changes": {},
+      "unchanged_packaged_checkpoint_sha256": "454cb50f4c7ef1213e001d700d1bf9e9f6a353b5c8be5619aae06e9d7a22cc15",
+      "comparisons": {
+        "arrays": 5208,
+        "scalars": 647872
+      },
+      "elapsed_seconds": 102.34624539827928
+    },
+    "release-graph-api-audit-parity.json": {
+      "exact_comparisons": {
+        "arrays": 4259,
+        "scalars": 15292,
+        "seeded_calls": 1656
+      },
+      "public_signatures_preserved": {
+        "geography": 34,
+        "motifs": 22,
+        "datasets": 5,
+        "inference": 11
+      },
+      "dataclass_fields_preserved": [
+        "inference.DREEMSInput",
+        "inference.NodeCovarianceInput",
+        "inference.InferenceExample",
+        "inference._RefinementObservation",
+        "inference.DREEMSResult",
+        "inference.DREEMSPredictor"
+      ],
+      "checkpoint_sha256": "454cb50f4c7ef1213e001d700d1bf9e9f6a353b5c8be5619aae06e9d7a22cc15",
+      "seconds": 4.403127212077379,
+      "scope": "Valid graph/sampling/surface outputs and subsequent RNG states; no new SNP simulation or model fit.",
+      "intentional_changes": [
+        "Reject invalid sampler inputs and hex spacing",
+        "Keep one node, not every node, for an edgeless largest component",
+        "Propagate unexpected errors from land-path sampling"
+      ]
+    },
+    "release-pipeline-workers-audit-parity.json": {
+      "arrays_byte_identical": 7017,
+      "empty_shard_loop_reproduced_and_fixed": true,
+      "h2h_csv_byte_identical": true,
+      "mixed_group_size_rejected": true,
+      "normalization_draws": 32,
+      "old_mixed_group_batch_size": 12,
+      "packaged_checkpoint_sha256": "454cb50f4c7ef1213e001d700d1bf9e9f6a353b5c8be5619aae06e9d7a22cc15",
+      "packaged_model_examples": 4,
+      "prepared_examples": 96,
+      "production_training_or_feems_fits": 0,
+      "progress_records_equal_except_timing_paths": true,
+      "public_parameter_names_defaults_preserved": true,
+      "requested_batch_size": 8,
+      "scalar_comparisons": 234083,
+      "seeded_batches": 480,
+      "single_shard_reports_byte_identical": true
+    },
+    "release-promotion-audit-parity.json": {
+      "promotion_archive_byte_identical": true,
+      "promotion_is_deterministic": true,
+      "promotion_sha256": "454cb50f4c7ef1213e001d700d1bf9e9f6a353b5c8be5619aae06e9d7a22cc15",
+      "packaged_checkpoint_unchanged": "454cb50f4c7ef1213e001d700d1bf9e9f6a353b5c8be5619aae06e9d7a22cc15",
+      "four_checkpoint_models_exact": true,
+      "arrays_byte_identical": 528,
+      "retained_sampling_fractions_exact": 512,
+      "prediction_examples_exact": [
+        0,
+        17
+      ],
+      "metadata_edit_member_bytes_exact": true,
+      "public_signatures_and_saved_fields_unchanged": true,
+      "old_duplicate_split_bug_reproduced_and_fixed": true,
+      "seconds": 40.209099316969514,
+      "note": "No training, production FEEMS fit, or release publication; output copies stay in scratch."
+    },
+    "release-real-data-audit-parity.json": {
+      "display_grids_exact": 15,
+      "note": "No production retraining, FEEMS refits, or gallery replacement. Pixel checks use offline stock imagery.",
+      "pixel_identical_panels": [
+        "north_american_gray_wolf",
+        "sulphur_crested_cockatoo"
+      ],
+      "prediction_cases_exact": [
+        "north_american_gray_wolf",
+        "allohistium_darters"
+      ],
+      "public_parameter_names_defaults_and_saved_fields_preserved": true,
+      "retained_real_inputs_exact": 15,
+      "scenario_components_exact": 36,
+      "seconds": 54.18493311107159,
+      "seeded_rust_simulations_exact": 12,
+      "unchanged_packaged_checkpoint_sha256": "454cb50f4c7ef1213e001d700d1bf9e9f6a353b5c8be5619aae06e9d7a22cc15"
+    },
+    "release-real-data-calibration-parity.json": {
+      "attached_archive_identical_after_zip_timestamp_normalization": true,
+      "attached_member_bytes_identical": true,
+      "byte_identical_reports": [
+        "fit.json",
+        "selection.json",
+        "verification.json",
+        "verification.csv"
+      ],
+      "canonical_archive_byte_identical": true,
+      "note": "Serialization and calculation parity only; this is not a new calibration of the release.",
+      "synthetic_cases": 36
+    },
+    "release-refinement-audit-parity.json": {
+      "refinement_cases": 24,
+      "refinement_steps": 50,
+      "comparisons": 3573,
+      "max_absolute_difference": 0,
+      "tolerance": 1e-12,
+      "per_edge_clipping_regression": {
+        "old": {
+          "trust_region_rms": 1.280381412138318,
+          "trust_region_max_abs": 2.2069858442803687,
+          "trust_region_delta_rms": 0.3981611525133843
+        },
+        "fixed": {
+          "trust_region_rms": 0.43511201559920226,
+          "trust_region_max_abs": 0.75,
+          "trust_region_delta_rms": 0.13530710455572018
+        }
+      },
+      "parameter_names_defaults_and_result_fields_preserved": true
+    },
+    "release-result-audit-parity.json": {
+      "checkpoint_sha256": "454cb50f4c7ef1213e001d700d1bf9e9f6a353b5c8be5619aae06e9d7a22cc15",
+      "comparisons": "exact",
+      "exported_examples": 512,
+      "feems_cli_byte_identical_tables": 2,
+      "feems_runs": 0,
+      "mask_arrays": 100,
+      "production_inference_runs": 0,
+      "refinement_observations": 12,
+      "result_arrays": 6144,
+      "selection_runs": 12,
+      "signatures_unchanged": true,
+      "subset_arrays": 1600
+    },
+    "release-simulation-audit-parity.json": {
+      "seeded_output_cases": 33,
+      "full_raw_cases": 6,
+      "exact_comparisons": 363,
+      "parameters_defaults_fields_preserved": true,
+      "rust_binary_sha256": "e1ad31db3e410f27ec26e09f3426610ba031555b7ae4f96858f78dc846123971",
+      "python_covariance_excluded": "Intentionally corrected usable-SNP count and ploidy handling; its RNG stream changes."
+    },
+    "release-simulation-inputs-audit-parity.json": {
+      "recipes": 4,
+      "recipe_sampling_draw_sequences": 1000,
+      "random_masks": 2413,
+      "triangular_lattices": 322,
+      "seeded_habitat_motifs": 180,
+      "landscape_environments": 10,
+      "genotype_standardizations": 25,
+      "rust_raw_examples": 8,
+      "exact_arrays": 20792,
+      "exact_scalar_comparisons": 214190,
+      "sparse_worker_outputs_preserved": 7,
+      "repaired_empty_sampling_seeds": [
+        1133,
+        4,
+        5
+      ],
+      "rng_state_preserved": true,
+      "public_parameter_names_defaults_preserved": true,
+      "checkpoint_sha256": "454cb50f4c7ef1213e001d700d1bf9e9f6a353b5c8be5619aae06e9d7a22cc15"
+    },
+    "release-training-qc-audit-parity.json": {
+      "status": "passed",
+      "comparisons": 1530,
+      "max_absolute_difference": 0,
+      "training_scopes": [
+        "all",
+        "initializer_gate",
+        "surface_gate"
+      ],
+      "training_steps": 3,
+      "genotype_datasets": 6,
+      "public_parameters_and_defaults_unchanged": true,
+      "dataclass_fields_unchanged": true
+    },
+    "release-validation-workflow-audit-parity.json": {
+      "legacy_calibration_examples": 512,
+      "legacy_calibration_reports_byte_identical": true,
+      "calibrated_parameter_bytes_unchanged": true,
+      "calibrated_metadata_equal_except_report_paths": true,
+      "h2h_cases": [
+        0,
+        17
+      ],
+      "h2h_arrays_byte_identical": 16,
+      "h2h_untimed_fields_identical": 110,
+      "new_predictions_record_checkpoint_sha256": true,
+      "public_parameter_names_and_defaults_preserved": true,
+      "packaged_checkpoint_sha256": "454cb50f4c7ef1213e001d700d1bf9e9f6a353b5c8be5619aae06e9d7a22cc15",
+      "seconds": 44.93916311394423,
+      "note": "No production training, corpus generation, or FEEMS benchmark fits. Two paired neural/MAP checks only."
+    },
+    "retired-workflows.json": {
+      "date": "2026-09-08",
+      "reason": "Historical null-surface and forward-evidence experiments, plus the unused pre-gate checkpoint promotion script. None is a dependency of the current release training, calibration, benchmark, or manuscript workflows.",
+      "archive": "/home/jonth/turbo/dreems/release_workflow_audit_20260908/retired_workflows.tar",
+      "sha256": "cd1be234dcd75e008a1a4c4fd64ab0f87002d54b2d3575dc5b30cb4cc5ad6cf2",
+      "files": [
+        "workflow/analyze_forward_null_hybrid.py",
+        "workflow/analyze_null_shrinkage.py",
+        "workflow/analyze_surface_gate.py",
+        "workflow/analyze_surface_gate_broad.py",
+        "workflow/analyze_surface_gate_independent.py",
+        "workflow/audit_forward_null_evidence.py",
+        "workflow/config.forward_null_evidence.yaml",
+        "workflow/config.null_surface_gate.yaml",
+        "workflow/config.null_surface_gate_broad.yaml",
+        "workflow/config.null_surface_gate_independent.yaml",
+        "workflow/config.null_surface_shrinkage.yaml",
+        "workflow/forward_null_evidence.Snakefile",
+        "workflow/null_surface_gate.Snakefile",
+        "workflow/null_surface_gate_broad.Snakefile",
+        "workflow/null_surface_gate_independent.Snakefile",
+        "workflow/null_surface_shrinkage.Snakefile",
+        "workflow/promote_checkpoint.py"
+      ],
+      "additional_archives": [
+        {
+          "date": "2026-09-08",
+          "reason": "Unused heuristic null-shrinkage experiment and its tests. Its workflow consumers were already retired. The learned production surface gate is retained.",
+          "archive": "/home/jonth/turbo/dreems/release_result_audit_20260908/retired_null_shrinkage.tar",
+          "sha256": "fe1a0f9e3f9c3c3394cf7d09d4be22a483eb6b23a149b7a0f4364d9e54699b77",
+          "files": [
+            "src/dreems/null_shrinkage.py",
+            "tests/test_null_shrinkage.py"
+          ]
+        },
+        {
+          "date": "2026-09-08",
+          "reason": "Sampling preparation no longer owns historical fine-tuning stages. These files are retained as references for the previous preparation recipe, not deleted wholesale from the current workflow.",
+          "archive": "/home/jonth/turbo/dreems/release_dag_audit_20260908/retired_sampling_stages.tar",
+          "sha256": "5e343484b0a9f0a3ee09b6d6e537774623a2e7ec8a1344d2f38c68e479b8fb78",
+          "files": [
+            "workflow/sampling_robustness.Snakefile",
+            "workflow/config.sampling_robustness.yaml"
+          ]
+        }
+      ]
+    }
+  }
+}

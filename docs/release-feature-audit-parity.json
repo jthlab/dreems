@@ -1,9 +1,0 @@
-{
-  "status": "passed",
-  "examples": 18,
-  "encodings": 3,
-  "arrays_compared": 1443,
-  "nonidentical_arrays": [],
-  "max_absolute_difference": 0.0,
-  "checkpoint": "/home/jonth/phleems_laplace/src/dreems/data/dreems_diffusion_bands.dreems.zip"
-}

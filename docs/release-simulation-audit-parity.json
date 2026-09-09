@@ -1,8 +1,0 @@
-{
-  "seeded_output_cases": 33,
-  "full_raw_cases": 6,
-  "exact_comparisons": 363,
-  "parameters_defaults_fields_preserved": true,
-  "rust_binary_sha256": "e1ad31db3e410f27ec26e09f3426610ba031555b7ae4f96858f78dc846123971",
-  "python_covariance_excluded": "Intentionally corrected usable-SNP count and ploidy handling; its RNG stream changes."
-}
