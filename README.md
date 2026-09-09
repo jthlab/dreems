@@ -2,9 +2,9 @@
 
 DREEMS (Deep Recovery of Effective Migration Surfaces) is a neural estimator
 for effective migration surfaces. The production model predicts centered edge
-log-conductances on a spatial graph and reports held-out-calibrated edge
-posterior standard deviations. A learned graph-level gate shrinks the centered
-surface toward homogeneous migration when the data do not support spatial
+log-conductances on a spatial graph and reports posterior standard deviations
+calibrated on held-out simulations. A learned graph-level gate shrinks the
+centered surface toward homogeneous migration when the data do not support spatial
 contrast. FEEMS baselines are exposed through a small wrapper around the
 Novembre Lab FEEMS implementation.
 
@@ -54,8 +54,8 @@ The complete test suite includes workflow and rendering tests, so both the
 
 ```bash
 uv sync --frozen --group dev --group workflow
-uv run --no-sync ruff check src tests
-uv run --no-sync ruff format --check src tests
+uv run --no-sync ruff check src tests workflow
+uv run --no-sync ruff format --check src tests workflow
 JAX_PLATFORMS=cpu uv run --no-sync pytest -q
 ```
 
@@ -97,7 +97,7 @@ uv run --frozen --no-sync snakemake all \
     --config outdir=/path/to/work publish_dir=/path/to/models
 ```
 
-This is the full production-sized training recipe, not a quick demonstration.
+This recipe trains on the full production corpus.
 For a small smoke run, use `workflow/Snakefile` with `workflow/config.example.yaml`.
 The training workflow's evaluation includes examples used for early stopping;
 independent performance estimates come from the separate H2H workflow.
@@ -216,17 +216,17 @@ edge_log = surface["edge_log_migration_refined"]
 relative_migration = surface["edge_relative_migration_refined"]
 ```
 
-`node_sample_count` and `effective_snps` are required precision information,
-not tuning parameters. The genotype convenience path computes both
+`node_sample_count` and `effective_snps` describe sampling precision and must
+match the data. The genotype convenience path computes both
 automatically, using the retained SNP count by default; pass an
 LD-adjusted `effective_snps` value when appropriate.
 
 The covariance rows and columns must follow `observed_nodes` in the same order.
 If `observed_nodes` is omitted, rows must follow the increasing indices of nodes
-with positive sample counts. Counts refer to individuals, not allele copies.
+with positive sample counts. Counts refer to individuals.
 Use a connected graph with no self edges or duplicate undirected edges.
-Indices and counts must be integer-valued; fractional values are rejected, not
-rounded. Integral floats, such as those read from CSV, are accepted.
+Indices and counts must be integer-valued; fractional values are rejected.
+Integral floats, such as those read from CSV, are accepted.
 
 ### From VCF-Zarr
 
@@ -236,8 +236,8 @@ and variables: `call_genotype(variants, samples, ploidy)` and
 [bio2zarr](https://sgkit-dev.github.io/bio2zarr/vcf2zarr/overview.html), then
 open the result with sgkit or xarray.
 
-Per-sample locations are xarray coordinates indexed by `samples`; they are not
-dataset-wide attributes. They may already be present as `sample_latitude` and
+Per-sample locations are xarray coordinates indexed by `samples`.
+They may already be present as `sample_latitude` and
 `sample_longitude`, or can be attached from a sample-ID mapping:
 
 ```python
@@ -266,7 +266,8 @@ nearest graph node, and computes node-level covariance. Ploidy affects allele
 frequency and MAF calculation; the trained model consumes the resulting
 standardized covariance and does not require ploidy-specific weights.
 
-Calls must be signed integer allele codes, not dosages or genotype probabilities.
+Calls must contain signed integer allele codes. Dosages and genotype
+probabilities need conversion before using this constructor.
 A `-1` allele or a true `call_genotype_mask` entry makes the whole sample call
 missing. Mixed ploidy (`-2` padding) is rejected. A sample with no called genotypes
 among the retained variants must be removed before conversion; it cannot count
@@ -282,9 +283,9 @@ DREEMS surfaces are relative: the global log offset is not identifiable.
 one; it is not the arithmetic posterior mean of migration. By default,
 `dreems.infer` also reports the covariance-refined MAP point estimate as
 `edge_log_migration_refined` and `edge_relative_migration_refined`. The
-reported posterior SD belongs to the neural posterior, not to the refined
-point estimate. It is multiplicatively calibrated by sampled-node density on
-held-out simulations; `edge_log_migration_sd_raw` retains the uncalibrated
+reported posterior SD describes the neural posterior. Refinement does not
+provide an updated SD. The neural SD is multiplied by a factor fitted for each
+sampling-density bin on held-out simulations; `edge_log_migration_sd_raw` retains the uncalibrated
 value when the two differ. `surface.attrs["dreems_surface_weight"]` reports the
 learned graph-level shrinkage weight: zero is a homogeneous centered surface,
 and one retains the full predicted contrast. The lower-level
@@ -310,11 +311,11 @@ dreems \
 ```
 
 Pass `--checkpoint path/to/checkpoint.dreems.zip` or
-`dreems.load_model("path/to/checkpoint.dreems.zip")` to override the packaged
-topology-invariant diffusion-band surface-gate checkpoint.
+`dreems.load_model("path/to/checkpoint.dreems.zip")` to override the
+packaged checkpoint.
 
-For testing against exact FEEMS, use `--feems` with a genotype matrix. Official
-FEEMS fitting requires genotypes/SNPs, not just a covariance matrix:
+For comparison with the official FEEMS implementation, use `--feems` with
+a genotype matrix:
 
 ```bash
 dreems --feems \
@@ -327,24 +328,50 @@ dreems --feems \
 
 ## Package Layout
 
-- `dreems.datasets`: canonical xarray schema, validation, and surface output.
-- `dreems.genotypes`: sgkit/VCF-Zarr coordinate attachment, QC, and aggregation.
-- `dreems.features`: graph, genotype, observation, normalization, and
-  linearized-resistance conditioner features.
-- `dreems.inference`: stable checkpoint loading and prediction API for users.
-- `dreems.model`: production GNN forward pass.
-- `dreems.losses`: supervised Gaussian NLL, slope, correlation, and orientation
-  losses.
-- `dreems.pipeline`: artifact-oriented CLI used by the Snakemake workflow.
-- `dreems.train`: single-device JAX training loop and checkpoint writer.
-- `dreems.checkpoints`: checkpoint loading and prediction API.
-- `dreems.calibration`: post-hoc posterior SD calibration.
-- `dreems.metrics`: centered edge-log surface metrics.
-- `dreems.feems`: FEEMS baseline protocols with leave-one-out CV defaults.
-- `dreems.feems_benchmark`: independent FEEMS fold and final-fit workers.
-- `dreems.h2h`: DREEMS benchmark inference, paired reports, and the combined CLI.
-- `dreems.benchmark_data`: shared simulated-case input and scoring fields.
-- `dreems.validation`: array checks shared by inference and benchmark inputs.
+- Inputs and predictions: `datasets`, `genotypes`, `inference`, and `cli`.
+  Shared array checks live in `validation`.
+- Neural model: `features` constructs inputs, `linearized` supplies the
+  conductance estimate, and `model` defines the Equinox GNN. `refinement`
+  fits the predicted surface to the observed covariance.
+- Training: `train` and `losses` implement single-device JAX training.
+  `checkpoints` handles serialization and prediction from saved weights;
+  `calibration` fits SD corrections.
+- Simulation: `simulation` assembles examples using the graph and surface
+  generators in `geography` and `motifs`. `island_sim` provides the Rust and
+  Python coalescent backends; `simulation_config` validates their settings.
+- Workers: `corpus`, `counterfactual`, and `pipeline` generate raw data,
+  prepare sampling views and features, train, and evaluate. `workflow_io`
+  reads artifacts and writes complete files atomically.
+- Benchmarks: `h2h` runs DREEMS and joins results; `feems_benchmark` runs FEEMS.
+  Their separate Snakemake dependencies allow neural changes to reuse FEEMS
+  fits. `benchmark_data` validates inputs and saved result archives.
+- Reports: `metrics`, `benchmark_gallery`, and `surface_gate_comparison` score
+  and plot matched cases. `scenario_audit` and `notebook_scenarios` reproduce
+  the focused sampling tests. The workflow README describes these protocols.
+
+Array annotations name their dimensions: positions are `(nodes, 2)`, endpoints
+are `(edges, 2)`, and migration estimates are `(edges,)`. `Graph`, `PreparedExample`,
+`DREEMSTrainArrays`, and `DREEMSTrainBatch` document the dictionaries passed
+between simulation, preparation, and training. Jaxtyping checks function
+arguments and results; explicit validators also check indices, finite values,
+and dictionary contents. Generic archive readers retain arbitrary shapes until
+the caller validates the fields.
+
+### FEEMS Adapter
+
+`dreems.feems` calls the official package with a complete diploid dosage matrix
+(samples by SNPs), sample-node indices, `graph={"edges": edges}`, and node
+coordinates. Results follow the input edge order. Handle missing calls and
+apply MAF and LD filters before fitting. The adapter removes monomorphic SNPs
+and applies FEEMS' heterozygosity scaling.
+
+`fit_feems` takes a `FEEMSConfig` that selects the variance model, penalty grid,
+and validation procedure. Variance can be fixed (`fixed_q`), one fitted scalar
+(`scalar_q`), or a fitted value per node (`free_q`).
+`fit_feems_recommended_loo` selects the publication protocol, including the
+stricter tolerance in the final refit. Worker count controls fold parallelism.
+See [the workflow procedure](workflow/README.md#feems-head-to-head) for the
+grids, tolerances, and pinned FEEMS revision.
 
 ## Manuscript And Results
 

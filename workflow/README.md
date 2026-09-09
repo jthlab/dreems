@@ -44,9 +44,8 @@ The model lineage is:
 `promote_surface_gate.py` verifies exact equality of every pre-gate Equinox
 parameter between stages 2 and 3, checks the complete 51-point core and
 41-point gate histories, confirms that the broad and hard-case reports used
-the selected checkpoint, and verifies that calibration changes metadata but
-not parameter bytes. `tests/test_production_workflow.py` pins the final hashes
-and contract.
+the selected checkpoint, and verifies that calibration preserves the parameter
+bytes. `tests/test_production_workflow.py` pins the final hashes and contract.
 
 ## Statistical Recipe
 
@@ -59,7 +58,7 @@ packs with explicit seeds remain reproducible.
 The base production corpus uses:
 
 - the sparse Rust island coalescent simulator;
-- direct sample-covariance output rather than retained genotype matrices;
+- sample covariance accumulated directly during simulation;
 - symmetric migration and diploid samples;
 - markers filtered to derived-allele frequency 0.05-0.95, or MAF at least 0.05;
 - 50-10,000 retained SNPs per example, balanced across four log-scale bins;
@@ -187,16 +186,16 @@ agree across examples and packs. Counts in metadata are checked before integer
 conversion, so a fractional count cannot silently change a training limit.
 
 Normalization sums each feature and its square in float64 over training data
-only. Node and edge statistics are weighted by their row counts, not equally
-by graph. The stored target moments use uncentered log rates; normalization
+only. Node and edge statistics are weighted by their row counts. The stored
+target moments use uncentered log rates; normalization
 then centers each graph's targets and divides by the saved target scale.
 Feature SDs use the configured floor; target SDs retain the existing `1e-6`
 offset. Validation and inference reuse these training statistics.
 
 Streaming batches shuffle packs and examples with a fixed seed. Paired sampling
 views stay together with their anchor; group sizes must agree and divide the
-batch size. Leftover examples carry into the next pack or epoch. Empty input
-sets fail rather than looping indefinitely. Progress is written as flushed JSON
+batch size. Leftover examples carry into the next pack or epoch. An empty input
+set raises an error. Progress is written as flushed JSON
 records, while Snakemake owns scheduling, retries, and reuse of completed files.
 
 The evaluation worker can read multiple packs. Its `replicate` IDs follow input
@@ -447,7 +446,7 @@ rejects a pair with different recorded hashes. These are byte-level checks, so
 benchmark input files should be kept unchanged. The restore rule additionally
 checks graph coordinates, edge order, generating truth, sample counts, SNP
 count, and the declared LOO protocol. Loading and checking the raw inputs runs
-as a CPU job, not in the Snakemake controller.
+in a separate CPU job.
 
 The historical release archives predate input hashes. Their configs explicitly
 set `allow_legacy_feems_archive: true`. Those runs still perform the structural
@@ -502,7 +501,7 @@ DREEMS_RUN_ROOT=/path/to/work bash workflow/run_maturin.sh \
 ```
 
 The release workflow keeps its `.snakemake` state and default worker logs under
-`outdir`, not in the source checkout. Relative storage paths are resolved before
+`outdir`. Relative storage paths are resolved before
 changing the working directory. Snakemake opens its controller log before reading
 that setting, so a small `.snakemake/log` directory can remain in the checkout.
 To put that log on scratch too, pass `--directory "$DREEMS_RUN_ROOT"` and use
@@ -525,7 +524,7 @@ The gate's validation limit includes every selected validation pack. A partial
 last raw pack can make the actual count smaller than that limit; the training
 summary records the loaded count. This does not discard validation examples.
 The ordinary `eval/summary.json` includes early-stopping validation examples and
-is a training diagnostic, not an independent benchmark. Use `h2h.Snakefile` for
+is a training diagnostic. Use `h2h.Snakefile` for
 independent model comparisons. SD calibration and verified package promotion
 can run separately or through the optional `validated_release` target below.
 
@@ -564,7 +563,7 @@ The commands below reuse existing raw packs. On another machine, set
 `source_corpus` in the sampling config to the corpus root and `raw_source_dir`
 in the full-retrain config to its `raw` subdirectory. Update the output and
 supplemental-pack paths too.
-The checked-in absolute paths record the release run, not portable defaults.
+The checked-in absolute paths record the release run; replace them when running elsewhere.
 
 For the historical two-command procedure, first build sampling views and replay
 packs. This target needs no checkpoint:
@@ -610,11 +609,11 @@ evaluation, publishing, and frozen-core gate training on a tiny CPU corpus. It
 also checks that an unchanged rerun does nothing and that changing the learning
 rate leaves raw data, training feature packs, and normalization up to date.
 Temporary per-example evaluation features are rebuilt when needed. The test
-checks workflow behavior, not predictive performance. It also starts the release
+checks workflow behavior on a deliberately tiny corpus. It also starts the release
 entry point from an empty directory and checks that it creates sampling views,
 trains both stages, evaluates the selected gate, calibrates its SD, and writes a
 candidate in one invocation. The test's cached FEEMS results are synthetic test
-fixtures. They check reuse and provenance, not statistical performance.
+fixtures. They test reuse and provenance.
 
 ### Evaluate A Release Candidate
 
@@ -667,12 +666,13 @@ target requires matching hashes during calibration, so predictions from an
 older model cannot silently calibrate a new one.
 
 The broad predictions are partitioned into disjoint SD fit, selection, and
-verification subsets. Only the last subset estimates held-out coverage. The
-H2H reports describe the selected gate before this SD recalibration: its plain
-DREEMS means are unchanged, but MAP refinement can change when its prior SD
-changes. Evaluate the final candidate with `h2h.Snakefile` before reporting its
-MAP performance. Promotion checks lineage and consistency, not a minimum
-accuracy or improvement over FEEMS.
+verification subsets. Only the last subset estimates held-out coverage.
+The H2H reports describe the selected gate before SD recalibration.
+The current inference code uses raw model SDs for the MAP prior, so attaching
+calibration metadata leaves both neural means and MAP estimates unchanged.
+Evaluate the final candidate with `h2h.Snakefile` before reporting its performance.
+Promotion verifies lineage and consistency; judging accuracy and improvement
+over FEEMS still requires reviewing those results.
 
 ### Surface Gate And Release
 
@@ -699,4 +699,4 @@ same promotion from a relocated artifact archive.
 Legacy prediction archives without checkpoint hashes remain supported by this
 standalone workflow for historical reproduction. Their checkpoint identity
 cannot be verified. Set `require_checkpoint_hash: true` for new runs; that
-requires regenerating only the neural predictions, not the saved FEEMS fits.
+requires new neural predictions while reusing saved FEEMS fits.
