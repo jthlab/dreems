@@ -1,9 +1,4 @@
 """Publication-facing DREEMS APIs."""
-# ruff: noqa: E402
-
-from jaxtyping import install_import_hook
-
-_jaxtyping_hook = install_import_hook(["dreems.model", "dreems.losses"], "beartype.beartype")
 
 from dreems.calibration import SDCalibration
 from dreems.datasets import (

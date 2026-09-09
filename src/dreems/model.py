@@ -2,13 +2,14 @@
 # ruff: noqa: F722, F821
 
 from operator import itemgetter
-from typing import Any, TypeAlias, TypedDict
+from typing import Any, NotRequired, TypeAlias, TypedDict
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jaxtyping import Array, Float, Int, PRNGKeyArray
+from beartype import beartype
+from jaxtyping import Array, Float, Int, PRNGKeyArray, jaxtyped
 
 NodeX: TypeAlias = Float[Array, "nodes node_dim"]
 EdgeX: TypeAlias = Float[Array, "edges edge_dim"]
@@ -42,19 +43,27 @@ OneOutputWithDiagnostics: TypeAlias = tuple[
 
 
 class DREEMSBatch(TypedDict):
+    """Padded graphs on the JAX device; masks exclude padding from inference."""
+
     node_x: Float[Array, "batch nodes node_dim"]
     edge_x: Float[Array, "batch edges edge_dim"]
     edges: Int[Array, "batch edges 2"]
     node_mask: Float[Array, "batch nodes"]
     edge_mask: Float[Array, "batch edges"]
+    edge_initializer: NotRequired[Float[Array, "batch edges"]]
+    edge_initializer_valid: NotRequired[Float[Array, "batch edges"]]
 
 
 class DREEMSArrays(TypedDict):
+    """Host arrays with the same layout as :class:`DREEMSBatch`."""
+
     node_x: Float[np.ndarray, "batch nodes node_dim"]
     edge_x: Float[np.ndarray, "batch edges edge_dim"]
     edges: Int[np.ndarray, "batch edges 2"]
     node_mask: Float[np.ndarray, "batch nodes"]
     edge_mask: Float[np.ndarray, "batch edges"]
+    edge_initializer: NotRequired[Float[np.ndarray, "batch edges"]]
+    edge_initializer_valid: NotRequired[Float[np.ndarray, "batch edges"]]
 
 
 BatchOutput: TypeAlias = tuple[
@@ -98,7 +107,10 @@ PredictionOutputWithDiagnostics: TypeAlias = tuple[
 DREEMS_BATCH_FIELDS = itemgetter("node_x", "edge_x", "edges", "node_mask", "edge_mask")
 
 
+@jaxtyped(typechecker=beartype)
 def tree_to_jax(tree: Any) -> Any:
+    """Move NumPy leaves to JAX without changing the model's PyTree structure."""
+
     return jax.tree.map(
         lambda value: jnp.asarray(value) if isinstance(value, np.ndarray) else value,
         tree,
@@ -108,10 +120,14 @@ def tree_to_jax(tree: Any) -> Any:
 class DREEMS(eqx.Module):
     """Fixed diffusion-band architecture used by the released checkpoint.
 
-    The network has a local edge-aware residual GNN, a second three-layer
-    graph-context branch on the same graph, global edge-to-node attention, and
-    edge and node Gaussian heads. Width and depth remain constructor arguments
-    so small tests can use the same architecture at reduced size.
+    A local GNN uses edge features in each message. A second branch supplies
+    context on the same graph; it does not coarsen the graph. Each edge then
+    attends to all nodes before predicting a mean and log variance. The input
+    features already contain the diffusion bands, computed in ``features.py``.
+
+    Optional gates blend the neural estimate with the linear initializer and
+    shrink the whole surface toward zero. All means are in normalized log-rate
+    units here; ``predict`` restores the training scale.
     """
 
     # Field order preserves the Equinox leaf order of the released checkpoint.
@@ -141,6 +157,7 @@ class DREEMS(eqx.Module):
     surface_gate_hidden: eqx.nn.Linear | None
     surface_gate_out: eqx.nn.Linear | None
 
+    @jaxtyped(typechecker=beartype)
     def __init__(
         self,
         key: PRNGKeyArray,
@@ -256,6 +273,7 @@ class DREEMS(eqx.Module):
             self.surface_gate_out = None
 
     @staticmethod
+    @jaxtyped(typechecker=beartype)
     def _propagate(
         z: Float[Array, "nodes hidden"],
         edge_x: EdgeX,
@@ -267,10 +285,13 @@ class DREEMS(eqx.Module):
         edge_message_layers: tuple[eqx.nn.Linear, ...] | None = None,
         edge_gate_layers: tuple[eqx.nn.Linear, ...] | None = None,
     ) -> Float[Array, "nodes hidden"]:
+        """Send messages in both directions, then add a masked residual update."""
+
         sender = jnp.concatenate([edges[:, 0], edges[:, 1]])
         receiver = jnp.concatenate([edges[:, 1], edges[:, 0]])
         directed_mask = jnp.concatenate([edge_mask, edge_mask])
         directed_edge_x = jnp.concatenate([edge_x, edge_x], axis=0)
+        degree = jax.ops.segment_sum(directed_mask, receiver, num_segments=z.shape[0])
         for index, (self_layer, neigh_layer) in enumerate(
             zip(self_layers, neigh_layers, strict=True)
         ):
@@ -281,7 +302,6 @@ class DREEMS(eqx.Module):
                 messages = messages * edge_gate + edge_message
             messages *= directed_mask[:, None]
             summed = jax.ops.segment_sum(messages, receiver, num_segments=z.shape[0])
-            degree = jax.ops.segment_sum(directed_mask, receiver, num_segments=z.shape[0])
             neighbor_mean = summed / jnp.maximum(degree[:, None], 1.0)
             update = (
                 jax.nn.gelu(jax.vmap(self_layer)(z) + jax.vmap(neigh_layer)(neighbor_mean))
@@ -290,6 +310,7 @@ class DREEMS(eqx.Module):
             z = (z + update) * node_mask[:, None]
         return z
 
+    @jaxtyped(typechecker=beartype)
     def apply_one(
         self,
         node_x: NodeX,
@@ -300,6 +321,8 @@ class DREEMS(eqx.Module):
         edge_initializer: EdgeMask | None = None,
         edge_initializer_valid: EdgeMask | None = None,
     ) -> OneOutput:
+        """Return edge mean/log variance, context mean, and node q mean/log variance."""
+
         output = self.apply_one_with_diagnostics(
             node_x,
             edge_x,
@@ -311,6 +334,7 @@ class DREEMS(eqx.Module):
         )
         return output[:5]
 
+    @jaxtyped(typechecker=beartype)
     def apply_one_with_gate(
         self,
         node_x: NodeX,
@@ -321,6 +345,8 @@ class DREEMS(eqx.Module):
         edge_initializer: EdgeMask | None = None,
         edge_initializer_valid: EdgeMask | None = None,
     ) -> OneOutputWithGate:
+        """Also return the neural fraction of each edge's initializer blend."""
+
         return self.apply_one_with_diagnostics(
             node_x,
             edge_x,
@@ -331,6 +357,7 @@ class DREEMS(eqx.Module):
             edge_initializer_valid,
         )[:6]
 
+    @jaxtyped(typechecker=beartype)
     def apply_one_with_diagnostics(
         self,
         node_x: NodeX,
@@ -475,28 +502,27 @@ class DREEMS(eqx.Module):
         )
 
 
+@jaxtyped(typechecker=beartype)
 def apply_batch(model: DREEMS, batch: DREEMSBatch) -> BatchOutput:
+    """Evaluate independent padded graphs with shared model parameters."""
+
     return apply_batch_with_gate(model, batch)[:5]
 
 
+@jaxtyped(typechecker=beartype)
 def apply_batch_with_gate(model: DREEMS, batch: DREEMSBatch) -> BatchOutputWithGate:
-    edge_mask = batch["edge_mask"]
-    edge_initializer = batch.get("edge_initializer", jnp.zeros_like(edge_mask))
-    edge_initializer_valid = batch.get(
-        "edge_initializer_valid",
-        jnp.zeros_like(edge_mask),
-    )
-    return jax.vmap(model.apply_one_with_gate)(
-        *DREEMS_BATCH_FIELDS(batch),
-        edge_initializer,
-        edge_initializer_valid,
-    )
+    """Return batched predictions and the per-edge neural blend weights."""
+
+    return apply_batch_with_diagnostics(model, batch)[:6]
 
 
+@jaxtyped(typechecker=beartype)
 def apply_batch_with_diagnostics(
     model: DREEMS,
     batch: DREEMSBatch,
 ) -> BatchOutputWithDiagnostics:
+    """Include both gates; a missing initializer uses the neural estimate alone."""
+
     edge_mask = batch["edge_mask"]
     edge_initializer = batch.get("edge_initializer", jnp.zeros_like(edge_mask))
     edge_initializer_valid = batch.get(
@@ -510,6 +536,7 @@ def apply_batch_with_diagnostics(
     )
 
 
+@jaxtyped(typechecker=beartype)
 def add_initializer_gate(
     source: DREEMS,
     *,
@@ -536,43 +563,16 @@ def add_initializer_gate(
         initializer_gate_initial_logit=initial_logit,
         surface_gate=source.surface_gate_hidden is not None,
     )
-    core_fields = (
-        "input",
-        "self_layers",
-        "neigh_layers",
-        "context_self_layers",
-        "context_neigh_layers",
-        "fusion",
-        "context_edge_hidden",
-        "context_edge_out",
-        "global_query",
-        "global_key",
-        "global_value",
-        "edge_hidden",
-        "edge_out",
-        "edge_logvar_out",
-        "node_q_hidden",
-        "node_q_out",
-        "node_q_logvar_out",
-        "edge_feature_hidden",
-        "edge_feature_gate",
-        "edge_message_layers",
-        "edge_gate_layers",
+    # Replace only the absent gate. Every trained leaf stays on the source model.
+    return eqx.tree_at(
+        lambda candidate: (candidate.initializer_gate_hidden, candidate.initializer_gate_out),
+        source,
+        (target.initializer_gate_hidden, target.initializer_gate_out),
+        is_leaf=lambda value: value is None,
     )
-    result = eqx.tree_at(
-        lambda candidate: tuple(getattr(candidate, name) for name in core_fields),
-        target,
-        tuple(getattr(source, name) for name in core_fields),
-    )
-    if source.surface_gate_hidden is not None and source.surface_gate_out is not None:
-        result = eqx.tree_at(
-            lambda candidate: (candidate.surface_gate_hidden, candidate.surface_gate_out),
-            result,
-            (source.surface_gate_hidden, source.surface_gate_out),
-        )
-    return result
 
 
+@jaxtyped(typechecker=beartype)
 def add_surface_gate(
     source: DREEMS,
     *,
@@ -599,47 +599,18 @@ def add_surface_gate(
         surface_gate=True,
         surface_gate_initial_logit=initial_logit,
     )
-    existing_fields = (
-        "input",
-        "self_layers",
-        "neigh_layers",
-        "context_self_layers",
-        "context_neigh_layers",
-        "fusion",
-        "context_edge_hidden",
-        "context_edge_out",
-        "global_query",
-        "global_key",
-        "global_value",
-        "edge_hidden",
-        "edge_out",
-        "edge_logvar_out",
-        "node_q_hidden",
-        "node_q_out",
-        "node_q_logvar_out",
-        "edge_feature_hidden",
-        "edge_feature_gate",
-        "edge_message_layers",
-        "edge_gate_layers",
+    return eqx.tree_at(
+        lambda candidate: (candidate.surface_gate_hidden, candidate.surface_gate_out),
+        source,
+        (target.surface_gate_hidden, target.surface_gate_out),
+        is_leaf=lambda value: value is None,
     )
-    result = eqx.tree_at(
-        lambda candidate: tuple(getattr(candidate, name) for name in existing_fields),
-        target,
-        tuple(getattr(source, name) for name in existing_fields),
-    )
-    if source.initializer_gate_hidden is not None and source.initializer_gate_out is not None:
-        result = eqx.tree_at(
-            lambda candidate: (
-                candidate.initializer_gate_hidden,
-                candidate.initializer_gate_out,
-            ),
-            result,
-            (source.initializer_gate_hidden, source.initializer_gate_out),
-        )
-    return result
 
 
+@jaxtyped(typechecker=beartype)
 def model_logvar_bounds(metadata: dict[str, Any]) -> tuple[float | None, float | None]:
+    """Read optional bounds in normalized log-variance units from the checkpoint."""
+
     posterior = metadata.get("posterior", {})
     if not isinstance(posterior, dict) or posterior.get("kind") != "factorized_normal":
         return None, None
@@ -650,6 +621,7 @@ def model_logvar_bounds(metadata: dict[str, Any]) -> tuple[float | None, float |
     return float(minimum), float(maximum)
 
 
+@jaxtyped(typechecker=beartype)
 def validate_production_model_metadata(metadata: dict[str, Any]) -> None:
     """Reject checkpoints that do not describe the released architecture."""
 
@@ -680,6 +652,7 @@ def validate_production_model_metadata(metadata: dict[str, Any]) -> None:
         raise ValueError("checkpoint does not use the released all-pair conditioner")
 
 
+@jaxtyped(typechecker=beartype)
 def predict(
     params: DREEMS,
     arrays: DREEMSArrays,
@@ -688,6 +661,8 @@ def predict(
     q_y_scale: float,
     model: dict[str, Any],
 ) -> PredictionOutput:
+    """Return NumPy means and log variances in the original log-rate units."""
+
     pred, edge_logvar, q_pred, q_logvar, _surface_weight = predict_with_diagnostics(
         params,
         arrays,
@@ -698,6 +673,7 @@ def predict(
     return pred, edge_logvar, q_pred, q_logvar
 
 
+@jaxtyped(typechecker=beartype)
 def predict_with_diagnostics(
     params: DREEMS,
     arrays: DREEMSArrays,
@@ -715,12 +691,14 @@ def predict_with_diagnostics(
             batch,
         )
     )
-    edge_logvar = np.asarray(edge_logvar)
-    q_logvar = np.asarray(q_logvar)
+    # Own the buffers: NumPy views of JAX arrays may be read-only. In-place
+    # scaling below also preserves the model's floating-point dtype.
+    edge_logvar = np.array(edge_logvar, copy=True)
+    q_logvar = np.array(q_logvar, copy=True)
     minimum, maximum = model_logvar_bounds(model)
     if minimum is not None and maximum is not None:
-        edge_logvar = np.clip(edge_logvar, minimum, maximum)
-        q_logvar = np.clip(q_logvar, minimum, maximum)
+        np.clip(edge_logvar, minimum, maximum, out=edge_logvar)
+        np.clip(q_logvar, minimum, maximum, out=q_logvar)
     edge_logvar += 2.0 * np.log(np.maximum(y_scale, 1e-12))
     q_logvar += 2.0 * np.log(np.maximum(q_y_scale, 1e-12))
     return (

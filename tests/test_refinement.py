@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
+from jaxtyping import TypeCheckError
 
+from dreems import features, refinement
 from dreems.refinement import (
     DREEMSMapRefinementConfig,
     center_matrix,
@@ -371,3 +374,147 @@ def test_default_refinement_config_uses_trust_region_half() -> None:
     assert config.steps == 50
     assert config.trust_region_radius == 0.5
     assert config.smoothness_weight == 1.0e-4
+
+
+@pytest.mark.parametrize("radius", [0.0, 0.5, 2.0])
+def test_trust_region_recenter_does_not_break_edge_bound(radius: float) -> None:
+    initial = np.asarray([0.3, -0.1, -0.2])
+    prior_sd = np.asarray([0.25, 1.0, 3.0])
+    projected = project_edge_log_trust_region(
+        initial + np.asarray([-2.0, 1.0, 1.0]),
+        initial_logs=initial,
+        prior_sd=prior_sd,
+        sd_floor=0.25,
+        radius=radius,
+        max_edge_radius=0.75,
+    )
+    diagnostics = trust_region_diagnostics(
+        projected, initial_logs=initial, prior_sd=prior_sd, sd_floor=0.25
+    )
+    assert abs(projected.mean()) < 1e-14
+    assert diagnostics["trust_region_max_abs"] <= 0.75 + 1e-12
+    if radius > 0:
+        assert diagnostics["trust_region_rms"] <= radius + 1e-12
+
+
+@pytest.mark.parametrize(
+    "field", ["learning_rate", "smoothness_weight", "sd_floor", "trust_region_radius"]
+)
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -1.0])
+def test_refinement_rejects_invalid_numeric_config(field: str, value: float) -> None:
+    with pytest.raises(ValueError, match=field):
+        DREEMSMapRefinementConfig(**{field: value})
+
+
+@pytest.mark.parametrize("field", ["edge_batch_size", "log_every", "sd_floor"])
+def test_refinement_rejects_zero_divisors(field: str) -> None:
+    with pytest.raises(ValueError, match=field):
+        DREEMSMapRefinementConfig(**{field: 0})
+
+
+@pytest.fixture
+def refinement_inputs() -> dict:
+    return {
+        "node_coordinates": np.asarray([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]]),
+        "edges": np.asarray([[0, 1], [1, 2]], dtype=np.int32),
+        "initial_edge_logs": np.zeros(2),
+        "node_covariance": np.eye(3),
+        "observed_nodes": np.arange(3, dtype=np.int32),
+        "observed_sample_count": np.ones(3),
+        "config": DREEMSMapRefinementConfig(steps=3),
+    }
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("initial_edge_logs", np.asarray([0.0, np.nan])),
+        ("initial_edge_sd", np.asarray([1.0, np.nan])),
+        ("initial_edge_sd", np.asarray([1.0, -1.0])),
+        ("initial_node_log_q", np.asarray([0.0, 1.0, np.inf])),
+        ("observed_sample_count", np.asarray([1.0, 1.0, np.nan])),
+    ],
+)
+def test_refinement_rejects_invalid_observations(
+    refinement_inputs: dict, field: str, value: np.ndarray
+) -> None:
+    refinement_inputs[field] = value
+    with pytest.raises(ValueError, match=field):
+        refine_edge_log_conductance(**refinement_inputs)
+
+
+@pytest.mark.parametrize("field", ["edges", "observed_nodes"])
+def test_refinement_does_not_truncate_fractional_indices(
+    refinement_inputs: dict, field: str
+) -> None:
+    refinement_inputs[field] = refinement_inputs[field].astype(float) + 0.2
+    with pytest.raises(TypeCheckError):
+        refine_edge_log_conductance(**refinement_inputs)
+
+
+def test_refinement_rejects_disconnected_graph(refinement_inputs: dict) -> None:
+    refinement_inputs["edges"] = refinement_inputs["edges"][:1]
+    refinement_inputs["initial_edge_logs"] = np.zeros(1)
+    with pytest.raises(ValueError, match="connected graph"):
+        refine_edge_log_conductance(**refinement_inputs)
+
+
+def test_refinement_rejects_nonfinite_sparse_solution(
+    refinement_inputs: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def invalid_solve(matrix, rhs):
+        return np.full(rhs.shape, np.nan)
+
+    monkeypatch.setattr(features.spla, "spsolve", invalid_solve)
+    with pytest.raises(ValueError, match="non-finite potentials"):
+        refine_edge_log_conductance(**refinement_inputs)
+
+
+def test_refinement_rejects_nonfinite_gradient_before_projection(
+    refinement_inputs: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def invalid_objective(**kwargs):
+        return 1.0, np.full(2, np.nan), {}
+
+    monkeypatch.setattr(refinement, "covariance_objective_and_gradient", invalid_objective)
+    with pytest.raises(FloatingPointError, match="step 1"):
+        refine_edge_log_conductance(**refinement_inputs)
+
+
+@pytest.mark.parametrize(
+    "observed_nodes", [np.asarray([0]), np.asarray([2]), np.asarray([2, 0, 1])]
+)
+def test_grounded_potentials_match_dense_reference(observed_nodes: np.ndarray) -> None:
+    edges = np.asarray([[0, 1], [1, 2]], dtype=np.int32)
+    logs = np.asarray([0.3, -0.3])
+    laplacian = features.sparse_laplacian(3, edges, logs)
+    inverse = np.zeros((3, 3))
+    inverse[:2, :2] = np.linalg.inv(laplacian.toarray()[:2, :2])
+    actual = refinement.source_potentials(
+        num_nodes=3, edges=edges, edge_logs=logs, source_nodes=observed_nodes
+    )
+    np.testing.assert_allclose(actual, inverse[:, observed_nodes], atol=1e-14)
+
+
+def test_gradient_with_unequal_prior_sd_and_smoothness(refinement_inputs: dict) -> None:
+    edges = refinement_inputs["edges"]
+    kwargs = dict(
+        initial_logs=np.asarray([0.1, -0.1]),
+        prior_sd=np.asarray([0.3, 1.4]),
+        num_nodes=3,
+        edges=edges,
+        observed_nodes=refinement_inputs["observed_nodes"],
+        empirical_centered_covariance=center_matrix(np.eye(3)),
+        line_laplacian=line_graph_laplacian(3, edges),
+        prior_weight=0.7,
+        smoothness_weight=0.2,
+        sd_floor=0.25,
+        edge_batch_size=1,
+    )
+    logs = np.asarray([0.2, -0.2])
+    direction = np.asarray([0.4, -0.8])
+    _, gradient, _ = covariance_objective_and_gradient(edge_logs=logs, **kwargs)
+    delta = 1e-5
+    left = covariance_objective_and_gradient(edge_logs=logs - delta * direction, **kwargs)[0]
+    right = covariance_objective_and_gradient(edge_logs=logs + delta * direction, **kwargs)[0]
+    np.testing.assert_allclose((right - left) / (2 * delta), gradient @ direction, atol=1e-8)

@@ -1,5 +1,7 @@
 """Build reproducible visual reports for DREEMS benchmark outputs."""
 
+# ruff: noqa: F722,F821,UP037
+
 from __future__ import annotations
 
 import argparse
@@ -7,28 +9,41 @@ import csv
 import html
 import itertools
 import json
-import pickle
+import os
 import shutil
 from collections.abc import Iterable, Mapping, Sequence
-from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+from beartype import beartype
+from jaxtyping import Int, Real, jaxtyped
 from scipy import stats
 
-from .workflow_io import json_ready, write_json
+from .validation import _integer_array, _real_array, validate_graph_arrays
+from .workflow_io import (
+    _atomic_output,
+    json_ready,
+    parse_nonnegative_integer,
+    read_pickle,
+    write_csv,
+    write_json,
+)
 
 SNP_BINS = ((50, 128), (129, 512), (513, 2000), (2001, 10000))
 SELECTION_SEED = 20260827
 
 
+@beartype
 def read_csv_rows(path: Path) -> list[dict[str, str]]:
+    """Read ordered text columns; metric and ID fields are parsed separately."""
     with path.open(newline="") as handle:
         return list(csv.DictReader(handle))
 
 
+@beartype
 def numeric(row: Mapping[str, Any], key: str) -> float:
+    """Treat absent or unavailable metric cells as undefined, not zero."""
     value = row.get(key)
     try:
         return float(value)
@@ -36,24 +51,48 @@ def numeric(row: Mapping[str, Any], key: str) -> float:
         return float("nan")
 
 
+@beartype
 def integer(row: Mapping[str, Any], key: str) -> int:
-    return int(round(numeric(row, key)))
+    """Require an exact nonnegative ID or count, including in CSV text."""
+    return parse_nonnegative_integer(row[key], name=key)
 
 
+@beartype
+def _rows_by_id(rows: Sequence[Mapping[str, Any]], key: str) -> dict[int, dict[str, Any]]:
+    """Index rows without silently replacing duplicates."""
+    indexed = {}
+    for row in rows:
+        index = integer(row, key)
+        if index in indexed:
+            raise ValueError(f"duplicate {key} {index}")
+        indexed[index] = dict(row)
+    return indexed
+
+
+@beartype
 def finite_mean(values: Iterable[float]) -> float:
+    """Average available metrics and return NaN for an empty group."""
     array = np.asarray(list(values), dtype=np.float64)
     array = array[np.isfinite(array)]
     return float(array.mean()) if array.size else float("nan")
 
 
+@beartype
 def snp_bin_label(num_snps: int) -> str:
+    """Label one of the four fixed SNP-count evaluation strata."""
     for low, high in SNP_BINS:
         if low <= num_snps <= high:
             return f"{low:,}-{high:,}"
     raise ValueError(f"SNP count {num_snps} is outside the configured bins")
 
 
+@beartype
 def paired_stats(rows: Sequence[Mapping[str, Any]], *, label: str) -> dict[str, Any]:
+    """Give each case equal weight, pairing MSE and correlation independently.
+
+    Intervals are t intervals over row differences. They assume independent
+    cases; several sampling views of one simulation are not independent trials.
+    """
     old_corr = np.asarray([numeric(row, "old_edge_log_corr") for row in rows])
     new_corr = np.asarray([numeric(row, "new_edge_log_corr") for row in rows])
     old_mse = np.asarray([numeric(row, "old_edge_log_mse") for row in rows])
@@ -67,7 +106,9 @@ def paired_stats(rows: Sequence[Mapping[str, Any]], *, label: str) -> dict[str, 
     corr_delta = new_corr - old_corr
     mse_advantage = old_mse - new_mse
 
+    @beartype
     def delta_summary(values: np.ndarray) -> tuple[float, float, float, float]:
+        """Summarize a paired difference using the existing two-sided t test."""
         if not values.size:
             return (float("nan"),) * 4
         mean = float(values.mean())
@@ -91,18 +132,22 @@ def paired_stats(rows: Sequence[Mapping[str, Any]], *, label: str) -> dict[str, 
         "corr_delta_ci95_low": corr_low,
         "corr_delta_ci95_high": corr_high,
         "corr_delta_p": corr_p,
-        "corr_win_fraction": float(np.mean(corr_delta > 0.0)),
+        "corr_win_fraction": float(np.mean(corr_delta > 0.0)) if corr_delta.size else float("nan"),
         "old_mse": finite_mean(old_mse),
         "new_mse": finite_mean(new_mse),
         "mse_advantage": mse_mean,
         "mse_advantage_ci95_low": mse_low,
         "mse_advantage_ci95_high": mse_high,
         "mse_advantage_p": mse_p,
-        "mse_win_fraction": float(np.mean(mse_advantage > 0.0)),
+        "mse_win_fraction": float(np.mean(mse_advantage > 0.0))
+        if mse_advantage.size
+        else float("nan"),
     }
 
 
+@beartype
 def h2h_stats(rows: Sequence[Mapping[str, Any]], *, label: str) -> dict[str, Any]:
+    """Apply the same paired statistics with FEEMS as the reference method."""
     proxy = [
         {
             "old_edge_log_corr": numeric(row, "feems_edge_log_corr"),
@@ -113,62 +158,42 @@ def h2h_stats(rows: Sequence[Mapping[str, Any]], *, label: str) -> dict[str, Any
         for row in rows
     ]
     result = paired_stats(proxy, label=label)
-    return {
-        "label": result["label"],
-        "n": result["n"],
-        "n_corr": result["n_corr"],
-        "n_mse": result["n_mse"],
-        "feems_corr": result["old_corr"],
-        "dreems_corr": result["new_corr"],
-        "corr_delta": result["corr_delta"],
-        "corr_delta_ci95_low": result["corr_delta_ci95_low"],
-        "corr_delta_ci95_high": result["corr_delta_ci95_high"],
-        "corr_delta_p": result["corr_delta_p"],
-        "corr_win_fraction": result["corr_win_fraction"],
-        "feems_mse": result["old_mse"],
-        "dreems_mse": result["new_mse"],
-        "mse_advantage": result["mse_advantage"],
-        "mse_advantage_ci95_low": result["mse_advantage_ci95_low"],
-        "mse_advantage_ci95_high": result["mse_advantage_ci95_high"],
-        "mse_advantage_p": result["mse_advantage_p"],
-        "mse_win_fraction": result["mse_win_fraction"],
+    names = {
+        "old_corr": "feems_corr",
+        "new_corr": "dreems_corr",
+        "old_mse": "feems_mse",
+        "new_mse": "dreems_mse",
     }
+    return {names.get(key, key): value for key, value in result.items()}
 
 
+@beartype
 def write_rows(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames: list[str] = []
-    for row in rows:
-        for key in row:
-            if key not in fieldnames:
-                fieldnames.append(key)
-    with path.open("w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(json_ready(list(rows)))
+    """Replace a CSV atomically, preserving column order and NumPy scalar values."""
+    write_csv(path, json_ready(list(rows)))
 
 
+@beartype
 def load_metadata_rows(paths: Sequence[Path]) -> dict[int, dict[str, Any]]:
-    rows: dict[int, dict[str, Any]] = {}
+    """Collect metadata packs, requiring globally unique example indices."""
+    rows = []
     for path in paths:
         payload = json.loads(path.read_text())
-        for row in payload["rows"]:
-            index = int(row["index"])
-            if index in rows:
-                raise ValueError(f"duplicate metadata index {index}")
-            rows[index] = dict(row)
-    return rows
+        rows.extend(payload["rows"])
+    return _rows_by_id(rows, "index")
 
 
+@beartype
 def merge_checkpoint_rows(
     old_summary: Path,
     new_summary: Path,
     metadata_paths: Sequence[Path],
 ) -> list[dict[str, Any]]:
+    """Match old and new predictions to the same independent raw examples."""
     old_payload = json.loads(old_summary.read_text())
     new_payload = json.loads(new_summary.read_text())
-    old = {int(row["replicate_global"]): row for row in old_payload["rows"]}
-    new = {int(row["replicate_global"]): row for row in new_payload["rows"]}
+    old = _rows_by_id(old_payload["rows"], "replicate_global")
+    new = _rows_by_id(new_payload["rows"], "replicate_global")
     metadata = load_metadata_rows(metadata_paths)
     if old.keys() != new.keys() or old.keys() != metadata.keys():
         raise ValueError("checkpoint rows and test metadata do not contain identical replicates")
@@ -192,7 +217,7 @@ def merge_checkpoint_rows(
         meta = dict(metadata[replicate])
         row: dict[str, Any] = {
             "replicate": replicate,
-            "snp_bin": snp_bin_label(int(meta["num_snps"])),
+            "snp_bin": snp_bin_label(integer(meta, "num_snps")),
             **meta,
         }
         for name in metric_names:
@@ -204,6 +229,7 @@ def merge_checkpoint_rows(
     return rows
 
 
+@beartype
 def deterministic_sample(
     rows: Sequence[Mapping[str, Any]],
     count: int,
@@ -211,14 +237,21 @@ def deterministic_sample(
     *,
     key: str = "replicate",
 ) -> list[int]:
+    """Choose case IDs without replacement, using a fixed gallery seed."""
+    if isinstance(count, bool) or count < 0:
+        raise ValueError("count must be nonnegative")
     ids = np.asarray([integer(row, key) for row in rows], dtype=np.int64)
+    if np.unique(ids).size != ids.size:
+        raise ValueError(f"duplicate {key} in gallery selection")
     if ids.size <= count:
         return ids.tolist()
     rng = np.random.default_rng(seed)
     return sorted(rng.choice(ids, size=count, replace=False).tolist())
 
 
+@beartype
 def checkpoint_selections(rows: Sequence[Mapping[str, Any]]) -> dict[str, list[int]]:
+    """Choose fixed-seed examples and rank gains and losses within each SNP bin."""
     sections: dict[str, list[int]] = {}
     for bin_index, (low, high) in enumerate(SNP_BINS):
         subset = [row for row in rows if low <= integer(row, "num_snps") <= high]
@@ -248,7 +281,9 @@ def checkpoint_selections(rows: Sequence[Mapping[str, Any]]) -> dict[str, list[i
     return sections
 
 
+@beartype
 def command_compare_checkpoints(args: argparse.Namespace) -> None:
+    """Write matched checkpoint rows, paired statistics, and gallery selections."""
     rows = merge_checkpoint_rows(args.old_summary, args.new_summary, args.metadata)
     grouped = [paired_stats(rows, label="all test examples")]
     for low, high in SNP_BINS:
@@ -274,7 +309,9 @@ def command_compare_checkpoints(args: argparse.Namespace) -> None:
     )
 
 
+@beartype
 def _plot_imports() -> tuple[Any, Any, Any, Any, Any]:
+    """Load the noninteractive plotting backend only when rendering is requested."""
     import matplotlib
 
     matplotlib.use("Agg")
@@ -286,12 +323,22 @@ def _plot_imports() -> tuple[Any, Any, Any, Any, Any]:
     return plt, mtri, LineCollection, TwoSlopeNorm, matplotlib
 
 
+@beartype
 def centered(values: np.ndarray) -> np.ndarray:
-    array = np.asarray(values, dtype=np.float64)
+    """Center a finite edge field without changing its relative amplitude."""
+    array = _real_array(values, name="edge values")
+    if array.ndim != 1 or not array.size:
+        raise ValueError("edge values must be a nonempty vector")
     return array - float(np.mean(array))
 
 
-def edge_to_node(values: np.ndarray, edges: np.ndarray, num_nodes: int) -> np.ndarray:
+@jaxtyped(typechecker=beartype)
+def edge_to_node(
+    values: Real[np.ndarray, "edges"], edges: Int[np.ndarray, "edges 2"], num_nodes: int
+) -> np.ndarray:
+    """Average incident edges for display only; inference remains edge-valued."""
+    if num_nodes < 1 or np.any(edges < 0) or np.any(edges >= num_nodes):
+        raise ValueError("edge endpoints must index the supplied nodes")
     totals = np.zeros(num_nodes, dtype=np.float64)
     counts = np.zeros(num_nodes, dtype=np.float64)
     np.add.at(totals, edges[:, 0], values)
@@ -301,16 +348,24 @@ def edge_to_node(values: np.ndarray, edges: np.ndarray, num_nodes: int) -> np.nd
     return np.divide(totals, counts, out=np.zeros_like(totals), where=counts > 0.0)
 
 
+@jaxtyped(typechecker=beartype)
 def plot_surface(
     ax: Any,
-    positions: np.ndarray,
-    edges: np.ndarray,
-    values: np.ndarray,
-    sample_count: np.ndarray,
+    positions: Real[np.ndarray, "nodes 2"],
+    edges: Int[np.ndarray, "edges 2"],
+    values: Real[np.ndarray, "edges"],
+    sample_count: Real[np.ndarray, "nodes"],
     *,
     limit: float,
     title: str,
 ) -> None:
+    """Interpolate for display, falling back to raw edges on degenerate meshes."""
+    validate_graph_arrays(positions=positions, edges=edges)
+    sample_count = _real_array(sample_count, name="sample counts")
+    if np.any(sample_count < 0):
+        raise ValueError("sample counts must be nonnegative")
+    if not np.isfinite(limit) or limit <= 0:
+        raise ValueError("color limit must be finite and positive")
     _plt, mtri, LineCollection, TwoSlopeNorm, _matplotlib = _plot_imports()
     positions = np.asarray(positions, dtype=np.float64)
     edges = np.asarray(edges, dtype=np.int32)
@@ -381,75 +436,152 @@ def plot_surface(
     ax.set_yticks([])
 
 
+@beartype
 def prediction_slice(path: Path, replicate: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    with np.load(path) as archive:
-        replicates = np.asarray(archive["replicate"], dtype=np.int64)
-        matches = np.flatnonzero(replicates == int(replicate))
+    """Read one case from a packed edge archive, validating its ragged offsets."""
+    if isinstance(replicate, bool) or replicate < 0:
+        raise ValueError("replicate must be a nonnegative integer")
+    with np.load(path, allow_pickle=False) as archive:
+        replicates = _integer_array(archive["replicate"], name="replicate", dtype=np.int64)
+        if (
+            replicates.ndim != 1
+            or np.any(replicates < 0)
+            or np.unique(replicates).size != replicates.size
+        ):
+            raise ValueError("replicate IDs must be a unique nonnegative vector")
+        matches = np.flatnonzero(replicates == replicate)
         if matches.size != 1:
             raise ValueError(f"expected one prediction for replicate {replicate} in {path}")
         index = int(matches[0])
-        offsets = np.asarray(archive["edge_offsets"], dtype=np.int64)
-        start, stop = int(offsets[index]), int(offsets[index + 1])
-        return (
-            np.asarray(archive["edge_truth"][start:stop], dtype=np.float64),
-            np.asarray(archive["edge_mean"][start:stop], dtype=np.float64),
-            np.asarray(archive["edge_sd"][start:stop], dtype=np.float64),
+        offsets = _integer_array(archive["edge_offsets"], name="edge_offsets", dtype=np.int64)
+        values = tuple(
+            _real_array(archive[key], name=key) for key in ("edge_truth", "edge_mean", "edge_sd")
         )
+        if (
+            offsets.shape != (replicates.size + 1,)
+            or offsets[0] != 0
+            or np.any(np.diff(offsets) <= 0)
+            or any(value.shape != (offsets[-1],) for value in values)
+        ):
+            raise ValueError("edge_offsets must partition every packed edge vector exactly")
+        if np.any(values[2] < 0):
+            raise ValueError("edge_sd must be nonnegative")
+        start, stop = int(offsets[index]), int(offsets[index + 1])
+        return tuple(value[start:stop] for value in values)
 
 
-@lru_cache(maxsize=8)
+@beartype
 def load_pickle_pack(path: str) -> list[dict[str, Any]]:
-    with Path(path).open("rb") as handle:
-        return pickle.load(handle)
+    """Read a trusted local pack afresh so replacing a file cannot leave stale data."""
+    return read_pickle(Path(path))
 
 
+@beartype
 def raw_example(pattern: str, pack_size: int, replicate: int) -> Mapping[str, Any]:
+    """Locate a global case ID in an ordered raw pack."""
+    if isinstance(pack_size, bool) or pack_size < 1 or isinstance(replicate, bool) or replicate < 0:
+        raise ValueError("pack size must be positive and replicate must be nonnegative")
     pack = replicate // pack_size
     local = replicate % pack_size
     examples = load_pickle_pack(pattern.format(pack=pack))
     return examples[local]
 
 
+@beartype
 def example_geometry(example: Mapping[str, Any]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    positions = np.asarray(example["active_positions"], dtype=np.float64)
-    edges = np.asarray(example["graph"]["edges"], dtype=np.int32)
-    sample_nodes = np.asarray(example["sample_nodes"], dtype=np.int32)
+    """Extract the graph and sample counts without changing edge order."""
+    positions = _real_array(example["active_positions"], name="positions")
+    edges = _integer_array(example["graph"]["edges"], name="edges", dtype=np.int32)
+    sample_nodes = _integer_array(example["sample_nodes"], name="sample_nodes", dtype=np.int32)
+    validate_graph_arrays(positions=positions, edges=edges)
+    if sample_nodes.ndim != 1 or np.any(sample_nodes < 0) or np.any(sample_nodes >= len(positions)):
+        raise ValueError("sample_nodes must index graph nodes")
     sample_count = np.bincount(sample_nodes, minlength=positions.shape[0]).astype(np.float64)
     return positions, edges, sample_count
 
 
+@beartype
 def save_figure(fig: Any, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path, dpi=190, bbox_inches="tight", facecolor="white")
-    fig.savefig(path.with_suffix(".pdf"), bbox_inches="tight", facecolor="white")
+    """Write the display image and vector PDF atomically, one file at a time."""
+    with _atomic_output(path) as stream:
+        fig.savefig(
+            stream, format=path.suffix.lstrip("."), dpi=190, bbox_inches="tight", facecolor="white"
+        )
+    with _atomic_output(path.with_suffix(".pdf")) as stream:
+        fig.savefig(stream, format="pdf", bbox_inches="tight", facecolor="white")
 
 
+@beartype
+def _comparison_scatter(
+    left_corr: np.ndarray,
+    right_corr: np.ndarray,
+    left_mse: np.ndarray,
+    right_mse: np.ndarray,
+    colors: np.ndarray,
+    *,
+    labels: tuple[str, str],
+    color_label: str,
+    output: Path,
+    figsize: tuple[float, float],
+    cmap: str,
+    size: float,
+    alpha: float,
+) -> None:
+    """Draw matched correlation/MSE scatters with the same identity-line rules."""
+    plt, *_ = _plot_imports()
+    fig, axes = plt.subplots(1, 2, figsize=figsize, constrained_layout=True)
+    scatter = axes[0].scatter(left_corr, right_corr, c=colors, s=size, cmap=cmap, alpha=alpha)
+    correlations = np.concatenate((left_corr, right_corr))
+    finite_corr = correlations[np.isfinite(correlations)]
+    low = float(finite_corr.min()) if finite_corr.size else -1.0
+    axes[0].plot([low, 1.0], [low, 1.0], color="#222222", linewidth=1)
+    axes[0].set(xlabel=f"{labels[0]} correlation", ylabel=f"{labels[1]} correlation")
+    axes[0].set_aspect("equal", adjustable="box")
+    axes[1].scatter(left_mse, right_mse, c=colors, s=size, cmap=cmap, alpha=alpha)
+    errors = np.concatenate((left_mse, right_mse))
+    finite_mse = errors[np.isfinite(errors)]
+    if np.any(finite_mse < 0):
+        plt.close(fig)
+        raise ValueError("MSE must be nonnegative")
+    lower, upper = (
+        (float(finite_mse.min()), float(finite_mse.max())) if finite_mse.size else (0.0, 1.0)
+    )
+    if upper == 0.0:
+        upper = 1.0
+    axes[1].plot([lower, upper], [lower, upper], color="#222222", linewidth=1)
+    scale = "log" if lower > 0.0 else "linear"
+    axes[1].set(xscale=scale, yscale=scale)
+    axes[1].set(xlabel=f"{labels[0]} MSE", ylabel=f"{labels[1]} MSE")
+    axes[1].set_aspect("equal", adjustable="box")
+    colorbar = fig.colorbar(scatter, ax=axes, fraction=0.035, pad=0.03)
+    colorbar.set_label(color_label)
+    save_figure(fig, output)
+    plt.close(fig)
+
+
+@beartype
 def checkpoint_aggregate_figures(rows: Sequence[Mapping[str, Any]], output_dir: Path) -> None:
+    """Compare checkpoints overall and by the four SNP-count strata."""
     plt, _mtri, _LineCollection, _TwoSlopeNorm, _matplotlib = _plot_imports()
     old_corr = np.asarray([numeric(row, "old_edge_log_corr") for row in rows])
     new_corr = np.asarray([numeric(row, "new_edge_log_corr") for row in rows])
     old_mse = np.asarray([numeric(row, "old_edge_log_mse") for row in rows])
     new_mse = np.asarray([numeric(row, "new_edge_log_mse") for row in rows])
     snps = np.asarray([numeric(row, "num_snps") for row in rows])
-    fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.4), constrained_layout=True)
-    colors = np.log10(snps)
-    scatter = axes[0].scatter(old_corr, new_corr, c=colors, s=9, cmap="viridis", alpha=0.62)
-    finite_corr = np.concatenate([old_corr[np.isfinite(old_corr)], new_corr[np.isfinite(new_corr)]])
-    low = float(finite_corr.min())
-    axes[0].plot([low, 1.0], [low, 1.0], color="#222222", linewidth=1)
-    axes[0].set(xlabel="Previous checkpoint correlation", ylabel="Broad-SNP correlation")
-    axes[0].set_aspect("equal", adjustable="box")
-    axes[1].scatter(old_mse, new_mse, c=colors, s=9, cmap="viridis", alpha=0.62)
-    positive = np.concatenate([old_mse[old_mse > 0], new_mse[new_mse > 0]])
-    lower, upper = float(positive.min()), float(positive.max())
-    axes[1].plot([lower, upper], [lower, upper], color="#222222", linewidth=1)
-    axes[1].set(xscale="log", yscale="log")
-    axes[1].set(xlabel="Previous checkpoint MSE", ylabel="Broad-SNP MSE")
-    axes[1].set_aspect("equal", adjustable="box")
-    colorbar = fig.colorbar(scatter, ax=axes, fraction=0.035, pad=0.03)
-    colorbar.set_label("log10(SNP count)")
-    save_figure(fig, output_dir / "checkpoint_scatter.png")
-    plt.close(fig)
+    _comparison_scatter(
+        old_corr,
+        new_corr,
+        old_mse,
+        new_mse,
+        np.log10(snps),
+        labels=("Previous checkpoint", "Broad-SNP"),
+        color_label="log10(SNP count)",
+        output=output_dir / "checkpoint_scatter.png",
+        figsize=(10.5, 4.4),
+        cmap="viridis",
+        size=9.0,
+        alpha=0.62,
+    )
 
     grouped = []
     for low_snp, high_snp in SNP_BINS:
@@ -490,7 +622,8 @@ def checkpoint_aggregate_figures(rows: Sequence[Mapping[str, Any]], output_dir: 
     plt.close(fig)
 
 
-def checkpoint_example_figure(
+@beartype
+def _checkpoint_examples(
     rows_by_id: Mapping[int, Mapping[str, Any]],
     replicate_ids: Sequence[int],
     *,
@@ -498,12 +631,16 @@ def checkpoint_example_figure(
     prediction_pattern: str,
     pack_size: int,
     output: Path,
+    router: bool,
 ) -> None:
+    """Draw matched predictions once, optionally repeating the router's selection."""
+    if not replicate_ids:
+        raise ValueError("select at least one example to plot")
     plt, _mtri, _LineCollection, _TwoSlopeNorm, _matplotlib = _plot_imports()
     fig, axes = plt.subplots(
         len(replicate_ids),
-        3,
-        figsize=(12.5, max(3.0 * len(replicate_ids), 3.2)),
+        4 if router else 3,
+        figsize=(16.5 if router else 12.5, max(3.0 * len(replicate_ids), 3.2)),
         squeeze=False,
         constrained_layout=True,
     )
@@ -520,50 +657,80 @@ def checkpoint_example_figure(
         )
         np.testing.assert_allclose(old_truth, new_truth, atol=2e-5)
         truth = centered(old_truth)
+        np.testing.assert_allclose(truth, centered(example["edge_log_rates"]), atol=2e-5)
         limit = max(float(np.quantile(np.abs(truth), 0.98)), 0.15)
         subtitle = (
             f"rep {replicate} | {integer(row, 'num_snps'):,} SNPs | "
             f"{integer(row, 'num_samples'):,} samples | "
             f"{100.0 * numeric(row, 'sampled_node_fraction'):.1f}% nodes"
         )
-        plot_surface(
-            axes[row_index, 0],
-            positions,
-            edges,
-            truth,
-            sample_count,
-            limit=limit,
-            title=f"Truth\n{subtitle}",
+        old_label, new_label = (
+            ("Released\n", "Broad-SNP\n") if router else ("Previous | ", "Broad SNP | ")
         )
-        plot_surface(
-            axes[row_index, 1],
-            positions,
-            edges,
-            old_mean,
-            sample_count,
-            limit=limit,
-            title=(
-                f"Previous | r={numeric(row, 'old_edge_log_corr'):.3f}, "
-                f"MSE={numeric(row, 'old_edge_log_mse'):.3f}"
+        panels = [
+            (truth, f"Truth\n{subtitle}"),
+            (
+                old_mean,
+                f"{old_label}r={numeric(row, 'old_edge_log_corr'):.3f}, MSE={numeric(row, 'old_edge_log_mse'):.3f}",
             ),
-        )
-        plot_surface(
-            axes[row_index, 2],
-            positions,
-            edges,
-            new_mean,
-            sample_count,
-            limit=limit,
-            title=(
-                f"Broad SNP | r={numeric(row, 'new_edge_log_corr'):.3f}, "
-                f"MSE={numeric(row, 'new_edge_log_mse'):.3f}"
+            (
+                new_mean,
+                f"{new_label}r={numeric(row, 'new_edge_log_corr'):.3f}, MSE={numeric(row, 'new_edge_log_mse'):.3f}",
             ),
-        )
+        ]
+        if router:
+            selected = row["router_checkpoint"]
+            if selected not in ("broad", "released"):
+                raise ValueError(f"unknown router checkpoint {selected!r}")
+            selected_label = "Broad-SNP" if selected == "broad" else "Released"
+            panels.append(
+                (
+                    new_mean if selected == "broad" else old_mean,
+                    f"Router: {selected_label}\nr={numeric(row, 'router_edge_log_corr'):.3f}, MSE={numeric(row, 'router_edge_log_mse'):.3f}",
+                )
+            )
+        for column, (values, title) in enumerate(panels):
+            plot_surface(
+                axes[row_index, column],
+                positions,
+                edges,
+                values,
+                sample_count,
+                limit=limit,
+                title=title,
+            )
+        if router:
+            axes[row_index, 3].spines[:].set_color("#2474a6")
+            axes[row_index, 3].spines[:].set_linewidth(1.4)
     save_figure(fig, output)
     plt.close(fig)
 
 
+@beartype
+def checkpoint_example_figure(
+    rows_by_id: Mapping[int, Mapping[str, Any]],
+    replicate_ids: Sequence[int],
+    *,
+    raw_pattern: str,
+    prediction_pattern: str,
+    pack_size: int,
+    output: Path,
+) -> None:
+    """Compare both checkpoints against the same truth and raw graph."""
+    _checkpoint_examples(
+        rows_by_id,
+        replicate_ids,
+        raw_pattern=raw_pattern,
+        prediction_pattern=prediction_pattern,
+        pack_size=pack_size,
+        output=output,
+        router=False,
+    )
+
+
+@beartype
 def html_table(rows: Sequence[Mapping[str, Any]], columns: Sequence[str]) -> str:
+    """Escape report cells and keep wide tables scrollable."""
     head = "".join(f"<th>{html.escape(column)}</th>" for column in columns)
     body = []
     for row in rows:
@@ -577,7 +744,9 @@ def html_table(rows: Sequence[Mapping[str, Any]], columns: Sequence[str]) -> str
     return f"<div class='table-wrap'><table><tr>{head}</tr>{''.join(body)}</table></div>"
 
 
+@beartype
 def gallery_html(title: str, intro: str, body: str) -> str:
+    """Wrap trusted report fragments in the common gallery layout."""
     return f"""<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
 <title>{html.escape(title)}</title>
@@ -597,9 +766,11 @@ code {{ background: #f3f3f3; padding: 1px 4px; }}
 </main></body></html>"""
 
 
+@beartype
 def command_checkpoint_gallery(args: argparse.Namespace) -> None:
+    """Render saved checkpoint comparisons without running either model."""
     rows = read_csv_rows(args.rows)
-    rows_by_id = {integer(row, "replicate"): row for row in rows}
+    rows_by_id = _rows_by_id(rows, "replicate")
     selections = json.loads(args.selections.read_text())
     args.output_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_aggregate_figures(rows, args.output_dir)
@@ -611,10 +782,12 @@ def command_checkpoint_gallery(args: argparse.Namespace) -> None:
     ]
     for section_index, label in enumerate(labels):
         replicate_ids = selections[label]
+        if not replicate_ids:
+            continue
         filename = f"examples_{section_index:02d}.png"
         checkpoint_example_figure(
             rows_by_id,
-            [int(value) for value in replicate_ids],
+            [parse_nonnegative_integer(value, name="replicate") for value in replicate_ids],
             raw_pattern=args.raw_pattern,
             prediction_pattern=args.prediction_pattern,
             pack_size=args.pack_size,
@@ -658,9 +831,8 @@ def command_checkpoint_gallery(args: argparse.Namespace) -> None:
         "centered edge-log relative migration: red is lower, white is the graph mean, and "
         "blue is higher. Each row uses the truth scale for all three panels."
     )
-    (args.output_dir / "index.html").write_text(
-        gallery_html("SNP-count checkpoint comparison", intro, body)
-    )
+    with _atomic_output(args.output_dir / "index.html") as stream:
+        stream.write(gallery_html("SNP-count checkpoint comparison", intro, body).encode("utf-8"))
 
 
 ROUTER_METRICS = (
@@ -676,11 +848,18 @@ ROUTER_METRICS = (
 )
 
 
+@beartype
 def route_checkpoint(row: Mapping[str, Any], threshold: int) -> str:
+    """Choose a checkpoint from the SNP count alone, never from truth or error."""
+    if isinstance(threshold, bool) or threshold < 0:
+        raise ValueError("router threshold must be nonnegative")
     return "broad" if integer(row, "num_snps") <= threshold else "released"
 
 
+@beartype
 def build_router_rows(rows: Sequence[Mapping[str, Any]], threshold: int) -> list[dict[str, Any]]:
+    """Copy the selected checkpoint's metrics and retain the unselected comparison."""
+    _rows_by_id(rows, "replicate")
     routed = []
     for source in rows:
         row = dict(source)
@@ -706,7 +885,9 @@ def build_router_rows(rows: Sequence[Mapping[str, Any]], threshold: int) -> list
     return routed
 
 
+@beartype
 def router_stats(rows: Sequence[Mapping[str, Any]], *, label: str) -> dict[str, Any]:
+    """Summarize the existing router decision without optimizing its threshold."""
     result: dict[str, Any] = {"label": label, "n": len(rows)}
     for model in ("old", "new", "router"):
         corr = np.asarray([numeric(row, f"{model}_edge_log_corr") for row in rows])
@@ -724,12 +905,18 @@ def router_stats(rows: Sequence[Mapping[str, Any]], *, label: str) -> dict[str, 
     )
     mse_advantage = mse_advantage[np.isfinite(mse_advantage)]
     corr_advantage = corr_advantage[np.isfinite(corr_advantage)]
-    result["router_mse_win_fraction_vs_alternative"] = float(np.mean(mse_advantage > 0.0))
-    result["router_corr_win_fraction_vs_alternative"] = float(np.mean(corr_advantage > 0.0))
+    result["router_mse_win_fraction_vs_alternative"] = (
+        float(np.mean(mse_advantage > 0.0)) if mse_advantage.size else float("nan")
+    )
+    result["router_corr_win_fraction_vs_alternative"] = (
+        float(np.mean(corr_advantage > 0.0)) if corr_advantage.size else float("nan")
+    )
     return result
 
 
+@beartype
 def router_selections(rows: Sequence[Mapping[str, Any]]) -> dict[str, list[int]]:
+    """Select representative and extreme router cases using fixed rules."""
     selections: dict[str, list[int]] = {}
     for bin_index, (low, high) in enumerate(SNP_BINS):
         subset = [row for row in rows if low <= integer(row, "num_snps") <= high]
@@ -742,11 +929,19 @@ def router_selections(rows: Sequence[Mapping[str, Any]]) -> dict[str, list[int]]
         selections[f"{low:,}-{high:,} SNPs: random"] = deterministic_sample(
             subset, 4, SELECTION_SEED + 100 + bin_index
         )
-    finite_corr = [row for row in rows if np.isfinite(numeric(row, "router_edge_log_corr"))]
+    finite_corr = [
+        row
+        for row in rows
+        if np.isfinite(numeric(row, "router_edge_log_corr"))
+        and np.isfinite(numeric(row, "router_edge_log_mse"))
+    ]
+    finite_advantage = [
+        row for row in rows if np.isfinite(numeric(row, "router_mse_advantage_over_alternative"))
+    ]
     selections["Router helps most"] = [
         integer(row, "replicate")
         for row in sorted(
-            rows,
+            finite_advantage,
             key=lambda row: numeric(row, "router_mse_advantage_over_alternative"),
             reverse=True,
         )[:4]
@@ -754,7 +949,7 @@ def router_selections(rows: Sequence[Mapping[str, Any]]) -> dict[str, list[int]]
     selections["Router hurts most"] = [
         integer(row, "replicate")
         for row in sorted(
-            rows,
+            finite_advantage,
             key=lambda row: numeric(row, "router_mse_advantage_over_alternative"),
         )[:4]
     ]
@@ -782,7 +977,9 @@ def router_selections(rows: Sequence[Mapping[str, Any]]) -> dict[str, list[int]]
     return selections
 
 
+@beartype
 def command_router_report(args: argparse.Namespace) -> None:
+    """Record routing decisions and their performance on saved predictions."""
     source_rows = read_csv_rows(args.rows)
     rows = build_router_rows(source_rows, args.threshold)
     grouped = [router_stats(rows, label="all test examples")]
@@ -808,7 +1005,9 @@ def command_router_report(args: argparse.Namespace) -> None:
     )
 
 
+@beartype
 def router_aggregate_figures(rows: Sequence[Mapping[str, Any]], output_dir: Path) -> None:
+    """Show SNP-bin performance and compare routing with the unselected checkpoint."""
     plt, _mtri, _LineCollection, _TwoSlopeNorm, _matplotlib = _plot_imports()
     grouped = []
     for low, high in SNP_BINS:
@@ -864,36 +1063,23 @@ def router_aggregate_figures(rows: Sequence[Mapping[str, Any]], output_dir: Path
             for row in rows
         ]
     )
-    fig, axes = plt.subplots(1, 2, figsize=(10.8, 4.4), constrained_layout=True)
-    color = np.log10(snps)
-    scatter = axes[0].scatter(
-        alternative_corr, router_corr, c=color, s=9, cmap="viridis", alpha=0.62
+    _comparison_scatter(
+        alternative_corr,
+        router_corr,
+        alternative_mse,
+        router_mse,
+        np.log10(snps),
+        labels=("Unselected checkpoint", "Router"),
+        color_label="log10(SNP count)",
+        output=output_dir / "router_vs_alternative.png",
+        figsize=(10.8, 4.4),
+        cmap="viridis",
+        size=9.0,
+        alpha=0.62,
     )
-    finite_corr = np.concatenate(
-        [
-            alternative_corr[np.isfinite(alternative_corr)],
-            router_corr[np.isfinite(router_corr)],
-        ]
-    )
-    low = float(finite_corr.min())
-    axes[0].plot([low, 1.0], [low, 1.0], color="#222222", linewidth=1)
-    axes[0].set(xlabel="Unselected checkpoint correlation", ylabel="Router correlation")
-    axes[0].set_aspect("equal", adjustable="box")
-    axes[1].scatter(alternative_mse, router_mse, c=color, s=9, cmap="viridis", alpha=0.62)
-    positive = np.concatenate(
-        [alternative_mse[alternative_mse > 0.0], router_mse[router_mse > 0.0]]
-    )
-    lower, upper = float(positive.min()), float(positive.max())
-    axes[1].plot([lower, upper], [lower, upper], color="#222222", linewidth=1)
-    axes[1].set(xscale="log", yscale="log")
-    axes[1].set(xlabel="Unselected checkpoint MSE", ylabel="Router MSE")
-    axes[1].set_aspect("equal", adjustable="box")
-    colorbar = fig.colorbar(scatter, ax=axes, fraction=0.035, pad=0.03)
-    colorbar.set_label("log10(SNP count)")
-    save_figure(fig, output_dir / "router_vs_alternative.png")
-    plt.close(fig)
 
 
+@beartype
 def router_example_figure(
     rows_by_id: Mapping[int, Mapping[str, Any]],
     replicate_ids: Sequence[int],
@@ -903,90 +1089,23 @@ def router_example_figure(
     pack_size: int,
     output: Path,
 ) -> None:
-    plt, _mtri, _LineCollection, _TwoSlopeNorm, _matplotlib = _plot_imports()
-    fig, axes = plt.subplots(
-        len(replicate_ids),
-        4,
-        figsize=(16.5, max(3.0 * len(replicate_ids), 3.2)),
-        squeeze=False,
-        constrained_layout=True,
+    """Add the selected checkpoint to the shared truth/old/new comparison."""
+    _checkpoint_examples(
+        rows_by_id,
+        replicate_ids,
+        raw_pattern=raw_pattern,
+        prediction_pattern=prediction_pattern,
+        pack_size=pack_size,
+        output=output,
+        router=True,
     )
-    for row_index, replicate in enumerate(replicate_ids):
-        row = rows_by_id[replicate]
-        example = raw_example(raw_pattern, pack_size, replicate)
-        positions, edges, sample_count = example_geometry(example)
-        pack = replicate // pack_size
-        old_truth, old_mean, _old_sd = prediction_slice(
-            Path(prediction_pattern.format(model="old", pack=pack)), replicate
-        )
-        new_truth, new_mean, _new_sd = prediction_slice(
-            Path(prediction_pattern.format(model="new", pack=pack)), replicate
-        )
-        np.testing.assert_allclose(old_truth, new_truth, atol=2e-5)
-        truth = centered(old_truth)
-        selected = str(row["router_checkpoint"])
-        selected_label = "Broad-SNP" if selected == "broad" else "Released"
-        router_mean = new_mean if selected == "broad" else old_mean
-        limit = max(float(np.quantile(np.abs(truth), 0.98)), 0.15)
-        subtitle = (
-            f"rep {replicate} | {integer(row, 'num_snps'):,} SNPs | "
-            f"{integer(row, 'num_samples'):,} samples | "
-            f"{100.0 * numeric(row, 'sampled_node_fraction'):.1f}% nodes"
-        )
-        plot_surface(
-            axes[row_index, 0],
-            positions,
-            edges,
-            truth,
-            sample_count,
-            limit=limit,
-            title=f"Truth\n{subtitle}",
-        )
-        plot_surface(
-            axes[row_index, 1],
-            positions,
-            edges,
-            old_mean,
-            sample_count,
-            limit=limit,
-            title=(
-                f"Released\nr={numeric(row, 'old_edge_log_corr'):.3f}, "
-                f"MSE={numeric(row, 'old_edge_log_mse'):.3f}"
-            ),
-        )
-        plot_surface(
-            axes[row_index, 2],
-            positions,
-            edges,
-            new_mean,
-            sample_count,
-            limit=limit,
-            title=(
-                f"Broad-SNP\nr={numeric(row, 'new_edge_log_corr'):.3f}, "
-                f"MSE={numeric(row, 'new_edge_log_mse'):.3f}"
-            ),
-        )
-        plot_surface(
-            axes[row_index, 3],
-            positions,
-            edges,
-            router_mean,
-            sample_count,
-            limit=limit,
-            title=(
-                f"Router: {selected_label}\nr={numeric(row, 'router_edge_log_corr'):.3f}, "
-                f"MSE={numeric(row, 'router_edge_log_mse'):.3f}"
-            ),
-        )
-        axes[row_index, 3].spines[:].set_color("#2474a6")
-        axes[row_index, 3].spines[:].set_linewidth(1.4)
-    save_figure(fig, output)
-    plt.close(fig)
 
 
+@beartype
 def command_router_gallery(args: argparse.Namespace) -> None:
+    """Render the saved router decisions with both constituent checkpoints."""
     rows = read_csv_rows(args.rows)
-    rows_by_id = {integer(row, "replicate"): row for row in rows}
+    rows_by_id = _rows_by_id(rows, "replicate")
     selections = json.loads(args.selections.read_text())
     args.output_dir.mkdir(parents=True, exist_ok=True)
     router_aggregate_figures(rows, args.output_dir)
@@ -999,10 +1118,12 @@ def command_router_gallery(args: argparse.Namespace) -> None:
         "Worst router recoveries",
     ]
     for section_index, label in enumerate(labels):
+        if not selections[label]:
+            continue
         filename = f"examples_{section_index:02d}.png"
         router_example_figure(
             rows_by_id,
-            [int(value) for value in selections[label]],
+            [parse_nonnegative_integer(value, name="replicate") for value in selections[label]],
             raw_pattern=args.raw_pattern,
             prediction_pattern=args.prediction_pattern,
             pack_size=args.pack_size,
@@ -1043,13 +1164,25 @@ def command_router_gallery(args: argparse.Namespace) -> None:
         "the graph mean, and blue is higher. Each row uses the truth scale for all panels. "
         "The router panel repeats its selected checkpoint and is outlined in blue."
     )
-    (args.output_dir / "index.html").write_text(
-        gallery_html("SNP-aware checkpoint router", intro, body)
-    )
+    with _atomic_output(args.output_dir / "index.html") as stream:
+        stream.write(gallery_html("SNP-aware checkpoint router", intro, body).encode("utf-8"))
 
 
+@beartype
 def command_router_h2h_gallery(args: argparse.Namespace) -> None:
+    """Reuse a released-checkpoint gallery only when every case selects that model."""
     rows = read_csv_rows(args.reference_rows)
+    _rows_by_id(rows, "index")
+    if not rows:
+        raise ValueError("reference gallery must contain cases")
+    source = args.reference_gallery.resolve()
+    destination = args.output_dir.resolve()
+    if source == destination or source in destination.parents or destination in source.parents:
+        raise ValueError("source and destination galleries must not overlap")
+    page = (source / "index.html").read_text()
+    marker = "</h1>"
+    if marker not in page:
+        raise ValueError("reference gallery does not contain the expected heading")
     selections = [
         {
             "index": integer(row, "index"),
@@ -1066,6 +1199,10 @@ def command_router_h2h_gallery(args: argparse.Namespace) -> None:
             f"would select Broad-SNP for {broad_count} examples; rerun those DREEMS cases"
         )
 
+    source_provenance_path = args.reference_gallery / "provenance.json"
+    source_provenance = (
+        json.loads(source_provenance_path.read_text()) if source_provenance_path.is_file() else None
+    )
     shutil.copytree(
         args.reference_gallery,
         args.output_dir,
@@ -1073,10 +1210,6 @@ def command_router_h2h_gallery(args: argparse.Namespace) -> None:
         ignore=shutil.ignore_patterns(".snakemake_timestamp"),
     )
     write_rows(args.output_dir / "router_selections.csv", selections)
-    source_provenance_path = args.reference_gallery / "provenance.json"
-    source_provenance = (
-        json.loads(source_provenance_path.read_text()) if source_provenance_path.is_file() else None
-    )
     write_json(
         args.output_dir / "provenance.json",
         {
@@ -1093,35 +1226,44 @@ def command_router_h2h_gallery(args: argparse.Namespace) -> None:
     )
 
     index_path = args.output_dir / "index.html"
-    page = index_path.read_text()
     page = page.replace(
         "DREEMS + fixed-radius MAP vs FEEMS recommended LOO",
         "DREEMS router + fixed-radius MAP vs FEEMS recommended LOO",
     ).replace("DREEMS + MAP", "DREEMS router + MAP")
-    marker = "</h1>"
-    if marker not in page:
-        raise ValueError("reference gallery does not contain the expected heading")
     router_note = (
         "<p class='note'><strong>Router audit:</strong> The router uses Broad-SNP at or "
         f"below {args.threshold:,} SNPs and Released above it. All {released_count:,} "
-        "examples in this FEEMS LOO benchmark have more than 2,000 SNPs, so the router "
+        f"examples in this FEEMS LOO benchmark exceed the {args.threshold:,}-SNP threshold, so the router "
         "selected Released for every case. The surfaces and numerical results are therefore "
         "identical to the Released-checkpoint H2H. "
         "<a href='router_selections.csv'>router selections</a></p>"
     )
-    index_path.write_text(page.replace(marker, marker + router_note, 1))
+    with _atomic_output(index_path) as stream:
+        stream.write(page.replace(marker, marker + router_note, 1).encode("utf-8"))
 
 
+@beartype
 def h2h_selections(rows: Sequence[Mapping[str, Any]]) -> dict[str, list[int]]:
+    """Select random, extreme, sparse, and dense cases from paired results."""
     random_ids = deterministic_sample(rows, 8, SELECTION_SEED, key="index")
     corr_sorted = sorted(
-        rows,
+        [
+            row
+            for row in rows
+            if np.isfinite(numeric(row, "dreems_map_edge_log_corr"))
+            and np.isfinite(numeric(row, "feems_edge_log_corr"))
+        ],
         key=lambda row: (
             numeric(row, "dreems_map_edge_log_corr") - numeric(row, "feems_edge_log_corr")
         ),
     )
     mse_sorted = sorted(
-        rows,
+        [
+            row
+            for row in rows
+            if np.isfinite(numeric(row, "dreems_map_edge_log_mse"))
+            and np.isfinite(numeric(row, "feems_edge_log_mse"))
+        ],
         key=lambda row: (
             numeric(row, "feems_edge_log_mse") - numeric(row, "dreems_map_edge_log_mse")
         ),
@@ -1139,6 +1281,7 @@ def h2h_selections(rows: Sequence[Mapping[str, Any]]) -> dict[str, list[int]]:
     }
 
 
+@beartype
 def h2h_example_figure(
     rows_by_id: Mapping[int, Mapping[str, Any]],
     replicate_ids: Sequence[int],
@@ -1147,6 +1290,7 @@ def h2h_example_figure(
     feems_pattern: str,
     output: Path,
 ) -> None:
+    """Draw truth, DREEMS+MAP, and FEEMS on an explicitly matched graph."""
     plt, _mtri, _LineCollection, _TwoSlopeNorm, _matplotlib = _plot_imports()
     fig, axes = plt.subplots(
         len(replicate_ids),
@@ -1157,16 +1301,13 @@ def h2h_example_figure(
     )
     for row_index, replicate in enumerate(replicate_ids):
         row = rows_by_id[replicate]
-        with (
-            np.load(dreems_pattern.format(example=replicate)) as dreems,
-            np.load(feems_pattern.format(example=replicate)) as feems,
-        ):
-            positions = np.asarray(dreems["positions"], dtype=np.float64)
-            edges = np.asarray(dreems["edges"], dtype=np.int32)
-            truth = centered(np.asarray(dreems["truth"], dtype=np.float64))
-            dreems_map = np.asarray(dreems["dreems_map"], dtype=np.float64)
-            feems_mean = np.asarray(feems["feems"], dtype=np.float64)
-            sample_count = np.asarray(dreems["sample_count"], dtype=np.float64)
+        arrays = _matched_predictions(
+            replicate, dreems_pattern=dreems_pattern, feems_pattern=feems_pattern
+        )
+        positions, edges = arrays["positions"], arrays["edges"]
+        truth = centered(arrays["truth"])
+        dreems_map, feems_mean = arrays["dreems_map"], arrays["feems"]
+        sample_count = arrays["sample_count"]
         limit = max(float(np.quantile(np.abs(truth), 0.98)), 0.15)
         subtitle = (
             f"rep {replicate} | {integer(row, 'num_snps'):,} SNPs | "
@@ -1210,35 +1351,35 @@ def h2h_example_figure(
     plt.close(fig)
 
 
+@beartype
 def h2h_aggregate_figures(rows: Sequence[Mapping[str, Any]], output_dir: Path) -> None:
-    plt, _mtri, _LineCollection, _TwoSlopeNorm, _matplotlib = _plot_imports()
+    """Compare FEEMS and DREEMS+MAP, coloring points by sampling density."""
     feems_corr = np.asarray([numeric(row, "feems_edge_log_corr") for row in rows])
     dreems_corr = np.asarray([numeric(row, "dreems_map_edge_log_corr") for row in rows])
     feems_mse = np.asarray([numeric(row, "feems_edge_log_mse") for row in rows])
     dreems_mse = np.asarray([numeric(row, "dreems_map_edge_log_mse") for row in rows])
     density = np.asarray([numeric(row, "sampled_node_fraction") for row in rows])
-    fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.4), constrained_layout=True)
-    scatter = axes[0].scatter(feems_corr, dreems_corr, c=density, s=12, cmap="plasma", alpha=0.7)
-    low = float(np.nanmin([feems_corr.min(), dreems_corr.min()]))
-    axes[0].plot([low, 1.0], [low, 1.0], color="#222222", linewidth=1)
-    axes[0].set(xlabel="FEEMS LOO correlation", ylabel="DREEMS+MAP correlation")
-    axes[0].set_aspect("equal", adjustable="box")
-    axes[1].scatter(feems_mse, dreems_mse, c=density, s=12, cmap="plasma", alpha=0.7)
-    positive = np.concatenate([feems_mse[feems_mse > 0], dreems_mse[dreems_mse > 0]])
-    lower, upper = float(positive.min()), float(positive.max())
-    axes[1].plot([lower, upper], [lower, upper], color="#222222", linewidth=1)
-    axes[1].set(xscale="log", yscale="log")
-    axes[1].set(xlabel="FEEMS LOO MSE", ylabel="DREEMS+MAP MSE")
-    axes[1].set_aspect("equal", adjustable="box")
-    colorbar = fig.colorbar(scatter, ax=axes, fraction=0.035, pad=0.03)
-    colorbar.set_label("Fraction of graph nodes sampled")
-    save_figure(fig, output_dir / "h2h_scatter_corr_mse.png")
-    plt.close(fig)
+    _comparison_scatter(
+        feems_corr,
+        dreems_corr,
+        feems_mse,
+        dreems_mse,
+        density,
+        labels=("FEEMS LOO", "DREEMS+MAP"),
+        color_label="Fraction of graph nodes sampled",
+        output=output_dir / "h2h_scatter_corr_mse.png",
+        figsize=(10.5, 4.4),
+        cmap="plasma",
+        size=12.0,
+        alpha=0.7,
+    )
 
 
+@beartype
 def command_h2h_gallery(args: argparse.Namespace) -> None:
+    """Render paired cached fits and descriptive sampling-density summaries."""
     rows = read_csv_rows(args.rows)
-    rows_by_id = {integer(row, "index"): row for row in rows}
+    rows_by_id = _rows_by_id(rows, "index")
     selections = h2h_selections(rows)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     h2h_aggregate_figures(rows, args.output_dir)
@@ -1294,15 +1435,14 @@ def command_h2h_gallery(args: argparse.Namespace) -> None:
         + "".join(section_html)
     )
     intro = (
-        "DREEMS uses the broad-SNP checkpoint and fixed-radius MAP refinement. FEEMS uses "
+        "DREEMS uses the checkpoint and MAP settings recorded in the accompanying results. FEEMS uses "
         "the cached recommended leave-one-observed-deme-out fit. Colors show centered "
         "edge-log relative migration: red is lower, white is the graph mean, and blue is "
         "higher. Each row uses the truth scale for all three panels. White points are "
         "sampled graph nodes, sized by sample count."
     )
-    (args.output_dir / "index.html").write_text(
-        gallery_html("DREEMS versus FEEMS: corrected broad-SNP checkpoint", intro, body)
-    )
+    with _atomic_output(args.output_dir / "index.html") as stream:
+        stream.write(gallery_html("DREEMS versus FEEMS", intro, body).encode("utf-8"))
 
 
 SCENARIO_TRUTHS = ("barrier", "anisotropy", "homogeneous")
@@ -1315,43 +1455,86 @@ SCENARIO_METHODS = (
 )
 
 
+@beartype
 def _scenario_mask_label(mask: str) -> str:
+    """Use short multiline labels for the fixed notebook sampling designs."""
     if mask == "random_10pct":
         return "random\nsparse"
     return mask.replace("_", "\n")
 
 
-@lru_cache(maxsize=256)
+@beartype
 def _scenario_archive(path: str) -> dict[str, np.ndarray]:
-    with np.load(path) as archive:
-        return {key: np.asarray(archive[key]) for key in archive.files}
+    """Read the current archive, not a cached version of a reused filename."""
+    with np.load(path, allow_pickle=False) as archive:
+        return {key: archive[key] for key in archive.files}
 
 
+@beartype
+def _matched_predictions(
+    example: int,
+    *,
+    dreems_pattern: str,
+    feems_pattern: str,
+) -> dict[str, np.ndarray]:
+    """Check common graph metadata before putting cached methods side by side."""
+    dreems = _scenario_archive(dreems_pattern.format(example=example))
+    feems = _scenario_archive(feems_pattern.format(example=example))
+    for archive in (dreems, feems):
+        archive["edges"] = _integer_array(archive["edges"], name="edges", dtype=np.int32)
+        for key in ("positions", "truth", "sample_count"):
+            archive[key] = _real_array(archive[key], name=key)
+    for key in ("positions", "edges", "truth", "sample_count"):
+        if not np.array_equal(dreems[key], feems[key]):
+            raise ValueError(f"scenario {example} disagrees between DREEMS and FEEMS on {key}")
+    arrays = dict(dreems)
+    arrays["feems"] = feems["feems"]
+    validate_graph_arrays(positions=arrays["positions"], edges=arrays["edges"])
+    for key in ("truth", "dreems", "dreems_map", "edge_sd", "conditioner", "feems"):
+        if key in arrays:
+            arrays[key] = _real_array(arrays[key], name=key)
+            if arrays[key].shape != (len(arrays["edges"]),):
+                raise ValueError(f"{key} must align with graph edges")
+    if arrays["sample_count"].shape != (len(arrays["positions"]),) or np.any(
+        arrays["sample_count"] < 0
+    ):
+        raise ValueError("sample counts must be nonnegative and align with graph nodes")
+    if "edge_sd" in arrays and np.any(arrays["edge_sd"] < 0):
+        raise ValueError("edge_sd must be nonnegative")
+    return arrays
+
+
+@beartype
 def _scenario_arrays(
     example: int,
     *,
     dreems_pattern: str,
     feems_pattern: str,
 ) -> dict[str, np.ndarray]:
-    dreems = _scenario_archive(dreems_pattern.format(example=example))
-    feems = _scenario_archive(feems_pattern.format(example=example))
-    for key in ("positions", "edges", "truth", "sample_count"):
-        if not np.array_equal(dreems[key], feems[key]):
-            raise ValueError(f"scenario {example} disagrees between DREEMS and FEEMS on {key}")
+    """Select the full scenario diagnostics from a validated method pair."""
+    arrays = _matched_predictions(
+        example, dreems_pattern=dreems_pattern, feems_pattern=feems_pattern
+    )
     return {
-        "positions": np.asarray(dreems["positions"], dtype=np.float64),
-        "edges": np.asarray(dreems["edges"], dtype=np.int32),
-        "truth": np.asarray(dreems["truth"], dtype=np.float64),
-        "sample_count": np.asarray(dreems["sample_count"], dtype=np.float64),
-        "edge_sd": np.asarray(dreems["edge_sd"], dtype=np.float64),
-        "conditioner": np.asarray(dreems["conditioner"], dtype=np.float64),
-        "dreems": np.asarray(dreems["dreems"], dtype=np.float64),
-        "dreems_map": np.asarray(dreems["dreems_map"], dtype=np.float64),
-        "feems": np.asarray(feems["feems"], dtype=np.float64),
+        key: arrays[key]
+        for key in (
+            "positions",
+            "edges",
+            "truth",
+            "sample_count",
+            "edge_sd",
+            "conditioner",
+            "dreems",
+            "dreems_map",
+            "feems",
+        )
     }
 
 
+@beartype
 def _scenario_row_lookup(rows: Sequence[Mapping[str, Any]]) -> dict[tuple[int, str, str], int]:
+    """Require one case per truth, mask, and replicate in the crossed design."""
+    _rows_by_id(rows, "index")
     lookup: dict[tuple[int, str, str], int] = {}
     for row in rows:
         key = (
@@ -1375,12 +1558,14 @@ def _scenario_row_lookup(rows: Sequence[Mapping[str, Any]]) -> dict[tuple[int, s
     return lookup
 
 
+@beartype
 def _scenario_metric_title(
     row: Mapping[str, Any],
     *,
     method_prefix: str,
     truth: str,
 ) -> str:
+    """Replace undefined correlation with output RMS for homogeneous truth."""
     mse = numeric(row, f"{method_prefix}_mse")
     if truth == "homogeneous":
         rms = numeric(row, f"{method_prefix}_rms")
@@ -1389,15 +1574,22 @@ def _scenario_metric_title(
     return f"r={corr:.3f} | MSE={mse:.3f}"
 
 
+@jaxtyped(typechecker=beartype)
 def _plot_scenario_uncertainty(
     ax: Any,
-    positions: np.ndarray,
-    edges: np.ndarray,
-    edge_sd: np.ndarray,
-    sample_count: np.ndarray,
+    positions: Real[np.ndarray, "nodes 2"],
+    edges: Int[np.ndarray, "edges 2"],
+    edge_sd: Real[np.ndarray, "edges"],
+    sample_count: Real[np.ndarray, "nodes"],
     *,
     title: str,
 ) -> None:
+    """Display posterior SD separately from migration amplitude."""
+    validate_graph_arrays(positions=positions, edges=edges)
+    if np.any(_real_array(edge_sd, name="edge_sd") < 0) or np.any(
+        _real_array(sample_count, name="sample_count") < 0
+    ):
+        raise ValueError("SD and sample counts must be nonnegative")
     _plt, _mtri, LineCollection, _TwoSlopeNorm, _matplotlib = _plot_imports()
     from matplotlib.colors import Normalize
 
@@ -1430,6 +1622,7 @@ def _plot_scenario_uncertainty(
     ax.set_yticks([])
 
 
+@beartype
 def scenario_replicate_figure(
     rows_by_id: Mapping[int, Mapping[str, Any]],
     lookup: Mapping[tuple[int, str, str], int],
@@ -1439,6 +1632,7 @@ def scenario_replicate_figure(
     feems_pattern: str,
     output: Path,
 ) -> None:
+    """Draw all methods and uncertainty for one complete truth/mask crossing."""
     plt, _mtri, _LineCollection, _TwoSlopeNorm, _matplotlib = _plot_imports()
     methods = (("truth", "Truth", None),) + SCENARIO_METHODS
     column_count = len(methods) + 1
@@ -1518,6 +1712,7 @@ def scenario_replicate_figure(
     plt.close(fig)
 
 
+@beartype
 def scenario_side_by_side_figure(
     rows_by_id: Mapping[int, Mapping[str, Any]],
     lookup: Mapping[tuple[int, str, str], int],
@@ -1596,7 +1791,9 @@ def scenario_side_by_side_figure(
     plt.close(fig)
 
 
+@beartype
 def _scenario_group_rows(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Average each method's metrics within a truth and sampling mask."""
     output = []
     for truth in SCENARIO_TRUTHS:
         for mask in SCENARIO_MASKS:
@@ -1615,7 +1812,9 @@ def _scenario_group_rows(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, An
     return output
 
 
+@beartype
 def _scenario_aggregate_figure(grouped: Sequence[Mapping[str, Any]], output: Path) -> None:
+    """Show pattern recovery for structured truths and amplitude for homogeneous truth."""
     plt, _mtri, _LineCollection, _TwoSlopeNorm, _matplotlib = _plot_imports()
     fig, axes = plt.subplots(2, 3, figsize=(15.5, 8.2), constrained_layout=True)
     colors = ("#777777", "#2a6fbb", "#00876c", "#b33b2e")
@@ -1654,19 +1853,23 @@ def _scenario_aggregate_figure(grouped: Sequence[Mapping[str, Any]], output: Pat
     plt.close(fig)
 
 
+@beartype
 def _pairwise_corr(left: np.ndarray, right: np.ndarray) -> float:
+    """Compare centered patterns; a constant field has undefined correlation."""
     left = centered(left)
     right = centered(right)
     denominator = float(np.linalg.norm(left) * np.linalg.norm(right))
     return float(np.dot(left, right) / denominator) if denominator > 0.0 else float("nan")
 
 
+@beartype
 def _scenario_similarity_rows(
     lookup: Mapping[tuple[int, str, str], int],
     *,
     dreems_pattern: str,
     feems_pattern: str,
 ) -> list[dict[str, Any]]:
+    """Compare predicted patterns across truths, keeping the sampling mask fixed."""
     rows = []
     replicates = sorted({key[0] for key in lookup})
     truth_pairs = tuple(itertools.combinations(SCENARIO_TRUTHS, 2))
@@ -1696,7 +1899,9 @@ def _scenario_similarity_rows(
     return rows
 
 
+@beartype
 def _scenario_similarity_figure(rows: Sequence[Mapping[str, Any]], output: Path) -> None:
+    """Plot output similarity across truths that share the same sampling mask."""
     plt, _mtri, _LineCollection, _TwoSlopeNorm, _matplotlib = _plot_imports()
     fig, ax = plt.subplots(figsize=(9.5, 4.6), constrained_layout=True)
     x = np.arange(len(SCENARIO_MASKS))
@@ -1740,12 +1945,18 @@ def _scenario_similarity_figure(rows: Sequence[Mapping[str, Any]], output: Path)
     plt.close(fig)
 
 
+@beartype
 def _scenario_observability_rows(
     rows: Sequence[Mapping[str, Any]],
     *,
     dreems_pattern: str,
     feems_pattern: str,
 ) -> list[dict[str, Any]]:
+    """Split edge error by the number of directly sampled endpoints.
+
+    This is not a measure of statistical identifiability: distant samples can
+    constrain an edge, and two sampled endpoints do not identify it uniquely.
+    """
     output = []
     for row in rows:
         example = integer(row, "index")
@@ -1779,7 +1990,9 @@ def _scenario_observability_rows(
     return output
 
 
+@beartype
 def _scenario_observability_figure(rows: Sequence[Mapping[str, Any]], output: Path) -> None:
+    """Group error by sampled edge endpoints, a direct-coverage diagnostic."""
     plt, _mtri, _LineCollection, _TwoSlopeNorm, _matplotlib = _plot_imports()
     fig, axes = plt.subplots(1, len(SCENARIO_MASKS), figsize=(15.5, 4.2), constrained_layout=True)
     colors = ("#777777", "#2a6fbb", "#00876c", "#b33b2e")
@@ -1821,9 +2034,11 @@ def _scenario_observability_figure(rows: Sequence[Mapping[str, Any]], output: Pa
     plt.close(fig)
 
 
+@beartype
 def command_scenario_gallery(args: argparse.Namespace) -> None:
+    """Render the full crossed-design diagnosis using saved method outputs."""
     rows = read_csv_rows(args.rows)
-    rows_by_id = {integer(row, "index"): row for row in rows}
+    rows_by_id = _rows_by_id(rows, "index")
     lookup = _scenario_row_lookup(rows)
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1910,18 +2125,397 @@ def command_scenario_gallery(args: argparse.Namespace) -> None:
     else:
         intro = (
             "This audit crosses three generating surfaces with four sampling masks over "
-            "independent simulation replicates. Each simulation uses constant q and 1,000 "
-            "diploid SNPs. Panels separate the linearized initializer, raw neural estimate, "
+            "independent simulation replicates. SNP counts and sample sizes are shown "
+            "for each case. Panels separate the linearized initializer, raw neural estimate, "
             "fixed-radius MAP refinement, and FEEMS' documented leave-one-deme-out fit. "
             "Colors are centered edge-log relative migration and use one common scale within "
             "each truth and replicate."
         )
-    (args.output_dir / "index.html").write_text(
-        gallery_html("Sampling-mask scenario audit", intro, body)
+    with _atomic_output(args.output_dir / "index.html") as stream:
+        stream.write(gallery_html("Sampling-mask scenario audit", intro, body).encode("utf-8"))
+
+
+SNP_COMPARISON_METHODS = (
+    ("dreems", "Raw DREEMS"),
+    ("dreems_map", "DREEMS + MAP"),
+    ("feems", "FEEMS LOO"),
+)
+
+
+@beartype
+def merge_scenario_snp_rows(
+    low_rows_path: Path,
+    high_rows_path: Path,
+) -> list[dict[str, Any]]:
+    """Pair scenario results that differ only in their retained SNP count."""
+
+    low_by_id = _rows_by_id(read_csv_rows(low_rows_path), "index")
+    high_by_id = _rows_by_id(read_csv_rows(high_rows_path), "index")
+    if low_by_id.keys() != high_by_id.keys():
+        raise ValueError("low- and high-SNP reports contain different example IDs")
+
+    paired = []
+    invariant_fields = (
+        "scenario_truth",
+        "scenario_mask",
+        "scenario_replicate",
+        "scenario_seed",
+        "num_nodes",
+        "num_edges",
+        "num_samples",
+        "num_sampled_nodes",
+    )
+    for example in sorted(low_by_id):
+        low = low_by_id[example]
+        high = high_by_id[example]
+        disagreements = [key for key in invariant_fields if low.get(key) != high.get(key)]
+        if disagreements:
+            raise ValueError(
+                f"scenario {example} differs on paired fields: {', '.join(disagreements)}"
+            )
+        row: dict[str, Any] = {
+            "index": example,
+            "truth": low["scenario_truth"],
+            "mask": low["scenario_mask"],
+            "sampled_nodes": integer(low, "num_sampled_nodes"),
+            "total_nodes": integer(low, "num_nodes"),
+            "low_snps": integer(low, "num_snps"),
+            "high_snps": integer(high, "num_snps"),
+        }
+        if row["high_snps"] <= row["low_snps"]:
+            raise ValueError(f"scenario {example} does not increase the retained SNP count")
+        for prefix, _label in SNP_COMPARISON_METHODS:
+            for metric in ("corr", "mse", "rms"):
+                low_value = numeric(low, f"{prefix}_edge_log_{metric}")
+                high_value = numeric(high, f"{prefix}_edge_log_{metric}")
+                row[f"low_{prefix}_{metric}"] = low_value
+                row[f"high_{prefix}_{metric}"] = high_value
+                if metric == "corr":
+                    row[f"{prefix}_{metric}_gain"] = high_value - low_value
+                else:
+                    row[f"{prefix}_{metric}_reduction"] = low_value - high_value
+        paired.append(row)
+    return paired
+
+
+@beartype
+def _scenario_snp_change_summary(
+    rows: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Summarize SNP-count gains using only finite paired metrics."""
+    summaries = []
+    scopes = (
+        ("all cases", rows, "mse", "reduction"),
+        (
+            "structured truths",
+            [row for row in rows if row["truth"] != "homogeneous"],
+            "corr",
+            "gain",
+        ),
+        (
+            "homogeneous truth",
+            [row for row in rows if row["truth"] == "homogeneous"],
+            "rms",
+            "reduction",
+        ),
+    )
+    for prefix, label in SNP_COMPARISON_METHODS:
+        for scope, subset, metric, direction in scopes:
+            low = np.asarray([numeric(row, f"low_{prefix}_{metric}") for row in subset])
+            high = np.asarray([numeric(row, f"high_{prefix}_{metric}") for row in subset])
+            keep = np.isfinite(low) & np.isfinite(high)
+            low = low[keep]
+            high = high[keep]
+            change = high - low if metric == "corr" else low - high
+            summaries.append(
+                {
+                    "method": label,
+                    "scope": scope,
+                    "metric": metric,
+                    "n": int(change.size),
+                    "low_mean": finite_mean(low),
+                    "high_mean": finite_mean(high),
+                    f"mean_{direction}": finite_mean(change),
+                    "high_better_fraction": (
+                        float(np.mean(change > 0.0)) if change.size else float("nan")
+                    ),
+                }
+            )
+    return summaries
+
+
+@beartype
+def _scenario_snp_delta_figure(
+    rows: Sequence[Mapping[str, Any]],
+    output: Path,
+) -> None:
+    """Plot within-case changes in correlation and MSE as SNP count increases."""
+    plt, _mtri, _LineCollection, _TwoSlopeNorm, _matplotlib = _plot_imports()
+    counts = {integer(row, "high_snps") for row in rows}
+    high_label = f"{next(iter(counts)):,} SNPs" if len(counts) == 1 else "higher SNP counts"
+    structured = [row for row in rows if row["truth"] != "homogeneous"]
+    truth_colors = {"barrier": "#b33b2e", "anisotropy": "#2a6fbb", "homogeneous": "#777777"}
+    fig, axes = plt.subplots(2, 3, figsize=(16.0, 7.8), constrained_layout=True)
+    for column, (prefix, label) in enumerate(SNP_COMPARISON_METHODS):
+        corr_values = [numeric(row, f"{prefix}_corr_gain") for row in structured]
+        axes[0, column].bar(
+            np.arange(len(structured)),
+            corr_values,
+            color=[truth_colors[str(row["truth"])] for row in structured],
+        )
+        axes[0, column].set_xticks(
+            np.arange(len(structured)),
+            [
+                f"{row['truth']}\n{_scenario_mask_label(str(row['mask'])).replace(chr(10), ' ')}"
+                for row in structured
+            ],
+            rotation=35,
+            ha="right",
+            fontsize=7,
+        )
+        mse_values = [numeric(row, f"{prefix}_mse_reduction") for row in rows]
+        axes[1, column].bar(
+            np.arange(len(rows)),
+            mse_values,
+            color=[truth_colors[str(row["truth"])] for row in rows],
+        )
+        axes[1, column].set_xticks(
+            np.arange(len(rows)),
+            [
+                f"{row['truth']}\n{_scenario_mask_label(str(row['mask'])).replace(chr(10), ' ')}"
+                for row in rows
+            ],
+            rotation=35,
+            ha="right",
+            fontsize=7,
+        )
+        axes[0, column].set_title(label)
+        for axis in axes[:, column]:
+            axis.axhline(0.0, color="#202020", linewidth=0.8)
+            axis.grid(axis="y", color="#dddddd", linewidth=0.6)
+    axes[0, 0].set_ylabel(f"Correlation gain at {high_label}")
+    axes[1, 0].set_ylabel(f"MSE reduction at {high_label}")
+    fig.suptitle("Effect of increasing the retained SNP count", fontsize=14)
+    save_figure(fig, output)
+    plt.close(fig)
+
+
+@beartype
+def _scenario_snp_surface_figure(
+    low_rows: Mapping[int, Mapping[str, Any]],
+    high_rows: Mapping[int, Mapping[str, Any]],
+    lookup: Mapping[tuple[int, str, str], int],
+    *,
+    low_dreems_pattern: str,
+    low_feems_pattern: str,
+    high_dreems_pattern: str,
+    high_feems_pattern: str,
+    output: Path,
+) -> None:
+    """Show matched low/high-SNP surfaces at a common scale for each truth."""
+    plt, _mtri, _LineCollection, _TwoSlopeNorm, _matplotlib = _plot_imports()
+    fig, axes = plt.subplots(
+        len(SCENARIO_TRUTHS) * len(SCENARIO_MASKS),
+        5,
+        figsize=(20.0, 31.0),
+        squeeze=False,
+        constrained_layout=True,
+    )
+    limits: dict[str, float] = {}
+    for truth in SCENARIO_TRUTHS:
+        values = []
+        for mask in SCENARIO_MASKS:
+            example = lookup[(0, truth, mask)]
+            low = _scenario_arrays(
+                example,
+                dreems_pattern=low_dreems_pattern,
+                feems_pattern=low_feems_pattern,
+            )
+            high = _scenario_arrays(
+                example,
+                dreems_pattern=high_dreems_pattern,
+                feems_pattern=high_feems_pattern,
+            )
+            for key in ("positions", "edges", "truth", "sample_count"):
+                if not np.array_equal(low[key], high[key]):
+                    raise ValueError(f"scenario {example} is not paired on {key}")
+            values.extend(
+                (high["truth"], low["dreems_map"], high["dreems_map"], low["feems"], high["feems"])
+            )
+        finite = np.concatenate([np.abs(centered(value)) for value in values])
+        finite = finite[np.isfinite(finite)]
+        limits[truth] = max(float(np.quantile(finite, 0.98)) if finite.size else 0.0, 0.15)
+
+    row_index = 0
+    for truth in SCENARIO_TRUTHS:
+        for mask in SCENARIO_MASKS:
+            example = lookup[(0, truth, mask)]
+            low_arrays = _scenario_arrays(
+                example,
+                dreems_pattern=low_dreems_pattern,
+                feems_pattern=low_feems_pattern,
+            )
+            high_arrays = _scenario_arrays(
+                example,
+                dreems_pattern=high_dreems_pattern,
+                feems_pattern=high_feems_pattern,
+            )
+            low_row = low_rows[example]
+            high_row = high_rows[example]
+            panels = (
+                (high_arrays["truth"], "Truth", "known generating surface"),
+                (
+                    low_arrays["dreems_map"],
+                    f"DREEMS + MAP | {integer(low_row, 'num_snps')} SNPs",
+                    _scenario_metric_title(
+                        low_row, method_prefix="dreems_map_edge_log", truth=truth
+                    ),
+                ),
+                (
+                    high_arrays["dreems_map"],
+                    f"DREEMS + MAP | {integer(high_row, 'num_snps'):,} SNPs",
+                    _scenario_metric_title(
+                        high_row, method_prefix="dreems_map_edge_log", truth=truth
+                    ),
+                ),
+                (
+                    low_arrays["feems"],
+                    f"FEEMS LOO | {integer(low_row, 'num_snps')} SNPs",
+                    _scenario_metric_title(low_row, method_prefix="feems_edge_log", truth=truth),
+                ),
+                (
+                    high_arrays["feems"],
+                    f"FEEMS LOO | {integer(high_row, 'num_snps'):,} SNPs",
+                    _scenario_metric_title(high_row, method_prefix="feems_edge_log", truth=truth),
+                ),
+            )
+            context = (
+                f"{truth} | {mask} | {integer(high_row, 'num_sampled_nodes')}/"
+                f"{integer(high_row, 'num_nodes')} nodes"
+            )
+            for column, (values, label, metric) in enumerate(panels):
+                plot_surface(
+                    axes[row_index, column],
+                    high_arrays["positions"],
+                    high_arrays["edges"],
+                    values,
+                    high_arrays["sample_count"],
+                    limit=limits[truth],
+                    title=f"{label}\n{context}\n{metric}",
+                )
+            row_index += 1
+    counts = {integer(row, "num_snps") for row in high_rows.values()}
+    high_label = f"{next(iter(counts)):,}-SNP" if len(counts) == 1 else "higher-SNP"
+    fig.suptitle(f"Paired low-SNP and {high_label} recovery", fontsize=15)
+    save_figure(fig, output)
+    plt.close(fig)
+
+
+@beartype
+def command_scenario_snp_comparison(args: argparse.Namespace) -> None:
+    """Compare paired saved scenarios with different retained SNP counts."""
+    paired = merge_scenario_snp_rows(args.low_rows, args.high_rows)
+    low_rows = _rows_by_id(read_csv_rows(args.low_rows), "index")
+    high_rows = _rows_by_id(read_csv_rows(args.high_rows), "index")
+    low_lookup = _scenario_row_lookup(list(low_rows.values()))
+    high_lookup = _scenario_row_lookup(list(high_rows.values()))
+    if low_lookup != high_lookup or set(key[0] for key in high_lookup) != {0}:
+        raise ValueError("SNP comparison currently requires one exactly paired replicate")
+    counts = {integer(row, "high_snps") for row in paired}
+    high_label = f"{next(iter(counts)):,}-SNP" if len(counts) == 1 else "higher-SNP"
+    low_gallery = os.path.relpath(args.low_rows.parent / "gallery/index.html", args.output_dir)
+    high_gallery = os.path.relpath(args.high_rows.parent / "gallery/index.html", args.output_dir)
+
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    summaries = _scenario_snp_change_summary(paired)
+    write_rows(args.output_dir / "paired_cases.csv", paired)
+    write_rows(args.output_dir / "aggregate_changes.csv", summaries)
+    write_json(
+        args.output_dir / "summary.json",
+        {
+            "paired_cases": paired,
+            "aggregate_changes": summaries,
+            "protocol": {
+                "low_rows": str(args.low_rows),
+                "high_rows": str(args.high_rows),
+                "low_dreems_pattern": args.low_dreems_pattern,
+                "low_feems_pattern": args.low_feems_pattern,
+                "high_dreems_pattern": args.high_dreems_pattern,
+                "high_feems_pattern": args.high_feems_pattern,
+                "pairing": "matched graph, truth, sampling design, and seed; genotype prefix not verified by this report",
+            },
+        },
+    )
+    _scenario_snp_delta_figure(paired, args.output_dir / "metric_changes.png")
+    _scenario_snp_surface_figure(
+        low_rows,
+        high_rows,
+        high_lookup,
+        low_dreems_pattern=args.low_dreems_pattern,
+        low_feems_pattern=args.low_feems_pattern,
+        high_dreems_pattern=args.high_dreems_pattern,
+        high_feems_pattern=args.high_feems_pattern,
+        output=args.output_dir / "paired_surfaces.png",
     )
 
+    summary_columns = (
+        "method",
+        "scope",
+        "metric",
+        "n",
+        "low_mean",
+        "high_mean",
+        "mean_gain",
+        "mean_reduction",
+        "high_better_fraction",
+    )
+    case_columns = (
+        "truth",
+        "mask",
+        "sampled_nodes",
+        "low_snps",
+        "high_snps",
+        "low_dreems_map_corr",
+        "high_dreems_map_corr",
+        "low_dreems_map_mse",
+        "high_dreems_map_mse",
+        "low_feems_corr",
+        "high_feems_corr",
+        "low_feems_mse",
+        "high_feems_mse",
+    )
+    body = (
+        "<h2>Aggregate changes</h2>"
+        "<img src='metric_changes.png'>"
+        "<p><a href='aggregate_changes.csv'>aggregate CSV</a> | "
+        "<a href='paired_cases.csv'>paired cases CSV</a> | "
+        "<a href='summary.json'>JSON</a> | "
+        f"<a href='{html.escape(high_gallery, quote=True)}'>higher-SNP gallery</a> | "
+        f"<a href='{html.escape(low_gallery, quote=True)}'>low-SNP gallery</a></p>"
+        + html_table(summaries, summary_columns)
+        + "<h2>Paired surfaces</h2><img src='paired_surfaces.png'>"
+        + "<h2>Per-case metrics</h2>"
+        + html_table(paired, case_columns)
+    )
+    intro = (
+        "This is a paired SNP-count comparison. For every case, the graph, generating "
+        "surface, sampled nodes, sample counts, and simulation seed are fixed. The original "
+        "and higher retained SNP counts are listed for each case. This report does not "
+        "verify whether the genotype matrices share an exact prefix. FEEMS "
+        "uses the same documented leave-one-observed-deme-out procedure at both SNP counts. "
+        "In the change plot, values above zero favor the higher SNP count."
+    )
+    with _atomic_output(args.output_dir / "index.html") as stream:
+        stream.write(
+            gallery_html(f"Low-SNP versus {high_label} hard-edge audit", intro, body).encode(
+                "utf-8"
+            )
+        )
 
+
+@beartype
 def build_parser() -> argparse.ArgumentParser:
+    """Expose separate report and rendering commands for Snakemake."""
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -1981,10 +2575,22 @@ def build_parser() -> argparse.ArgumentParser:
     scenario_gallery.add_argument("--feems-pattern", required=True)
     scenario_gallery.add_argument("--output-dir", type=Path, required=True)
     scenario_gallery.set_defaults(func=command_scenario_gallery)
+
+    scenario_snp = subparsers.add_parser("scenario-snp-comparison")
+    scenario_snp.add_argument("--low-rows", type=Path, required=True)
+    scenario_snp.add_argument("--high-rows", type=Path, required=True)
+    scenario_snp.add_argument("--low-dreems-pattern", required=True)
+    scenario_snp.add_argument("--low-feems-pattern", required=True)
+    scenario_snp.add_argument("--high-dreems-pattern", required=True)
+    scenario_snp.add_argument("--high-feems-pattern", required=True)
+    scenario_snp.add_argument("--output-dir", type=Path, required=True)
+    scenario_snp.set_defaults(func=command_scenario_snp_comparison)
     return parser
 
 
+@beartype
 def main(argv: Sequence[str] | None = None) -> None:
+    """Dispatch one report command without loading a neural checkpoint."""
     args = build_parser().parse_args(argv)
     args.func(args)
 

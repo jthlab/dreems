@@ -1,24 +1,46 @@
 """Calibrate and promote the audited surface-gated production checkpoint."""
 
 from pathlib import Path
+from numbers import Integral
 
 
-PROJECT_ROOT = Path(workflow.basedir).parent.resolve()
-OUTDIR = Path(str(config["outdir"])).expanduser()
-PUBLISH_DIR = Path(str(config["publish_dir"])).expanduser()
+PROJECT_ROOT = Path(workflow.current_basedir).parent.resolve()
+OUTDIR = Path(str(config["outdir"])).expanduser().resolve()
+PUBLISH_DIR = Path(str(config["publish_dir"])).expanduser().resolve()
 RELEASE_CHECKPOINT = PROJECT_ROOT / str(config["release_checkpoint"])
-if "prediction_packs" in config:
+if "prediction_packs" in config and "prediction_ids" in config:
+    raise ValueError("choose prediction_packs or prediction_ids, not both")
+indices = config.get("prediction_packs", config.get("prediction_ids"))
+if indices is not None:
+    if (not isinstance(indices, list) or not indices
+        or any(isinstance(value, bool) or not isinstance(value, Integral) or value < 0 for value in indices)
+        or len(set(indices)) != len(indices)):
+        raise ValueError("prediction IDs must be nonempty, unique, nonnegative integers")
+    field = "pack" if "prediction_packs" in config else "example"
     PREDICTIONS = [
-        str(config["prediction_pattern"]).format(pack=int(pack))
-        for pack in config["prediction_packs"]
+        str(config["prediction_pattern"]).format(**{field: index}) for index in indices
     ]
 else:
-    prediction_start = int(config.get("prediction_start", 0))
-    prediction_count = int(config["prediction_count"])
+    prediction_start = config.get("prediction_start", 0)
+    prediction_count = config["prediction_count"]
+    if any(isinstance(value, bool) or not isinstance(value, Integral) for value in (prediction_start, prediction_count)):
+        raise ValueError("prediction_start and prediction_count must be integers")
+    if prediction_start < 0 or prediction_count <= 0:
+        raise ValueError("prediction range must be nonempty and nonnegative")
     PREDICTIONS = [
         str(config["prediction_pattern"]).format(example=example)
         for example in range(prediction_start, prediction_start + prediction_count)
     ]
+if len(set(PREDICTIONS)) != len(PREDICTIONS):
+    raise ValueError("prediction_pattern must produce a distinct path for each ID")
+REQUIRE_HASH = config.get("require_checkpoint_hash", False)
+if not isinstance(REQUIRE_HASH, bool):
+    raise ValueError("require_checkpoint_hash must be a boolean")
+for name in ("expected_broad_examples", "expected_hard_examples", "calibration_seed"):
+    value = config[name]
+    minimum = 0 if name == "calibration_seed" else 1
+    if isinstance(value, bool) or not isinstance(value, Integral) or value < minimum:
+        raise ValueError(f"{name} must be an integer >= {minimum}")
 CALIBRATED = OUTDIR / "dreems_surface_gate.calibrated.dreems.zip"
 FIT = PUBLISH_DIR / "sd_calibration_fit.json"
 SELECTION = PUBLISH_DIR / "sd_calibration_selection.json"
@@ -26,6 +48,9 @@ VERIFICATION = PUBLISH_DIR / "sd_calibration_verification.json"
 VERIFICATION_CSV = PUBLISH_DIR / "sd_calibration_verification.csv"
 CALIBRATION_SCRIPT = PROJECT_ROOT / "workflow" / "calibrate_surface_gate.py"
 PROMOTION_SCRIPT = PROJECT_ROOT / "workflow" / "promote_surface_gate.py"
+CALIBRATION_CODE = [str(PROJECT_ROOT / "src/dreems" / name) for name in ("calibration.py", "checkpoints.py", "metrics.py", "validation.py", "workflow_io.py")]
+PROMOTION_CODE = [str(PROJECT_ROOT / "src/dreems" / name) for name in ("calibration.py", "checkpoints.py", "model.py", "validation.py", "workflow_io.py")]
+ENVIRONMENT = [str(PROJECT_ROOT / name) for name in ("pyproject.toml", "uv.lock")]
 
 
 rule all:
@@ -43,6 +68,8 @@ rule calibrate_surface_gate:
         predictions=PREDICTIONS,
         rows=str(config["independent_rows"]),
         script=str(CALIBRATION_SCRIPT),
+        code=CALIBRATION_CODE,
+        environment=ENVIRONMENT,
     output:
         checkpoint=str(CALIBRATED),
         fit=str(FIT),
@@ -50,6 +77,12 @@ rule calibrate_surface_gate:
         verification=str(VERIFICATION),
         verification_csv=str(VERIFICATION_CSV),
     threads: int(config["threads"])
+    benchmark:
+        str(OUTDIR / "benchmarks/calibrate.tsv")
+    params:
+        seed=config["calibration_seed"],
+        project=str(PROJECT_ROOT),
+        hash_option="--require-checkpoint-hash" if REQUIRE_HASH else "",
     resources:
         slurm_account="jonth0",
         slurm_partition=str(config["partition"]),
@@ -60,11 +93,12 @@ rule calibrate_surface_gate:
         export JAX_PLATFORMS=cpu
         export CUDA_VISIBLE_DEVICES=""
         export XLA_PYTHON_CLIENT_PREALLOCATE=false
-        uv --project {PROJECT_ROOT:q} run --frozen --no-sync python {input.script:q} \
+        uv --project {params.project:q} run --frozen --no-sync python {input.script:q} \
             --checkpoint {input.checkpoint:q} \
             --predictions {input.predictions:q} \
+            {params.hash_option} \
             --included-rows {input.rows:q} \
-            --seed {config[calibration_seed]} \
+            --seed {params.seed} \
             --fit-output {output.fit:q} \
             --selection-output {output.selection:q} \
             --verification-output {output.verification:q} \
@@ -91,9 +125,17 @@ rule promote_surface_gate:
         hard_protocol=str(config["hard_protocol"]),
         hard_report=str(config["hard_report"]),
         script=str(PROMOTION_SCRIPT),
+        code=PROMOTION_CODE,
+        environment=ENVIRONMENT,
     output:
         str(RELEASE_CHECKPOINT),
     threads: int(config["threads"])
+    benchmark:
+        str(OUTDIR / "benchmarks/promote.tsv")
+    params:
+        broad_examples=config["expected_broad_examples"],
+        project=str(PROJECT_ROOT),
+        hard_examples=config["expected_hard_examples"],
     resources:
         slurm_account="jonth0",
         slurm_partition=str(config["partition"]),
@@ -104,7 +146,7 @@ rule promote_surface_gate:
         export JAX_PLATFORMS=cpu
         export CUDA_VISIBLE_DEVICES=""
         export XLA_PYTHON_CLIENT_PREALLOCATE=false
-        uv --project {PROJECT_ROOT:q} run --frozen --no-sync python {input.script:q} \
+        uv --project {params.project:q} run --frozen --no-sync python {input.script:q} \
             --core {input.core:q} \
             --surface-gate {input.gate:q} \
             --calibrated-surface-gate {input.calibrated:q} \
@@ -120,7 +162,7 @@ rule promote_surface_gate:
             --broad-report {input.broad_report:q} \
             --hard-protocol {input.hard_protocol:q} \
             --hard-report {input.hard_report:q} \
-            --expected-broad-examples {config[expected_broad_examples]} \
-            --expected-hard-examples {config[expected_hard_examples]} \
+            --expected-broad-examples {params.broad_examples} \
+            --expected-hard-examples {params.hard_examples} \
             --output {output:q}
         """

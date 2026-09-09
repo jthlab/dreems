@@ -1,11 +1,12 @@
 """Regenerate the sampling hard-case notebook with an explicit checkpoint."""
 
-import hashlib
 from pathlib import Path
 
 import nbformat
+from dreems.workflow_io import _atomic_output, sha256
 
 
+PROJECT = Path(workflow.current_basedir).parent.resolve()
 SOURCE = Path(str(config["source_notebook"])).expanduser().resolve()
 CHECKPOINT = Path(str(config["checkpoint"])).expanduser().resolve()
 OUTDIR = Path(str(config["outdir"])).expanduser().resolve()
@@ -13,15 +14,8 @@ WORKDIR = Path(str(config.get("workdir", OUTDIR / "work"))).expanduser().resolve
 PREPARED = WORKDIR / "feems_scenarios.prepared.ipynb"
 EXECUTED = OUTDIR / "feems_scenarios_sampling_robustness.ipynb"
 HTML = OUTDIR / "feems_scenarios_sampling_robustness.html"
-PACKAGE_SOURCES = sorted(str(path) for path in Path("src/dreems").glob("*.py"))
-
-
-def sha256(path):
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
+PACKAGE_SOURCES = sorted(str(path) for path in (PROJECT / "src/dreems").glob("*.py"))
+ENVIRONMENT = [str(PROJECT / name) for name in ("pyproject.toml", "uv.lock")]
 
 
 localrules: all, prepare_notebook
@@ -37,6 +31,8 @@ rule prepare_notebook:
     input:
         source=str(SOURCE),
         checkpoint=str(CHECKPOINT),
+        writer=str(PROJECT / "src/dreems/workflow_io.py"),
+        environment=ENVIRONMENT,
     output:
         temp(str(PREPARED)),
     run:
@@ -97,15 +93,15 @@ rule prepare_notebook:
             nbformat.v4.new_markdown_cell(
                 "# Sampling hard-case audit\n\n"
                 "This is the original FEEMS-scenario notebook rerun with the "
-                "sampling-robustness DREEMS candidate. The msprime parameters, "
+                "specified DREEMS checkpoint. The msprime parameters, "
                 "random seeds, MAF filtering, and sampling masks are unchanged. "
                 "Repeated masks reuse the same simulated SNP data.\n\n"
                 f"- Source notebook SHA-256: `{source_hash}`\n"
                 f"- Checkpoint SHA-256: `{checkpoint_hash}`"
             ),
         )
-        Path(output[0]).parent.mkdir(parents=True, exist_ok=True)
-        nbformat.write(notebook, output[0])
+        with _atomic_output(Path(output[0])) as stream:
+            stream.write(nbformat.writes(notebook).encode("utf-8"))
 
 
 rule execute_notebook:
@@ -113,10 +109,13 @@ rule execute_notebook:
         notebook=str(PREPARED),
         checkpoint=str(CHECKPOINT),
         package=PACKAGE_SOURCES,
+        environment=ENVIRONMENT,
     output:
         str(EXECUTED),
     benchmark:
         str(OUTDIR / "benchmarks" / "execute.tsv")
+    params:
+        project=str(PROJECT),
     threads: int(config.get("threads", 4))
     resources:
         mem_mb=int(config.get("mem_mb", 32000)),
@@ -134,7 +133,7 @@ rule execute_notebook:
         export OPENBLAS_NUM_THREADS={threads}
         export MKL_NUM_THREADS={threads}
         mkdir -p "$(dirname {output:q})"
-        uv run --frozen --no-sync jupyter nbconvert \
+        uv --project {params.project:q} run --frozen --no-sync jupyter nbconvert \
             --to notebook \
             --execute \
             --ExecutePreprocessor.timeout=-1 \
@@ -146,10 +145,13 @@ rule execute_notebook:
 rule render_html:
     input:
         notebook=str(EXECUTED),
+        environment=ENVIRONMENT,
     output:
         str(HTML),
     benchmark:
         str(OUTDIR / "benchmarks" / "html.tsv")
+    params:
+        project=str(PROJECT),
     threads: 1
     resources:
         mem_mb=4000,
@@ -159,7 +161,7 @@ rule render_html:
     shell:
         """
         set -euo pipefail
-        uv run --frozen --no-sync jupyter nbconvert \
+        uv --project {params.project:q} run --frozen --no-sync jupyter nbconvert \
             --to html \
             --output {output:q} \
             {input.notebook:q}

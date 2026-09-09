@@ -1,5 +1,7 @@
 """Geographic graph construction and migration-surface generators."""
 
+# ruff: noqa: F722, F821, UP037
+
 from __future__ import annotations
 
 import math
@@ -10,48 +12,52 @@ from typing import Any
 
 import numpy as np
 import scipy.sparse as sp
+from beartype import beartype
+from jaxtyping import Bool, Float, Int, Real, jaxtyped
+from scipy.ndimage import label
 from scipy.sparse.csgraph import connected_components
 from scipy.spatial import cKDTree
 
 from dreems.simulation_config import (
+    _integer_setting,
     choose_weighted_name,
     draw_weighted_positive_float,
     draw_weighted_positive_int,
 )
+from dreems.validation import validate_graph_arrays
 
 
-def largest_component_mask(mask: np.ndarray) -> np.ndarray:
-    height, width = mask.shape
-    active = set(np.flatnonzero(mask.ravel()).tolist())
-    if not active:
+@beartype
+def largest_component_mask(mask: np.ndarray) -> Bool[np.ndarray, "height width"]:  # noqa: F722
+    """Keep the largest four-neighbor component, preserving the old tie-break."""
+    if mask.ndim != 2:
+        raise ValueError("mask must be two-dimensional")
+    labels, count = label(mask)
+    if count == 0:
         raise ValueError("mask has no active nodes")
-    components: list[set[int]] = []
-    while active:
-        start = active.pop()
-        seen = {start}
-        stack = [start]
-        while stack:
-            flat = stack.pop()
-            row, col = divmod(flat, width)
-            for nr, nc in ((row - 1, col), (row + 1, col), (row, col - 1), (row, col + 1)):
-                nflat = nr * width + nc
-                if 0 <= nr < height and 0 <= nc < width and nflat in active:
-                    active.remove(nflat)
-                    seen.add(nflat)
-                    stack.append(nflat)
-        components.append(seen)
-    keep = max(components, key=len)
-    out = np.zeros(mask.size, dtype=bool)
-    out[list(keep)] = True
-    return out.reshape(mask.shape)
+    sizes = np.bincount(labels.ravel())
+    sizes[0] = 0
+    winners = np.flatnonzero(sizes == sizes.max())
+    winner = winners[0]
+    if winners.size > 1:
+        # The old traversal visited components in this integer set's order.
+        # Only ties need that convention; labeling handles the traversal itself.
+        winner = next(
+            labels.ravel()[flat]
+            for flat in set(np.flatnonzero(mask).tolist())
+            if sizes[labels.ravel()[flat]] == sizes.max()
+        )
+    return labels == winner
 
 
+@beartype
 def random_mask(
     rng: np.random.Generator,
     height: int,
     width: int,
     kind: str,
 ) -> np.ndarray:
+    """Draw a connected habitat mask on a rectangular four-neighbor grid."""
     yy, xx = np.mgrid[0:height, 0:width]
     mask = np.ones((height, width), dtype=bool)
     if kind == "full":
@@ -108,11 +114,13 @@ def random_mask(
     return largest_component_mask(mask)
 
 
+@beartype
 def random_corridor_mask(
     rng: np.random.Generator,
     height: int,
     width: int,
 ) -> np.ndarray:
+    """Rasterize a meandering corridor with a few connected side branches."""
     rows = np.linspace(0.08 * height, 0.92 * height, int(rng.integers(5, 8)))
     cols = np.cumsum(rng.normal(scale=0.10 * width, size=rows.shape[0]))
     cols -= float(cols.mean())
@@ -148,120 +156,93 @@ def random_corridor_mask(
     return largest_component_mask(mask)
 
 
-def unit_positions(height: int, width: int) -> np.ndarray:
+@beartype
+def unit_positions(height: int, width: int) -> Float[np.ndarray, "nodes 2"]:  # noqa: F722
+    """Place row-major grid nodes in [0, 1] x [-1, 0]."""
     rows, cols = np.meshgrid(np.arange(height), np.arange(width), indexing="ij")
     x = cols.ravel().astype(np.float64) / max(width - 1, 1)
     y = -rows.ravel().astype(np.float64) / max(height - 1, 1)
     return np.column_stack([x, y])
 
 
+@beartype
 def masked_grid_graph(mask: np.ndarray) -> tuple[dict[str, np.ndarray], np.ndarray]:
+    """Number active nodes row-major; list horizontal edges before vertical edges."""
     height, width = mask.shape
     active_full = np.flatnonzero(mask.ravel()).astype(np.int32)
     full_to_active = -np.ones(mask.size, dtype=np.int32)
     full_to_active[active_full] = np.arange(active_full.shape[0], dtype=np.int32)
     horizontal_mask = mask[:, :-1] & mask[:, 1:]
     vertical_mask = mask[:-1, :] & mask[1:, :]
-    edges: list[tuple[int, int]] = []
-    edge_kind: list[int] = []
-    edge_row: list[int] = []
-    edge_col: list[int] = []
-    for row in range(height):
-        for col in range(width - 1):
-            if horizontal_mask[row, col]:
-                edges.append(
-                    (
-                        int(full_to_active[row * width + col]),
-                        int(full_to_active[row * width + col + 1]),
-                    )
-                )
-                edge_kind.append(0)
-                edge_row.append(row)
-                edge_col.append(col)
-    for row in range(height - 1):
-        for col in range(width):
-            if vertical_mask[row, col]:
-                edges.append(
-                    (
-                        int(full_to_active[row * width + col]),
-                        int(full_to_active[(row + 1) * width + col]),
-                    )
-                )
-                edge_kind.append(1)
-                edge_row.append(row)
-                edge_col.append(col)
-    if not edges:
+    horizontal_row, horizontal_col = np.nonzero(horizontal_mask)
+    vertical_row, vertical_col = np.nonzero(vertical_mask)
+    edge_row = np.concatenate((horizontal_row, vertical_row)).astype(np.int32)
+    edge_col = np.concatenate((horizontal_col, vertical_col)).astype(np.int32)
+    edge_kind = np.repeat([0, 1], [horizontal_row.size, vertical_row.size]).astype(np.int8)
+    source = edge_row * width + edge_col
+    target = source + np.where(edge_kind == 0, 1, width)
+    edges = np.column_stack((full_to_active[source], full_to_active[target]))
+    if not edges.size:
         raise ValueError("active mask has no active edges")
     graph = {
         "active_full": np.arange(active_full.shape[0], dtype=np.int32),
-        "edges": np.asarray(edges, dtype=np.int32),
+        "edges": edges,
         "source_active_full": active_full,
-        "edge_kind": np.asarray(edge_kind, dtype=np.int8),
-        "edge_row": np.asarray(edge_row, dtype=np.int32),
-        "edge_col": np.asarray(edge_col, dtype=np.int32),
+        "edge_kind": edge_kind,
+        "edge_row": edge_row,
+        "edge_col": edge_col,
     }
     return graph, unit_positions(height, width)[active_full]
 
 
+@beartype
 def feems_triangular_lattice_graph(
     n_rows: int = 8,
     n_columns: int = 12,
 ) -> tuple[dict[str, np.ndarray], np.ndarray]:
     """Build the triangular lattice geometry used by `feems.sim.setup_graph`."""
-    rows = max(int(n_rows), 2)
-    columns = max(int(n_columns), 2)
+    rows = _integer_setting(n_rows, "n_rows", minimum=2)
+    columns = _integer_setting(n_columns, "n_columns", minimum=2)
     row_height = math.sqrt(3.0) / 2.0
-    positions = []
-    for row in range(rows):
-        offset = 0.5 if row % 2 else 0.0
-        for column in range(columns):
-            positions.append((float(column) + offset, float(row) * row_height))
+    row, col = np.indices((rows, columns), dtype=np.int32)
+    positions = np.column_stack(((col + 0.5 * (row % 2)).ravel(), (row * row_height).ravel()))
+    h_row, h_col = np.indices((rows, columns - 1), dtype=np.int32).reshape(2, -1)
+    h_source = h_row * columns + h_col
 
-    def node(row: int, column: int) -> int:
-        return row * columns + column
-
-    edges: list[tuple[int, int]] = []
-    edge_kind: list[int] = []
-    edge_row: list[int] = []
-    edge_col: list[int] = []
-    for row in range(rows):
-        for column in range(columns - 1):
-            edges.append((node(row, column), node(row, column + 1)))
-            edge_kind.append(0)
-            edge_row.append(row)
-            edge_col.append(column)
-    for row in range(rows - 1):
-        for column in range(columns):
-            edges.append((node(row, column), node(row + 1, column)))
-            edge_kind.append(1)
-            edge_row.append(row)
-            edge_col.append(column)
-            if row % 2 == 0:
-                if column > 0:
-                    edges.append((node(row, column), node(row + 1, column - 1)))
-                    edge_kind.append(2)
-                    edge_row.append(row)
-                    edge_col.append(column)
-            elif column + 1 < columns:
-                edges.append((node(row, column), node(row + 1, column + 1)))
-                edge_kind.append(2)
-                edge_row.append(row)
-                edge_col.append(column)
+    # Keep the historical order: all horizontal edges, then a straight and
+    # diagonal edge from each node in turn. Diagonals alternate with row parity.
+    v_row, v_col = np.repeat(
+        np.indices((rows - 1, columns), dtype=np.int32).reshape(2, -1), 2, axis=1
+    )
+    v_kind = np.tile([1, 2], (rows - 1) * columns).astype(np.int8)
+    target_col = v_col + np.where(v_kind == 1, 0, np.where(v_row % 2 == 0, -1, 1))
+    keep = (target_col >= 0) & (target_col < columns)
+    v_source = v_row * columns + v_col
+    v_target = (v_row + 1) * columns + target_col
+    edges = np.vstack(
+        (
+            np.column_stack((h_source, h_source + 1)),
+            np.column_stack((v_source[keep], v_target[keep])),
+        )
+    ).astype(np.int32)
     graph = {
         "active_full": np.arange(rows * columns, dtype=np.int32),
-        "edges": np.asarray(edges, dtype=np.int32),
+        "edges": edges,
         "source_active_full": np.arange(rows * columns, dtype=np.int32),
-        "edge_kind": np.asarray(edge_kind, dtype=np.int8),
-        "edge_row": np.asarray(edge_row, dtype=np.int32),
-        "edge_col": np.asarray(edge_col, dtype=np.int32),
+        "edge_kind": np.concatenate((np.zeros(h_source.size, dtype=np.int8), v_kind[keep])),
+        "edge_row": np.concatenate((h_row, v_row[keep])),
+        "edge_col": np.concatenate((h_col, v_col[keep])),
     }
-    return graph, np.asarray(positions, dtype=np.float64)
+    return graph, positions
 
 
+@beartype
 def graph_from_positions_edges(
     positions: np.ndarray,
     edges: np.ndarray,
 ) -> tuple[dict[str, np.ndarray], np.ndarray]:
+    """Validate an external mesh and retain its node and edge order."""
+    validate_graph_arrays(positions=positions, edges=edges)
     return {
         "active_full": np.arange(positions.shape[0], dtype=np.int32),
         "edges": np.asarray(edges, dtype=np.int32),
@@ -269,7 +250,9 @@ def graph_from_positions_edges(
 
 
 @lru_cache(maxsize=8)
-def load_world_land_geometry(resolution: str, cartopy_data_dir: str):
+@beartype
+def load_world_land_geometry(resolution: str, cartopy_data_dir: str) -> Any:
+    """Load and cache Natural Earth land polygons at the requested resolution."""
     import cartopy
     import cartopy.io.shapereader as shpreader
     from shapely.ops import unary_union
@@ -285,7 +268,9 @@ def load_world_land_geometry(resolution: str, cartopy_data_dir: str):
     return unary_union(list(shpreader.Reader(land_path).geometries()))
 
 
-def polygonal_geometry(geometry):
+@beartype
+def polygonal_geometry(geometry: Any) -> Any:
+    """Keep polygonal parts of a clipped geometry, rejecting empty habitat."""
     from shapely.geometry import MultiPolygon, Polygon
 
     if isinstance(geometry, Polygon | MultiPolygon):
@@ -300,7 +285,9 @@ def polygonal_geometry(geometry):
     return MultiPolygon(polygons) if len(polygons) > 1 else polygons[0]
 
 
-def local_world_projection(lon: float, lat: float):
+@beartype
+def local_world_projection(lon: float, lat: float) -> tuple[Any, Any]:
+    """Return forward/inverse local azimuthal projections, in kilometers."""
     from pyproj import CRS, Transformer
 
     crs = CRS.from_proj4(
@@ -311,27 +298,29 @@ def local_world_projection(lon: float, lat: float):
     return to_xy, to_lonlat
 
 
-def project_geometry(geometry, transformer: Any):
+@beartype
+def project_geometry(geometry: Any, transformer: Any) -> Any:
+    """Project a habitat polygon with a pyproj transformer."""
     from shapely.ops import transform
 
     return polygonal_geometry(transform(transformer.transform, geometry))
 
 
-def points_in_geometry(points: np.ndarray, geometry: Any) -> np.ndarray:
-    from shapely.geometry import Point
-    from shapely.prepared import prep
+@beartype
+def points_in_geometry(points: np.ndarray, geometry: Any) -> Bool[np.ndarray, "nodes"]:  # noqa: F821, UP037
+    """Test habitat membership, including points exactly on its boundary."""
+    import shapely
 
-    prepared = prep(geometry)
-    return np.asarray(
-        [prepared.covers(Point(float(x), float(y))) for x, y in np.asarray(points)],
-        dtype=bool,
-    )
+    shapely.prepare(geometry)
+    return shapely.covers(geometry, shapely.points(points))
 
 
+@beartype
 def sample_global_landscape_region(
     rng: np.random.Generator,
     sim: Mapping[str, Any],
 ) -> dict[str, Any]:
+    """Choose a land-centered world-map crop and project it to local kilometers."""
     from shapely.geometry import Point, box
 
     land = load_world_land_geometry(
@@ -405,9 +394,22 @@ def sample_global_landscape_region(
     raise RuntimeError("could not find a suitable global landscape crop")
 
 
-def hex_candidates(bounds: tuple[float, float, float, float], spacing: float) -> np.ndarray:
+@jaxtyped(typechecker=beartype)
+def hex_candidates(
+    bounds: tuple[float, float, float, float], spacing: float
+) -> Float[np.ndarray, "nodes 2"]:
+    """Enumerate staggered rows, including a one-cell margin around the bounds."""
     xmin, ymin, xmax, ymax = bounds
+    if not np.all(np.isfinite(bounds)) or xmin > xmax or ymin > ymax:
+        raise ValueError("bounds must be finite and ordered xmin, ymin, xmax, ymax")
+    if not np.isfinite(spacing) or spacing <= 0:
+        raise ValueError("spacing must be finite and positive")
     y_step = math.sqrt(3.0) * 0.5 * spacing
+    margin = (xmin - spacing, xmax + spacing, ymin - y_step, ymax + y_step)
+    if not np.all(np.isfinite(margin)) or any(
+        outer == inner for outer, inner in zip(margin, (xmin, xmax, ymin, ymax), strict=True)
+    ):
+        raise ValueError("spacing must advance the coordinates without overflow")
     points: list[tuple[float, float]] = []
     row = 0
     y = ymin - y_step
@@ -422,12 +424,17 @@ def hex_candidates(bounds: tuple[float, float, float, float], spacing: float) ->
     return np.asarray(points, dtype=np.float64)
 
 
+@beartype
 def hex_points_in_geometry(geometry: Any, spacing: float) -> np.ndarray:
+    """Keep candidate hex-grid nodes covered by the habitat, including its boundary."""
     candidates = hex_candidates(geometry.bounds, spacing)
     return candidates[points_in_geometry(candidates, geometry)]
 
 
+@beartype
 def choose_hex_spacing(geometry: Any, target_nodes: int) -> tuple[float, np.ndarray]:
+    """Search spacing geometrically for the closest attainable node count."""
+    _integer_setting(target_nodes, "target_nodes")
     xmin, ymin, xmax, ymax = geometry.bounds
     extent = max(float(xmax - xmin), float(ymax - ymin), 1.0)
     low = max(extent / 700.0, 0.1)
@@ -450,7 +457,15 @@ def choose_hex_spacing(geometry: Any, target_nodes: int) -> tuple[float, np.ndar
     return float(best_spacing), best_points
 
 
-def edges_from_hex_points(points: np.ndarray, spacing: float) -> np.ndarray:
+@jaxtyped(typechecker=beartype)
+def edges_from_hex_points(
+    points: Real[np.ndarray, "nodes 2"], spacing: float
+) -> Int[np.ndarray, "edges 2"]:
+    """Connect points within 1.08 grid spacings, sorting edges by endpoint IDs."""
+    if not np.all(np.isfinite(points)):
+        raise ValueError("points must contain finite coordinates")
+    if not np.isfinite(spacing) or spacing <= 0:
+        raise ValueError("spacing must be finite and positive")
     if points.shape[0] < 2:
         return np.empty((0, 2), dtype=np.int32)
     pairs = sorted(cKDTree(points).query_pairs(r=float(spacing) * 1.08))
@@ -459,12 +474,20 @@ def edges_from_hex_points(points: np.ndarray, spacing: float) -> np.ndarray:
     return np.asarray(pairs, dtype=np.int32)
 
 
+@jaxtyped(typechecker=beartype)
 def largest_graph_component(
-    positions: np.ndarray,
-    edges: np.ndarray,
+    positions: Real[np.ndarray, "nodes 2"],
+    edges: Int[np.ndarray, "edges 2"],
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    if positions.shape[0] <= 1 or edges.size == 0:
+    """Keep the largest component and its original node IDs; ties use the first."""
+    if not np.all(np.isfinite(positions)):
+        raise ValueError("positions must contain finite coordinates")
+    if np.any(edges < 0) or np.any(edges >= positions.shape[0]):
+        raise ValueError("edges must refer to valid node indices")
+    if positions.shape[0] <= 1:
         return positions, edges, np.arange(positions.shape[0], dtype=np.int32)
+    if not edges.size:
+        return positions[:1], edges, np.asarray([0], dtype=np.int32)
     rows = np.r_[edges[:, 0], edges[:, 1]]
     cols = np.r_[edges[:, 1], edges[:, 0]]
     graph = sp.csr_matrix(
@@ -483,10 +506,12 @@ def largest_graph_component(
     return positions[keep_nodes], old_to_new[edges[keep_edges]], keep_nodes
 
 
+@beartype
 def build_global_landscape_mesh(
     rng: np.random.Generator,
     sim: Mapping[str, Any],
 ) -> dict[str, Any]:
+    """Mesh the whole crop, retaining water edges but requiring enough land sites."""
     target_nodes = draw_weighted_positive_int(
         rng,
         value=sim["global_landscape_target_nodes"],
@@ -522,7 +547,9 @@ def build_global_landscape_mesh(
     raise RuntimeError("could not build a global landscape mesh")
 
 
+@beartype
 def standardize(values: np.ndarray) -> np.ndarray:
+    """Center a field and give it unit SD; constant fields become zero."""
     values = np.asarray(values, dtype=np.float64)
     if values.size == 0:
         return values
@@ -531,18 +558,22 @@ def standardize(values: np.ndarray) -> np.ndarray:
     return values / sd if sd > 0.0 else values
 
 
+@beartype
 def scaled_positions(positions: np.ndarray) -> np.ndarray:
+    """Center coordinates and scale the farthest node to unit radius."""
     coords = np.asarray(positions, dtype=np.float64) - np.mean(positions, axis=0, keepdims=True)
     scale = float(np.max(np.linalg.norm(coords, axis=1))) if coords.size else 0.0
     return coords / scale if scale > 0.0 else coords
 
 
+@beartype
 def draw_rff_params(
     rng: np.random.Generator,
     *,
     features_count: int,
     length_scale: float,
 ) -> dict[str, np.ndarray | float]:
+    """Draw a stationary field using random Fourier features."""
     features_count = max(int(features_count), 1)
     return {
         "frequencies": rng.normal(size=(features_count, 2)) / max(float(length_scale), 1e-3),
@@ -551,7 +582,9 @@ def draw_rff_params(
     }
 
 
+@beartype
 def eval_rff_params(params: Mapping[str, Any], positions: np.ndarray) -> np.ndarray:
+    """Evaluate saved Fourier features and standardize over the supplied nodes."""
     coords = scaled_positions(positions)
     frequencies = np.asarray(params["frequencies"], dtype=np.float64)
     phases = np.asarray(params["phases"], dtype=np.float64)
@@ -562,7 +595,9 @@ def eval_rff_params(params: Mapping[str, Any], positions: np.ndarray) -> np.ndar
     return standardize(field)
 
 
+@beartype
 def box_scaled_positions(positions: np.ndarray) -> np.ndarray:
+    """Scale each coordinate axis to [0, 1] for procedural surface features."""
     coords = np.asarray(positions, dtype=np.float64)
     lo = np.min(coords, axis=0, keepdims=True)
     span = np.ptp(coords, axis=0, keepdims=True)
@@ -570,6 +605,7 @@ def box_scaled_positions(positions: np.ndarray) -> np.ndarray:
     return (coords - lo) / span
 
 
+@beartype
 def landscape_feature(
     kind: str,
     *,
@@ -583,6 +619,7 @@ def landscape_feature(
     phase: float = 0.0,
     amplitude: float = 0.0,
 ) -> dict[str, Any]:
+    """Describe a procedural barrier or corridor in normalized map coordinates."""
     out: dict[str, Any] = {
         "kind": kind,
         "strength": float(strength),
@@ -601,20 +638,24 @@ def landscape_feature(
     return out
 
 
+@beartype
 def jittered_pair(
     rng: np.random.Generator,
     center: tuple[float, float],
     *,
     scale: float,
 ) -> tuple[float, float]:
+    """Perturb a feature center, keeping it within the central 90% of the map."""
     values = np.asarray(center, dtype=np.float64) + rng.normal(scale=float(scale), size=2)
     return float(np.clip(values[0], 0.05, 0.95)), float(np.clip(values[1], 0.05, 0.95))
 
 
+@beartype
 def draw_north_america_landscape_features(
     rng: np.random.Generator,
     local: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
+    """Draw a stylized North America motif; these are not measured terrain data."""
     jitter = float(local.get("landscape_feature_jitter", 0.06))
     water_strength = float(local.get("landscape_water_strength", 2.7))
     mountain_strength = float(local.get("landscape_mountain_strength", 1.8))
@@ -652,10 +693,12 @@ def draw_north_america_landscape_features(
     ]
 
 
+@beartype
 def draw_random_landscape_features(
     rng: np.random.Generator,
     local: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
+    """Mix randomly placed low-migration regions, ridges, and coasts."""
     min_features = max(int(local.get("landscape_min_features", 3)), 1)
     max_features = max(int(local.get("landscape_max_features", 6)), min_features)
     count = int(rng.integers(min_features, max_features + 1))
@@ -704,6 +747,7 @@ def draw_random_landscape_features(
     return features
 
 
+@beartype
 def draw_multiscale_surface(
     rng: np.random.Generator,
     local: Mapping[str, Any],
@@ -779,11 +823,13 @@ def draw_multiscale_surface(
     }
 
 
+@beartype
 def multiscale_edge_values(
     surface: Mapping[str, Any],
     positions: np.ndarray,
     edges: np.ndarray,
 ) -> np.ndarray:
+    """Combine smooth bands, thresholded regions, and oriented local features."""
     left = edges[:, 0]
     right = edges[:, 1]
     node_values = np.zeros(positions.shape[0], dtype=np.float64)
@@ -815,11 +861,13 @@ def multiscale_edge_values(
     return values
 
 
+@beartype
 def landscape_edge_penalty(
     features: Sequence[Mapping[str, Any]],
     positions: np.ndarray,
     edges: np.ndarray,
 ) -> np.ndarray:
+    """Evaluate low-migration features at endpoints or edge midpoints."""
     coords = box_scaled_positions(positions)
     left = edges[:, 0]
     right = edges[:, 1]
@@ -865,12 +913,14 @@ def landscape_edge_penalty(
     return penalty
 
 
+@beartype
 def draw_surface(
     rng: np.random.Generator,
     *,
     surface_kind: str,
     local: Mapping[str, Any],
 ) -> dict[str, Any]:
+    """Draw field parameters now and evaluate them on a graph later."""
     kind = str(surface_kind)
     if kind == "constant":
         return {"kind": kind, "std": 0.0}
@@ -926,11 +976,17 @@ def draw_surface(
     return surface
 
 
+@beartype
 def edge_log_rates_from_surface(
     surface: Mapping[str, Any],
     positions: np.ndarray,
     edges: np.ndarray,
 ) -> np.ndarray:
+    """Evaluate centered log conductances in the supplied edge order.
+
+    Generic fields are rescaled to the requested SD. FEEMS lattice motifs
+    instead preserve their explicit barrier/corridor or anisotropy ratios.
+    """
     kind = str(surface["kind"])
     if kind == "constant":
         return np.zeros(edges.shape[0], dtype=np.float32)
@@ -995,10 +1051,12 @@ def edge_log_rates_from_surface(
     return (standardize(values) * float(surface["std"])).astype(np.float32)
 
 
+@beartype
 def node_log_q_from_surface(
     q_surface: Mapping[str, Any] | None,
     positions: np.ndarray,
 ) -> np.ndarray:
+    """Evaluate centered log coalescence rates; an absent field means constant q."""
     if q_surface is None:
         return np.zeros(positions.shape[0], dtype=np.float32)
     return (eval_rff_params(q_surface["field"], positions) * float(q_surface["std"])).astype(
@@ -1006,10 +1064,12 @@ def node_log_q_from_surface(
     )
 
 
+@beartype
 def draw_q_surface(
     rng: np.random.Generator,
     local: Mapping[str, Any],
 ) -> dict[str, Any] | None:
+    """Draw an independent local-coalescence field, or None for constant q."""
     if float(local["q_log_std"]) <= 0.0 or str(local.get("q_prior", "gp")) == "constant":
         return None
     features_count = 8 if str(local.get("q_prior", "gp")) == "smooth" else int(local["gp_features"])

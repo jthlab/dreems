@@ -1,26 +1,34 @@
 """Small-graph msprime simulation and SNP ascertainment."""
 
+# ruff: noqa: F722,F821,UP037
+
 from __future__ import annotations
 
 import numpy as np
+from beartype import beartype
+from jaxtyping import Integer, Real, jaxtyped
 
 
+@jaxtyped(typechecker=beartype)
 def allele_frequency_columns(
-    genotypes: np.ndarray,
+    genotypes: Real[np.ndarray, "sample snp"],
     *,
     ploidy: int = 2,
 ) -> np.ndarray:
+    """Derived-allele frequency for each fixed-ploidy dosage column."""
     values = np.asarray(genotypes, dtype=np.float64)
     return values.sum(axis=0) / float(int(ploidy) * values.shape[0])
 
 
+@jaxtyped(typechecker=beartype)
 def ascertained_columns(
-    genotypes: np.ndarray,
+    genotypes: Real[np.ndarray, "sample snp"],
     *,
     min_allele_frequency: float,
     max_allele_frequency: float,
     ploidy: int = 2,
 ) -> np.ndarray:
+    """Keep segregating columns within the inclusive derived-frequency interval."""
     values = np.asarray(genotypes)
     allele_sum = values.sum(axis=0)
     polymorphic = (allele_sum > 0.0) & (allele_sum < float(int(ploidy) * values.shape[0]))
@@ -28,42 +36,39 @@ def ascertained_columns(
     return polymorphic & (frequency >= min_allele_frequency) & (frequency <= max_allele_frequency)
 
 
+@jaxtyped(typechecker=beartype)
 def genotypes_from_grouped_haplotypes(
-    haplotypes: np.ndarray,
+    haplotypes: Real[np.ndarray, "snp haploid"],
     *,
-    sample_nodes: np.ndarray,
+    sample_nodes: Integer[np.ndarray, "sample"],
     num_nodes: int,
     ploidy: int = 2,
 ) -> np.ndarray:
     """Convert msprime population-grouped haplotypes to caller sample order."""
 
-    samples = np.asarray(sample_nodes, dtype=np.int32).reshape(-1)
+    samples = np.asarray(sample_nodes)
     values = np.asarray(haplotypes)
-    if values.ndim != 2:
-        raise ValueError("haplotypes must have shape (num_snps, num_haplotypes)")
-    sample_counts = np.bincount(samples, minlength=int(num_nodes)).astype(np.int64)
-    haploid_counts = sample_counts * int(ploidy)
-    offsets = np.concatenate([[0], np.cumsum(haploid_counts[:-1])]).astype(np.int64)
-    if int(haploid_counts.sum()) != values.shape[1]:
+    if ploidy <= 0:
+        raise ValueError("ploidy must be positive")
+    if np.any(samples < 0) or np.any(samples >= num_nodes):
+        raise ValueError("sample_nodes are outside the graph")
+    if len(samples) * ploidy != values.shape[1]:
         raise ValueError("haplotype count does not match sample_nodes and ploidy")
-    cursors = np.zeros(int(num_nodes), dtype=np.int64)
-    genotypes = np.empty((samples.shape[0], values.shape[0]), dtype=values.dtype)
-    for sample_index, deme_value in enumerate(samples):
-        deme = int(deme_value)
-        start = int(offsets[deme] + cursors[deme])
-        end = start + int(ploidy)
-        genotypes[sample_index] = values[:, start:end].sum(axis=1)
-        cursors[deme] += int(ploidy)
+    grouped_dosages = values.reshape(values.shape[0], len(samples), ploidy).sum(axis=2).T
+    genotypes = np.empty(grouped_dosages.shape, dtype=values.dtype)
+    # msprime groups samples by deme; stable sorting preserves within-deme order.
+    genotypes[np.argsort(samples, kind="stable")] = grouped_dosages
     return genotypes
 
 
+@jaxtyped(typechecker=beartype)
 def simulate_msprime_genotypes(
     *,
     num_nodes: int,
-    edges: np.ndarray,
-    edge_log_rates: np.ndarray,
-    node_log_q: np.ndarray,
-    sample_nodes: np.ndarray,
+    edges: Integer[np.ndarray, "edge 2"],
+    edge_log_rates: Real[np.ndarray, "edge"],
+    node_log_q: Real[np.ndarray, "node"],
+    sample_nodes: Integer[np.ndarray, "sample"],
     num_snps: int,
     rng: np.random.Generator,
     migration_scale: float,
@@ -75,6 +80,13 @@ def simulate_msprime_genotypes(
     min_allele_frequency: float = 0.0,
     max_allele_frequency: float = 1.0,
 ) -> np.ndarray:
+    """Select one segregating site per mutation-bearing msprime replicate.
+
+    This is diploid and uses Ne=effective_size*exp(-node_log_q), clipped to
+    [1e-3, 1e6]. Each tree contributes at most one site; retained sites then
+    pass the derived-frequency filter. It is not the always-marked-tree mode
+    used by the production Rust corpus.
+    """
     try:
         import msprime
     except ModuleNotFoundError as exc:

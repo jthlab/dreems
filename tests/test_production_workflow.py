@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import ast
 import copy
 import hashlib
 import json
+import os
+import subprocess
+import sys
 import zipfile
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 
 from dreems import pipeline, train
@@ -31,12 +36,96 @@ def load_yaml(path: Path) -> dict[str, Any]:
     return payload
 
 
+def test_validation_is_a_dependency_of_every_array_consuming_stage() -> None:
+    """Changing array checks must invalidate the rules that call those checks."""
+    source = (REPO_ROOT / "workflow/Snakefile").read_text().split("def config_snapshot(", 1)[0]
+    definitions = []
+    for node in ast.parse(source).body:
+        if (isinstance(node, ast.FunctionDef) and node.name == "source_paths") or (
+            isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id.endswith("_SOURCES")
+                for target in node.targets
+            )
+        ):
+            definitions.append(node)
+    namespace = {"PROJECT_ROOT": str(REPO_ROOT), "Path": Path}
+    exec(
+        compile(ast.Module(body=definitions, type_ignores=[]), "workflow/Snakefile", "exec"),
+        namespace,
+    )
+    validator = str(REPO_ROOT / "src/dreems/validation.py")
+    for name in (
+        "SIMULATION_SOURCES",
+        "PREPARATION_SOURCES",
+        "TRAINING_SOURCES",
+        "EVALUATION_SOURCES",
+    ):
+        assert validator in namespace[name], name
+
+
 def test_great_lakes_launcher_uses_slurm_submit_directory() -> None:
     launcher = (REPO_ROOT / "workflow" / "run_great_lakes.sh").read_text()
 
     assert "SLURM_SUBMIT_DIR" in launcher
     assert 'PROJECT_ROOT="${DREEMS_REPO:-${SLURM_SUBMIT_DIR:-$SCRIPT_ROOT}}"' in launcher
     assert "#SBATCH --account=jonth0" in launcher
+
+
+@pytest.mark.parametrize("launcher", ["run_maturin.sh", "run_great_lakes.sh"])
+@pytest.mark.parametrize("config_flag", [None, "--config", "-C"])
+def test_launchers_accept_config_overlays(
+    tmp_path: Path, launcher: str, config_flag: str | None
+) -> None:
+    """Both launchers pass the release overlays to Snakemake in the given order."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    command_log = tmp_path / "commands.jsonl"
+    uv = bin_dir / "uv"
+    uv.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys\n"
+        "with open(os.environ['COMMAND_LOG'], 'a') as log:\n"
+        "    log.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+    )
+    uv.chmod(0o755)
+    environment = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "COMMAND_LOG": str(command_log),
+        "DREEMS_REPO": str(tmp_path),
+        "DREEMS_BUILD_RUST": "0",
+        "DREEMS_SNAKEFILE": "workflow/custom.Snakefile",
+        "DREEMS_CONFIG_FILES": "base.yaml:overlay with spaces.yaml",
+        "DREEMS_RUN_ROOT": str(tmp_path / "outputs"),
+    }
+    options = [config_flag, "publish_dir=published"] if config_flag else []
+    subprocess.run(
+        ["bash", str(REPO_ROOT / "workflow" / launcher), *options, "--dry-run"],
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    commands = [json.loads(line) for line in command_log.read_text().splitlines()]
+    command = commands[-1]
+    assert "snakemake" in command
+    assert command[command.index("-s") + 1] == "workflow/custom.Snakefile"
+    index = command.index("--configfile")
+    assert command[index + 1 : index + 3] == ["base.yaml", "overlay with spaces.yaml"]
+    flag = config_flag or "--config"
+    assert command.count("--config") + command.count("-C") == 1
+    assert command[command.index(flag) + 1] == f"outdir={tmp_path / 'outputs'}"
+    if config_flag:
+        assert command[command.index(flag) + 2] == "publish_dir=published"
+    assert command[-1] == "--dry-run"
+
+
+def test_launchers_default_to_the_current_release_recipe() -> None:
+    for name in ("run_great_lakes.sh", "run_maturin.sh"):
+        source = (REPO_ROOT / "workflow" / name).read_text()
+        assert "${DREEMS_CONFIG:-workflow/config.release.yaml}" in source
+        assert "${DREEMS_SNAKEFILE:-workflow/release.Snakefile}" in source
 
 
 def checkpoint_metadata() -> dict[str, Any]:
@@ -230,3 +319,5 @@ def test_workflows_use_compacted_artifacts_and_sqlite_provenance() -> None:
         profile = load_yaml(REPO_ROOT / "workflow" / "profiles" / profile_name / "profile.yaml")
         assert profile["persistence-backend"] == "db"
         assert profile["persistence-backend-db-url"] == "sqlite:///.snakemake/metadata.db"
+        if profile_name == "slurm":
+            assert profile["slurm-status-command"] == "squeue"

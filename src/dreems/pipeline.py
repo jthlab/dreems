@@ -1,9 +1,13 @@
-"""Artifact-oriented CLI for reproducible DREEMS training and evaluation."""
+"""Snakemake workers for feature preparation, training, and evaluation.
+
+Raw and prepared packs are trusted pickle files. Preparation keeps graph arrays
+unpadded; normalization statistics use training packs only. Training pads each
+batch to fixed dimensions and delegates model updates to ``dreems.train``.
+"""
 
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import math
 import shutil
@@ -14,23 +18,34 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from beartype import beartype
+from jaxtyping import Shaped, jaxtyped
 
 from dreems import checkpoints, corpus, counterfactual, features, metrics, simulation, train
 from dreems import model as dreems_model
+from dreems.validation import _integer_array
 from dreems.workflow_io import (
     json_ready,
     load_config,
     optional_input_paths,
     read_pickle,
     required_input_paths,
+    write_csv,
     write_json,
+    write_npz,
     write_pickle,
 )
 
 
+@beartype
+def _report(stage: str, **fields: Any) -> None:
+    """Flush a compact progress record to the Snakemake worker log."""
+    print(json.dumps(json_ready({"stage": stage, **fields}), sort_keys=True), flush=True)
+
+
+@beartype
 def nested_mapping(config: Mapping[str, Any], key: str) -> dict[str, Any]:
-    # Config files are nested by topic. Missing sub-blocks intentionally fall
-    # through to the dataclass defaults in train.py.
+    """Read a config block; absent or null blocks use the dataclass defaults."""
     value = config.get(key, {})
     if value is None:
         return {}
@@ -39,7 +54,9 @@ def nested_mapping(config: Mapping[str, Any], key: str) -> dict[str, Any]:
     return dict(value)
 
 
+@beartype
 def dreems_config(config: Mapping[str, Any]) -> train.DREEMSTrainConfig:
+    """Build the existing training dataclasses from the YAML/JSON topic blocks."""
     dreems = nested_mapping(config, "dreems")
     return train.DREEMSTrainConfig(
         architecture=train.DREEMSArchitectureConfig(**nested_mapping(dreems, "architecture")),
@@ -52,9 +69,9 @@ def dreems_config(config: Mapping[str, Any]) -> train.DREEMSTrainConfig:
     )
 
 
+@beartype
 def load_examples(path: Path) -> list[dict[str, Any]]:
-    # Raw shards may contain one example or a list of examples. Downstream stages
-    # only deal in lists.
+    """Read a raw example or ordered raw pack, returning a list in either case."""
     payload = read_pickle(path)
     if isinstance(payload, dict):
         return [payload]
@@ -65,37 +82,80 @@ def load_examples(path: Path) -> list[dict[str, Any]]:
     return payload
 
 
+@beartype
+def _read_prepared_shard(path: Path) -> list[dict[str, Any]]:
+    """Require the list-of-dictionaries format written by preparation workers."""
+    items = read_pickle(path)
+    if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
+        raise ValueError(f"expected prepared shard {path} to contain a list of dictionaries")
+    return items
+
+
+@beartype
+def _count(value: Any, *, name: str, minimum: int = 0) -> int:
+    """Check a scalar count before conversion, including values read from JSON."""
+    array = _integer_array(np.asarray(value), name=name, dtype=np.int64)
+    if array.ndim != 0 or array.item() < minimum:
+        raise ValueError(f"{name} must be an integer >= {minimum}")
+    return array.item()
+
+
+@beartype
 def load_prepared_shards(
     paths: Sequence[Path], max_examples: int | None = None
 ) -> list[dict[str, Any]]:
-    # Prepared shards are already feature dictionaries. This concatenates shards
-    # and optionally stops early for small validation subsets.
+    """Concatenate packs in input order, optionally taking a validation prefix."""
+    if max_examples is not None:
+        max_examples = _count(max_examples, name="max_examples", minimum=1)
     out: list[dict[str, Any]] = []
     for path in paths:
-        shard = read_pickle(path)
-        if not isinstance(shard, list):
-            raise ValueError(f"expected prepared shard {path} to contain a list")
+        shard = _read_prepared_shard(path)
         out.extend(shard)
         if max_examples is not None and len(out) >= max_examples:
             return out[:max_examples]
     return out
 
 
+@beartype
 def prepared_dimensions(items: Sequence[Mapping[str, Any]]) -> dict[str, int]:
+    """Find padding sizes and require consistent feature widths within a pack."""
     if not items:
         raise ValueError("no prepared examples")
+    sizes = []
+    widths = None
+    for item in items:
+        node_x, edge_x, edges = (np.asarray(item[key]) for key in ("node_x", "edge_x", "edges"))
+        if (
+            node_x.ndim != 2
+            or edge_x.ndim != 2
+            or edges.ndim != 2
+            or edges.shape != (edge_x.shape[0], 2)
+            or min(*node_x.shape, *edge_x.shape) <= 0
+        ):
+            raise ValueError("prepared features must be nonempty matrices aligned with edges")
+        local_widths = (node_x.shape[1], edge_x.shape[1])
+        if widths is not None and local_widths != widths:
+            raise ValueError("inconsistent feature widths within prepared shard")
+        widths = local_widths
+        sizes.append((node_x.shape[0], edge_x.shape[0]))
     return {
         "examples": len(items),
-        "max_nodes": max(np.asarray(item["node_x"]).shape[0] for item in items),
-        "max_edges": max(np.asarray(item["edges"]).shape[0] for item in items),
-        "node_dim": int(np.asarray(items[0]["node_x"]).shape[1]),
-        "edge_dim": int(np.asarray(items[0]["edge_x"]).shape[1]),
+        "max_nodes": max(nodes for nodes, _ in sizes),
+        "max_edges": max(edges for _, edges in sizes),
+        "node_dim": widths[0],
+        "edge_dim": widths[1],
     }
 
 
+@beartype
 def prepared_dimensions_from_metadata(
     path: Path,
 ) -> dict[str, int] | None:
+    """Read either historical sidecar name without opening a potentially large pack.
+
+    Missing dimension metadata falls back to scanning the pack. Present but
+    invalid counts fail instead of silently truncating them.
+    """
     metadata_candidates = [path.with_name(path.name + ".metadata.json")]
     if path.suffix:
         metadata_candidates.append(path.with_suffix(".metadata.json"))
@@ -106,6 +166,8 @@ def prepared_dimensions_from_metadata(
     if metadata_path is None:
         return None
     payload = json.loads(metadata_path.read_text())
+    if not isinstance(payload, Mapping):
+        raise ValueError(f"expected metadata mapping in {metadata_path}")
     dimensions = payload.get("prepared_dimensions")
     if not isinstance(dimensions, Mapping):
         return None
@@ -119,19 +181,19 @@ def prepared_dimensions_from_metadata(
     missing = [key for key in required if key not in dimensions]
     if missing:
         return None
-    return {key: int(dimensions[key]) for key in required}
+    return {key: _count(dimensions[key], name=key, minimum=1) for key in required}
 
 
+@beartype
 def scan_prepared_dimensions(
     paths: Sequence[Path],
 ) -> dict[str, int]:
-    # Streaming training cannot inspect all examples at once, but padding still
-    # needs fixed dimensions. Scan shard metadata cheaply before batching.
+    """Merge pack dimensions, preferring sidecars to a full data scan."""
     merged: dict[str, int] | None = None
     for path in paths:
         dims = prepared_dimensions_from_metadata(path)
         if dims is None:
-            dims = prepared_dimensions(read_pickle(path))
+            dims = prepared_dimensions(_read_prepared_shard(path))
         if merged is None:
             merged = dict(dims)
             continue
@@ -146,171 +208,141 @@ def scan_prepared_dimensions(
     return merged
 
 
+@beartype
 def pad_with_dimensions(
     items: list[dict[str, np.ndarray]], dims: Mapping[str, int]
 ) -> dict[str, np.ndarray]:
+    """Pad a batch to the sizes obtained by scanning the training packs."""
     return features.pad_examples(
         items,
-        max_nodes=int(dims["max_nodes"]),
-        max_edges=int(dims["max_edges"]),
+        max_nodes=dims["max_nodes"],
+        max_edges=dims["max_edges"],
     )
 
 
+@beartype
+def _normalization_moments(
+    accumulator: Mapping[str, Any],
+    prefix: str,
+) -> tuple[np.ndarray, np.ndarray, int]:
+    """Read one field's moments with matching shape and a positive count."""
+    total = np.asarray(accumulator[f"{prefix}_sum"])
+    squares = np.asarray(accumulator[f"{prefix}_sumsq"])
+    expected_ndim = 1 if prefix in {"node", "edge"} else 0
+    for values in (total, squares):
+        if (
+            values.dtype.kind not in "iuf"
+            or values.ndim != expected_ndim
+            or values.size == 0
+            or not np.all(np.isfinite(values))
+        ):
+            raise ValueError(f"invalid {prefix} normalization moments")
+    if total.shape != squares.shape or np.any(squares < 0):
+        raise ValueError(f"invalid {prefix} sum-of-squares shape or values")
+    count = _count(accumulator[f"{prefix}_count"], name=f"{prefix}_count", minimum=1)
+    return total.astype(np.float64), squares.astype(np.float64), count
+
+
+@beartype
 def normalization_accumulator_from_prepared(paths: Sequence[Path]) -> dict[str, object]:
-    # Compute additive normalization sufficient statistics from prepared shards.
-    # These shard-level stats are cheap to merge and avoid one global scan job.
-    node_count = 0
-    edge_count = 0
-    y_count = 0
-    q_count = 0
-    node_sum = node_sumsq = edge_sum = edge_sumsq = None
-    y_sum = y_sumsq = q_sum = q_sumsq = 0.0
+    """Sum each training field in float64, weighting nodes/edges rather than graphs.
+
+    The target moments use the stored, uncentered targets. Per-graph centering
+    happens later in apply_normalization; this preserves the released convention.
+    """
+    totals: dict[str, Any] = {}
     for path in paths:
-        for item in read_pickle(path):
-            node_x = np.asarray(item["node_x"], dtype=np.float64)
-            edge_x = np.asarray(item["edge_x"], dtype=np.float64)
-            y = np.asarray(item["y"], dtype=np.float64)
-            q = np.asarray(item["q"], dtype=np.float64)
-            if node_sum is None:
-                node_sum = np.zeros(node_x.shape[1], dtype=np.float64)
-                node_sumsq = np.zeros(node_x.shape[1], dtype=np.float64)
-                edge_sum = np.zeros(edge_x.shape[1], dtype=np.float64)
-                edge_sumsq = np.zeros(edge_x.shape[1], dtype=np.float64)
-            node_sum += node_x.sum(axis=0)
-            node_sumsq += np.square(node_x).sum(axis=0)
-            edge_sum += edge_x.sum(axis=0)
-            edge_sumsq += np.square(edge_x).sum(axis=0)
-            node_count += int(node_x.shape[0])
-            edge_count += int(edge_x.shape[0])
-            y_sum += float(y.sum())
-            y_sumsq += float(np.square(y).sum())
-            y_count += int(y.size)
-            q_sum += float(q.sum())
-            q_sumsq += float(np.square(q).sum())
-            q_count += int(q.size)
-    if node_sum is None or node_sumsq is None or edge_sum is None or edge_sumsq is None:
+        items = _read_prepared_shard(path)
+        if items:
+            prepared_dimensions(items)
+        for item in items:
+            n, e = len(item["node_x"]), len(item["edge_x"])
+            for prefix, field in (("node", "node_x"), ("edge", "edge_x"), ("y", "y"), ("q", "q")):
+                values = np.asarray(item[field])
+                if values.dtype.kind not in "biuf" or not np.all(np.isfinite(values)):
+                    raise ValueError(f"{path}: {field} must contain finite real values")
+                if field in {"y", "q"} and values.shape != ((e,) if field == "y" else (n,)):
+                    raise ValueError(f"{path}: {field} must match the graph size")
+                values = values.astype(np.float64, copy=False)
+                for suffix, local in (
+                    ("sum", values.sum(axis=0)),
+                    ("sumsq", np.square(values).sum(axis=0)),
+                ):
+                    key = f"{prefix}_{suffix}"
+                    if key not in totals:
+                        totals[key] = np.zeros_like(local)
+                    if totals[key].shape != local.shape:
+                        raise ValueError(f"inconsistent {prefix} feature dimension")
+                    totals[key] += local
+                key = f"{prefix}_count"
+                totals[key] = totals.get(key, 0) + values.shape[0]
+    if not totals:
         raise ValueError("no prepared training examples")
+    for prefix in ("node", "edge", "y", "q"):
+        _normalization_moments(totals, prefix)
     return {
         "stage": "normalization_shard_stats",
         "inputs": [str(path) for path in paths],
-        "node_sum": node_sum.astype(float).tolist(),
-        "node_sumsq": node_sumsq.astype(float).tolist(),
-        "edge_sum": edge_sum.astype(float).tolist(),
-        "edge_sumsq": edge_sumsq.astype(float).tolist(),
-        "y_sum": y_sum,
-        "y_sumsq": y_sumsq,
-        "q_sum": q_sum,
-        "q_sumsq": q_sumsq,
-        "node_count": node_count,
-        "edge_count": edge_count,
-        "y_count": y_count,
-        "q_count": q_count,
+        **json_ready(totals),
     }
 
 
+@beartype
 def merge_normalization_accumulators(
     accumulators: Sequence[Mapping[str, Any]],
 ) -> dict[str, object]:
-    node_sum = node_sumsq = edge_sum = edge_sumsq = None
-    y_sum = y_sumsq = q_sum = q_sumsq = 0.0
-    node_count = edge_count = y_count = q_count = 0
-    inputs: list[str] = []
-    for accumulator in accumulators:
-        local_node_sum = np.asarray(accumulator["node_sum"], dtype=np.float64)
-        local_node_sumsq = np.asarray(accumulator["node_sumsq"], dtype=np.float64)
-        local_edge_sum = np.asarray(accumulator["edge_sum"], dtype=np.float64)
-        local_edge_sumsq = np.asarray(accumulator["edge_sumsq"], dtype=np.float64)
-        if node_sum is None:
-            node_sum = np.zeros_like(local_node_sum)
-            node_sumsq = np.zeros_like(local_node_sumsq)
-            edge_sum = np.zeros_like(local_edge_sum)
-            edge_sumsq = np.zeros_like(local_edge_sumsq)
-        if node_sum.shape != local_node_sum.shape:
-            raise ValueError(
-                f"inconsistent node feature dimension: {node_sum.shape} vs {local_node_sum.shape}"
-            )
-        if edge_sum.shape != local_edge_sum.shape:
-            raise ValueError(
-                f"inconsistent edge feature dimension: {edge_sum.shape} vs {local_edge_sum.shape}"
-            )
-        node_sum += local_node_sum
-        node_sumsq += local_node_sumsq
-        edge_sum += local_edge_sum
-        edge_sumsq += local_edge_sumsq
-        y_sum += float(accumulator["y_sum"])
-        y_sumsq += float(accumulator["y_sumsq"])
-        q_sum += float(accumulator["q_sum"])
-        q_sumsq += float(accumulator["q_sumsq"])
-        node_count += int(accumulator["node_count"])
-        edge_count += int(accumulator["edge_count"])
-        y_count += int(accumulator["y_count"])
-        q_count += int(accumulator["q_count"])
-        inputs.extend(str(path) for path in accumulator.get("inputs", []))
-    if node_sum is None or node_sumsq is None or edge_sum is None or edge_sumsq is None:
+    """Add pack statistics in input order without rereading training arrays."""
+    if not accumulators:
         raise ValueError("no normalization shard stats")
-    return {
-        "stage": "normalization_merged_stats",
-        "inputs": inputs,
-        "node_sum": node_sum.astype(float).tolist(),
-        "node_sumsq": node_sumsq.astype(float).tolist(),
-        "edge_sum": edge_sum.astype(float).tolist(),
-        "edge_sumsq": edge_sumsq.astype(float).tolist(),
-        "y_sum": y_sum,
-        "y_sumsq": y_sumsq,
-        "q_sum": q_sum,
-        "q_sumsq": q_sumsq,
-        "node_count": node_count,
-        "edge_count": edge_count,
-        "y_count": y_count,
-        "q_count": q_count,
-    }
+    totals: dict[str, Any] = {}
+    inputs = []
+    for accumulator in accumulators:
+        for prefix in ("node", "edge", "y", "q"):
+            total, squares, count = _normalization_moments(accumulator, prefix)
+            for suffix, local in (("sum", total), ("sumsq", squares)):
+                key = f"{prefix}_{suffix}"
+                if key not in totals:
+                    totals[key] = np.zeros_like(local)
+                if totals[key].shape != local.shape:
+                    raise ValueError(f"inconsistent {prefix} feature dimension")
+                totals[key] += local
+            key = f"{prefix}_count"
+            totals[key] = totals.get(key, 0) + count
+        inputs.extend(str(path) for path in accumulator.get("inputs", []))
+    return {"stage": "normalization_merged_stats", "inputs": inputs, **json_ready(totals)}
 
 
+@beartype
 def finalize_normalization_stats(
     accumulator: Mapping[str, Any],
     *,
     std_floor: float,
 ) -> dict[str, object]:
-    node_sum = np.asarray(accumulator["node_sum"], dtype=np.float64)
-    node_sumsq = np.asarray(accumulator["node_sumsq"], dtype=np.float64)
-    edge_sum = np.asarray(accumulator["edge_sum"], dtype=np.float64)
-    edge_sumsq = np.asarray(accumulator["edge_sumsq"], dtype=np.float64)
-    node_count = int(accumulator["node_count"])
-    edge_count = int(accumulator["edge_count"])
-    y_count = int(accumulator["y_count"])
-    q_count = int(accumulator["q_count"])
-    y_sum = float(accumulator["y_sum"])
-    y_sumsq = float(accumulator["y_sumsq"])
-    q_sum = float(accumulator["q_sum"])
-    q_sumsq = float(accumulator["q_sumsq"])
-    if node_count <= 0 or edge_count <= 0 or y_count <= 0 or q_count <= 0:
-        raise ValueError("normalization counts must be positive")
-    node_mean = node_sum / max(node_count, 1)
-    edge_mean = edge_sum / max(edge_count, 1)
-    node_var = np.maximum(node_sumsq / max(node_count, 1) - node_mean * node_mean, 0.0)
-    edge_var = np.maximum(edge_sumsq / max(edge_count, 1) - edge_mean * edge_mean, 0.0)
-    y_mean = y_sum / max(y_count, 1)
-    q_mean = q_sum / max(q_count, 1)
-    y_scale = float(np.sqrt(max(y_sumsq / max(y_count, 1) - y_mean * y_mean, 0.0)) + 1e-6)
-    q_y_scale = float(np.sqrt(max(q_sumsq / max(q_count, 1) - q_mean * q_mean, 0.0)) + 1e-6)
-    floor = max(float(std_floor), 1e-12)
-    return {
-        "node_mean": node_mean.astype(float).tolist(),
-        "node_std": np.maximum(np.sqrt(node_var), floor).astype(float).tolist(),
-        "edge_mean": edge_mean.astype(float).tolist(),
-        "edge_std": np.maximum(np.sqrt(edge_var), floor).astype(float).tolist(),
-        "normalization_std_floor": floor,
-        "y_scale": y_scale,
-        "q_y_scale": q_y_scale,
-        "node_count": node_count,
-        "edge_count": edge_count,
-    }
+    """Convert moments to saved means/scales using the existing variance floors."""
+    if not np.isfinite(std_floor) or std_floor < 0:
+        raise ValueError("std_floor must be finite and nonnegative")
+    floor = max(std_floor, 1e-12)
+    stats: dict[str, Any] = {"normalization_std_floor": floor}
+    for prefix in ("node", "edge", "y", "q"):
+        total, squares, count = _normalization_moments(accumulator, prefix)
+        mean = total / count
+        variance = np.maximum(squares / count - mean * mean, 0.0)
+        if prefix in {"node", "edge"}:
+            stats[f"{prefix}_mean"] = mean.tolist()
+            stats[f"{prefix}_std"] = np.maximum(np.sqrt(variance), floor).tolist()
+            stats[f"{prefix}_count"] = count
+        else:
+            stats["y_scale" if prefix == "y" else "q_y_scale"] = (np.sqrt(variance) + 1e-6).item()
+    return stats
 
 
+@beartype
 def normalized_shard(path: Path, stats: Mapping[str, Any]) -> list[dict[str, np.ndarray]]:
-    return features.apply_normalization(read_pickle(path), stats)
+    """Apply saved training statistics to one ordered prepared pack."""
+    return features.apply_normalization(_read_prepared_shard(path), stats)
 
 
+@beartype
 def iter_training_batches(
     paths: Sequence[Path],
     stats: Mapping[str, Any],
@@ -320,26 +352,43 @@ def iter_training_batches(
     steps: int,
     seed: int,
 ) -> Iterable[dict[str, np.ndarray]]:
-    # Keep counterfactual groups intact so their consistency term is observable
-    # inside a batch. Ordinary examples remain independent singleton units.
+    """Shuffle packs and examples deterministically, keeping sampling views together.
+
+    Pending groups and ordinary examples carry across pack/epoch boundaries.
+    Groups have one anchor and one common size that must divide the batch size.
+    """
+    batch_size = _count(batch_size, name="batch_size", minimum=1)
+    steps = _count(steps, name="steps")
+    if steps == 0:
+        return
+    if not paths:
+        raise ValueError("no training shards")
     rng = np.random.default_rng(seed)
     produced = 0
     grouped_pending: list[list[dict[str, np.ndarray]]] = []
     singleton_pending: list[dict[str, np.ndarray]] = []
+    group_size = None
 
     def units(
         shard: list[dict[str, np.ndarray]],
     ) -> tuple[list[list[dict[str, np.ndarray]]], list[dict[str, np.ndarray]]]:
+        """Collect paired views before shuffling so anchors stay in the batch."""
+        nonlocal group_size
         grouped: dict[int, list[dict[str, np.ndarray]]] = {}
         singletons: list[dict[str, np.ndarray]] = []
         for item in shard:
-            group = int(np.asarray(item.get("counterfactual_group", -1)))
+            group = _count(
+                item.get("counterfactual_group", -1), name="counterfactual_group", minimum=-1
+            )
             if group < 0:
                 singletons.append(item)
             else:
                 grouped.setdefault(group, []).append(item)
         groups = list(grouped.values())
         for group_items in groups:
+            if group_size is not None and len(group_items) != group_size:
+                raise ValueError("counterfactual training groups must all have the same size")
+            group_size = len(group_items)
             anchors = sum(
                 float(np.asarray(item.get("counterfactual_anchor", 0.0))) > 0.0
                 for item in group_items
@@ -354,18 +403,19 @@ def iter_training_batches(
         return groups, singletons
 
     while produced < steps:
+        has_examples = False
         for path_index in rng.permutation(len(paths)):
             shard = normalized_shard(paths[int(path_index)], stats)
             if not shard:
                 continue
+            has_examples = True
             groups, singletons = units(shard)
             grouped_pending.extend(groups[int(index)] for index in rng.permutation(len(groups)))
             singleton_pending.extend(
                 singletons[int(index)] for index in rng.permutation(len(singletons))
             )
             while grouped_pending:
-                group_size = len(grouped_pending[0])
-                groups_per_batch = batch_size // group_size
+                groups_per_batch = batch_size // len(grouped_pending[0])
                 if len(grouped_pending) < groups_per_batch:
                     break
                 batch_groups = grouped_pending[:groups_per_batch]
@@ -382,9 +432,13 @@ def iter_training_batches(
                 produced += 1
                 if produced >= steps:
                     return
+        if not has_examples:
+            raise ValueError("all training shards are empty")
 
 
+@beartype
 def stage_input_paths(paths: Sequence[Path], cache_dir: Path, *, label: str) -> list[Path]:
+    """Copy each distinct source once to local disk, preserving repeated references."""
     destination_dir = cache_dir / label
     destination_dir.mkdir(parents=True)
     unique_sources = list(dict.fromkeys(path.resolve() for path in paths))
@@ -397,18 +451,13 @@ def stage_input_paths(paths: Sequence[Path], cache_dir: Path, *, label: str) -> 
             f"bytes including reserve, have {free_bytes} bytes in {destination_dir}"
         )
     started = time.time()
-    print(
-        json.dumps(
-            {
-                "stage": "stage_training_inputs",
-                "event": "start",
-                "label": label,
-                "files": len(unique_sources),
-                "references": len(paths),
-                "bytes": total_bytes,
-            }
-        ),
-        flush=True,
+    _report(
+        "stage_training_inputs",
+        event="start",
+        label=label,
+        files=len(unique_sources),
+        references=len(paths),
+        bytes=total_bytes,
     )
     staged_by_source: dict[Path, Path] = {}
     for index, source in enumerate(unique_sources):
@@ -417,43 +466,41 @@ def stage_input_paths(paths: Sequence[Path], cache_dir: Path, *, label: str) -> 
         staged_by_source[source] = destination
         completed = index + 1
         if completed == 1 or completed == len(unique_sources) or completed % 16 == 0:
-            print(
-                json.dumps(
-                    {
-                        "stage": "stage_training_inputs",
-                        "event": "progress",
-                        "label": label,
-                        "completed_files": completed,
-                        "files": len(unique_sources),
-                        "elapsed_seconds": round(time.time() - started, 3),
-                    }
-                ),
-                flush=True,
+            _report(
+                "stage_training_inputs",
+                event="progress",
+                label=label,
+                completed_files=completed,
+                files=len(unique_sources),
+                elapsed_seconds=round(time.time() - started, 3),
             )
-    print(
-        json.dumps(
-            {
-                "stage": "stage_training_inputs",
-                "event": "done",
-                "label": label,
-                "files": len(unique_sources),
-                "references": len(paths),
-                "bytes": total_bytes,
-                "elapsed_seconds": round(time.time() - started, 3),
-            }
-        ),
-        flush=True,
+    _report(
+        "stage_training_inputs",
+        event="done",
+        label=label,
+        files=len(unique_sources),
+        references=len(paths),
+        bytes=total_bytes,
+        elapsed_seconds=round(time.time() - started, 3),
     )
     return [staged_by_source[path.resolve()] for path in paths]
 
 
-def edge_coverage(truth: np.ndarray, mean: np.ndarray, sd: np.ndarray, z: float) -> float:
+@jaxtyped(typechecker=beartype)
+def edge_coverage(
+    truth: Shaped[np.ndarray, " edges"],  # noqa: F722
+    mean: Shaped[np.ndarray, " edges"],  # noqa: F722
+    sd: Shaped[np.ndarray, " edges"],  # noqa: F722
+    z: float,
+) -> float:
+    """Fraction inside a pointwise interval, excluding nonfinite or zero-SD edges."""
     finite = np.isfinite(truth) & np.isfinite(mean) & np.isfinite(sd) & (sd > 0.0)
     if not np.any(finite):
         return float("nan")
     return float(np.mean(np.abs(truth[finite] - mean[finite]) <= z * sd[finite]))
 
 
+@beartype
 def prepare_raw_examples(
     raw_examples: list[dict[str, Any]],
     run_config: train.DREEMSTrainConfig,
@@ -489,6 +536,7 @@ def prepare_raw_examples(
     return prepared, skipped, rows
 
 
+@beartype
 def raw_example_window(
     paths: Sequence[Path],
     *,
@@ -497,10 +545,9 @@ def raw_example_window(
 ) -> list[tuple[Path, int, list[dict[str, Any]]]]:
     """Read one contiguous example window from one or more ordered raw packs."""
 
-    if start_index < 0:
-        raise ValueError("start-index must be non-negative")
-    if max_examples is not None and max_examples <= 0:
-        raise ValueError("max-examples must be positive")
+    start_index = _count(start_index, name="start-index")
+    if max_examples is not None:
+        max_examples = _count(max_examples, name="max-examples", minimum=1)
 
     selected: list[tuple[Path, int, list[dict[str, Any]]]] = []
     skipped = 0
@@ -533,14 +580,14 @@ def raw_example_window(
     return selected
 
 
+@beartype
 def command_prepare_shard(args: argparse.Namespace) -> None:
-    # Raw simulation shard -> prepared feature shard. The sidecar metadata is
-    # for quick/sanity checks without loading the pickle.
+    """Prepare a raw pack (or selected example) and its dimension/audit sidecar."""
     run_config = dreems_config(load_config(args.config))
     raw_examples = load_examples(args.input)
     index_offset = 0
     if args.example_index is not None:
-        index_offset = int(args.example_index)
+        index_offset = _count(args.example_index, name="example-index")
         if not 0 <= index_offset < len(raw_examples):
             raise IndexError(
                 f"example index {index_offset} is outside {args.input} "
@@ -569,20 +616,16 @@ def command_prepare_shard(args: argparse.Namespace) -> None:
             "rows": rows,
         },
     )
-    print(
-        json.dumps(
-            {
-                "stage": "prepare_shard",
-                "output": str(args.output),
-                "raw_examples": len(raw_examples),
-                "examples": len(prepared),
-                "skipped_unconditionable_examples": len(skipped),
-            }
-        ),
-        flush=True,
+    _report(
+        "prepare_shard",
+        output=str(args.output),
+        raw_examples=len(raw_examples),
+        examples=len(prepared),
+        skipped_unconditionable_examples=len(skipped),
     )
 
 
+@beartype
 def command_prepare_batch(args: argparse.Namespace) -> None:
     """Prepare several independent raw shards into one ordered training pack."""
 
@@ -593,7 +636,7 @@ def command_prepare_batch(args: argparse.Namespace) -> None:
     raw_example_count = 0
     windows = raw_example_window(
         args.inputs,
-        start_index=int(args.start_index),
+        start_index=args.start_index,
         max_examples=args.max_examples,
     )
     for path, index_offset, raw_examples in windows:
@@ -625,27 +668,23 @@ def command_prepare_batch(args: argparse.Namespace) -> None:
             "rows": rows,
         },
     )
-    print(
-        json.dumps(
-            {
-                "stage": "prepare_batch",
-                "output": str(args.output),
-                "source_shards": len(windows),
-                "raw_examples": raw_example_count,
-                "examples": len(prepared),
-                "skipped_unconditionable_examples": len(skipped),
-            }
-        ),
-        flush=True,
+    _report(
+        "prepare_batch",
+        output=str(args.output),
+        source_shards=len(windows),
+        raw_examples=raw_example_count,
+        examples=len(prepared),
+        skipped_unconditionable_examples=len(skipped),
     )
 
 
+@beartype
 def command_prepare_counterfactual(args: argparse.Namespace) -> None:
     """Prepare four paired masks from one reusable raw covariance example."""
 
     run_config = dreems_config(load_config(args.config))
     selected = counterfactual.read_selection(args.selection)
-    slot = int(args.slot)
+    slot = _count(args.slot, name="slot")
     if slot < 0 or slot >= len(selected):
         raise IndexError(f"counterfactual slot {slot} is outside [0, {len(selected)})")
     base = selected[slot]
@@ -702,36 +741,28 @@ def command_prepare_counterfactual(args: argparse.Namespace) -> None:
             "rows": rows,
         },
     )
-    print(
-        json.dumps(
-            {
-                "stage": "prepare_counterfactual",
-                "slot": slot,
-                "source": str(source),
-                "examples": len(prepared),
-                "output": str(args.output),
-            },
-            sort_keys=True,
-        ),
-        flush=True,
+    _report(
+        "prepare_counterfactual",
+        slot=slot,
+        source=str(source),
+        examples=len(prepared),
+        output=str(args.output),
     )
 
 
+@beartype
 def command_pack_prepared(args: argparse.Namespace) -> None:
+    """Repack an ordered window of prepared files without recomputing features."""
     inputs = required_input_paths(
         args.inputs,
         args.input_manifest,
         argument_name="--inputs",
     )
-    start = int(args.start_index)
-    if start < 0:
-        raise ValueError("start-index must be non-negative")
+    start = _count(args.start_index, name="start-index")
     if args.max_inputs is None:
         stop = len(inputs)
     else:
-        if int(args.max_inputs) <= 0:
-            raise ValueError("max-inputs must be positive")
-        stop = min(len(inputs), start + int(args.max_inputs))
+        stop = min(len(inputs), start + _count(args.max_inputs, name="max-inputs", minimum=1))
     selected = inputs[start:stop]
     if not selected:
         raise ValueError(f"no prepared inputs selected from {len(inputs)} paths at index {start}")
@@ -751,36 +782,30 @@ def command_pack_prepared(args: argparse.Namespace) -> None:
             "prepared_dimensions": dimensions,
         },
     )
-    print(
-        json.dumps(
-            {
-                "stage": "pack_prepared",
-                "output": str(args.output),
-                "source_shards": len(selected),
-                "examples": len(prepared),
-            }
-        ),
-        flush=True,
+    _report(
+        "pack_prepared",
+        output=str(args.output),
+        source_shards=len(selected),
+        examples=len(prepared),
     )
 
 
+@beartype
 def command_normalization_shard_stats(args: argparse.Namespace) -> None:
+    """Write additive training moments for one group of prepared packs."""
     stats = normalization_accumulator_from_prepared(args.inputs)
     write_json(args.output, stats)
-    print(
-        json.dumps(
-            {
-                "stage": "normalization_shard_stats",
-                "output": str(args.output),
-                "node_count": stats["node_count"],
-                "edge_count": stats["edge_count"],
-            }
-        ),
-        flush=True,
+    _report(
+        "normalization_shard_stats",
+        output=str(args.output),
+        node_count=stats["node_count"],
+        edge_count=stats["edge_count"],
     )
 
 
+@beartype
 def command_merge_normalization(args: argparse.Namespace) -> None:
+    """Merge training-only moments and write the normalization used by the model."""
     cfg = load_config(args.config)
     run_config = dreems_config(cfg)
     inputs = required_input_paths(
@@ -796,24 +821,23 @@ def command_merge_normalization(args: argparse.Namespace) -> None:
         std_floor=run_config.features.normalization_std_floor,
     )
     write_json(args.output, stats)
-    print(
-        json.dumps(
-            {
-                "stage": "merge_normalization",
-                "output": str(args.output),
-                "node_count": stats["node_count"],
-                "edge_count": stats["edge_count"],
-                "y_scale": stats["y_scale"],
-                "q_y_scale": stats["q_y_scale"],
-            }
-        ),
-        flush=True,
+    _report(
+        "merge_normalization",
+        output=str(args.output),
+        node_count=stats["node_count"],
+        edge_count=stats["edge_count"],
+        y_scale=stats["y_scale"],
+        q_y_scale=stats["q_y_scale"],
     )
 
 
+@beartype
 def _command_train(args: argparse.Namespace, cache_dir: Path | None) -> None:
-    # Train from prepared shards and write one self-contained checkpoint plus a
-    # small JSON summary for Snakemake and later inspection.
+    """Train from prepared packs, with explicit initialization and validation data.
+
+    A resumed model keeps its normalization. Gate-only training may also retain
+    its SD calibration. Core and feature metadata must match before training.
+    """
     cfg = load_config(args.config)
     run_config = dreems_config(cfg)
     inputs = required_input_paths(
@@ -916,6 +940,7 @@ def _command_train(args: argparse.Namespace, cache_dir: Path | None) -> None:
         row: Mapping[str, Any],
         metadata_arrays: Mapping[str, np.ndarray],
     ) -> None:
+        """Keep the best completed validation step available during a long run."""
         if row.get("validation_best") is not True:
             return
         best_path = args.output.with_name("checkpoint.best.dreems.zip")
@@ -966,6 +991,7 @@ def _command_train(args: argparse.Namespace, cache_dir: Path | None) -> None:
         row: Mapping[str, Any],
         metadata_arrays: Mapping[str, np.ndarray],
     ) -> None:
+        """Append each completed log row before updating the best checkpoint."""
         with history_path.open("a") as handle:
             handle.write(json.dumps(json_ready(row), sort_keys=True) + "\n")
         best_checkpoint_callback(step, params, losses, row, metadata_arrays)
@@ -1057,10 +1083,12 @@ def _command_train(args: argparse.Namespace, cache_dir: Path | None) -> None:
             "restored_best_validation": train_result.restored_best_validation,
         },
     )
-    print(json.dumps({"stage": "train", "output": str(args.output)}), flush=True)
+    _report("train", output=str(args.output))
 
 
+@beartype
 def command_train(args: argparse.Namespace) -> None:
+    """Train, cleaning up only the new local staging directory owned by this run."""
     if args.cache_dir is None:
         _command_train(args, None)
         return
@@ -1073,39 +1101,36 @@ def command_train(args: argparse.Namespace) -> None:
         shutil.rmtree(cache_dir, ignore_errors=True)
 
 
+@beartype
 def command_evaluate(args: argparse.Namespace) -> None:
-    # Evaluate prepared shards with the saved checkpoint. Examples are sorted by
-    # node count inside each batch to reduce padding waste.
+    """Evaluate in graph-size order while retaining each input example's identity.
+
+    Replicate IDs follow input order across packs, not the padded batch order.
+    Means and SDs are exported in log-rate units, with stored SD calibration.
+    """
+    batch_size = _count(args.batch_size, name="batch_size", minimum=1)
+    replicate = _count(args.replicate_offset, name="replicate_offset")
+    max_examples = (
+        None
+        if args.max_examples is None
+        else _count(args.max_examples, name="max_examples", minimum=1)
+    )
     started = time.time()
     inputs = required_input_paths(
         args.inputs,
         args.input_manifest,
         argument_name="--inputs",
     )
-    print(
-        json.dumps(
-            {
-                "stage": "evaluate",
-                "event": "start",
-                "checkpoint": str(args.checkpoint),
-                "inputs": [str(path) for path in inputs],
-                "batch_size": int(args.batch_size),
-                "max_examples": args.max_examples,
-            }
-        ),
-        flush=True,
+    _report(
+        "evaluate",
+        event="start",
+        checkpoint=str(args.checkpoint),
+        inputs=[str(path) for path in inputs],
+        batch_size=int(args.batch_size),
+        max_examples=args.max_examples,
     )
     loaded = checkpoints.load_checkpoint(args.checkpoint)
-    print(
-        json.dumps(
-            {
-                "stage": "evaluate",
-                "event": "checkpoint_loaded",
-                "elapsed_seconds": round(time.time() - started, 3),
-            }
-        ),
-        flush=True,
-    )
+    _report("evaluate", event="checkpoint_loaded", elapsed_seconds=round(time.time() - started, 3))
     stats = loaded.normalization
     rows: list[dict[str, Any]] = []
     prediction_replicates: list[int] = []
@@ -1117,43 +1142,26 @@ def command_evaluate(args: argparse.Namespace) -> None:
     q_truth_parts: list[np.ndarray] = []
     q_mean_parts: list[np.ndarray] = []
     q_sd_parts: list[np.ndarray] = []
-    replicate = int(args.replicate_offset)
-    max_examples = None if args.max_examples is None else int(args.max_examples)
     for shard_index, path in enumerate(inputs):
         if max_examples is not None and len(rows) >= max_examples:
             break
         shard_started = time.time()
-        print(
-            json.dumps(
-                {
-                    "stage": "evaluate",
-                    "event": "shard_start",
-                    "shard_index": shard_index,
-                    "input": str(path),
-                }
-            ),
-            flush=True,
-        )
+        _report("evaluate", event="shard_start", shard_index=shard_index, input=str(path))
         prepared = normalized_shard(path, stats)
         indexed = list(enumerate(prepared))
         if max_examples is not None:
             indexed = indexed[: max(0, max_examples - len(rows))]
         indexed = sorted(indexed, key=lambda pair: pair[1]["node_x"].shape[0])
-        print(
-            json.dumps(
-                {
-                    "stage": "evaluate",
-                    "event": "shard_loaded",
-                    "shard_index": shard_index,
-                    "examples": len(indexed),
-                    "elapsed_seconds": round(time.time() - shard_started, 3),
-                }
-            ),
-            flush=True,
+        _report(
+            "evaluate",
+            event="shard_loaded",
+            shard_index=shard_index,
+            examples=len(indexed),
+            elapsed_seconds=round(time.time() - shard_started, 3),
         )
-        total_batches = math.ceil(len(indexed) / int(args.batch_size))
-        for batch_index, start in enumerate(range(0, len(indexed), int(args.batch_size)), start=1):
-            chunk = indexed[start : start + int(args.batch_size)]
+        total_batches = math.ceil(len(indexed) / batch_size)
+        for batch_index, start in enumerate(range(0, len(indexed), batch_size), start=1):
+            chunk = indexed[start : start + batch_size]
             local_indices = [index for index, _item in chunk]
             arrays = features.pad_examples([item for _index, item in chunk])
             edge_mean, edge_logvar, q_mean, q_logvar = dreems_model.predict(
@@ -1221,41 +1229,29 @@ def command_evaluate(args: argparse.Namespace) -> None:
                     }
                 )
             if batch_index == 1 or batch_index == total_batches or batch_index % 10 == 0:
-                print(
-                    json.dumps(
-                        {
-                            "stage": "evaluate",
-                            "event": "batch_done",
-                            "shard_index": shard_index,
-                            "batch": batch_index,
-                            "batches": total_batches,
-                            "rows_so_far": len(rows),
-                            "elapsed_seconds": round(time.time() - shard_started, 3),
-                        }
-                    ),
-                    flush=True,
+                _report(
+                    "evaluate",
+                    event="batch_done",
+                    shard_index=shard_index,
+                    batch=batch_index,
+                    batches=total_batches,
+                    rows_so_far=len(rows),
+                    elapsed_seconds=round(time.time() - shard_started, 3),
                 )
-        print(
-            json.dumps(
-                {
-                    "stage": "evaluate",
-                    "event": "shard_done",
-                    "shard_index": shard_index,
-                    "rows_so_far": len(rows),
-                    "elapsed_seconds": round(time.time() - shard_started, 3),
-                }
-            ),
-            flush=True,
+        _report(
+            "evaluate",
+            event="shard_done",
+            shard_index=shard_index,
+            rows_so_far=len(rows),
+            elapsed_seconds=round(time.time() - shard_started, 3),
         )
+        replicate += len(prepared)
     if not rows:
         raise ValueError("no evaluation rows")
     rows.sort(key=lambda row: int(row["replicate"]))
     args.output_dir.mkdir(parents=True, exist_ok=True)
     csv_path = args.output_dir / "summary.csv"
-    with csv_path.open("w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
-        writer.writeheader()
-        writer.writerows(json_ready(rows))
+    write_csv(csv_path, json_ready(rows))
     means = summarize_numeric_rows(rows)
     write_json(
         args.output_dir / "summary.json",
@@ -1270,8 +1266,7 @@ def command_evaluate(args: argparse.Namespace) -> None:
         },
     )
     if args.predictions_output is not None:
-        args.predictions_output.parent.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(
+        write_npz(
             args.predictions_output,
             replicate=np.asarray(prediction_replicates, dtype=np.int64),
             edge_offsets=np.asarray(edge_offsets, dtype=np.int64),
@@ -1283,23 +1278,19 @@ def command_evaluate(args: argparse.Namespace) -> None:
             q_mean=np.concatenate(q_mean_parts).astype(np.float32, copy=False),
             q_sd=np.concatenate(q_sd_parts).astype(np.float32, copy=False),
         )
-    print(
-        json.dumps(
-            {
-                "stage": "evaluate",
-                "event": "done",
-                "examples": len(rows),
-                "max_examples": max_examples,
-                "output": str(csv_path),
-                "elapsed_seconds": round(time.time() - started, 3),
-            }
-        ),
-        flush=True,
+    _report(
+        "evaluate",
+        event="done",
+        examples=len(rows),
+        max_examples=max_examples,
+        output=str(csv_path),
+        elapsed_seconds=round(time.time() - started, 3),
     )
 
 
+@beartype
 def summarize_numeric_rows(rows: Sequence[Mapping[str, Any]]) -> dict[str, float]:
-    # Summaries are intentionally generic: any numeric row field gets mean/sd.
+    """Summarize each numeric field over its finite rows using population SD."""
     out: dict[str, float] = {}
     keys = sorted({key for row in rows for key in row})
     for key in keys:
@@ -1319,8 +1310,9 @@ def summarize_numeric_rows(rows: Sequence[Mapping[str, Any]]) -> dict[str, float
     return out
 
 
+@beartype
 def command_aggregate_evaluations(args: argparse.Namespace) -> None:
-    # Merge per-shard evaluation JSON files into one CSV/JSON report.
+    """Join evaluation reports and assign global IDs in the declared input order."""
     rows: list[dict[str, Any]] = []
     for path in args.inputs:
         payload = json.loads(path.read_text())
@@ -1331,15 +1323,7 @@ def command_aggregate_evaluations(args: argparse.Namespace) -> None:
         row.setdefault("replicate_global", index)
     rows.sort(key=lambda row: int(row["replicate_global"]))
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    fieldnames = list(rows[0])
-    for row in rows[1:]:
-        for key in row:
-            if key not in fieldnames:
-                fieldnames.append(key)
-    with (args.output_dir / "summary.csv").open("w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(json_ready(rows))
+    write_csv(args.output_dir / "summary.csv", json_ready(rows))
     write_json(
         args.output_dir / "summary.json",
         {
@@ -1350,10 +1334,12 @@ def command_aggregate_evaluations(args: argparse.Namespace) -> None:
             "inputs": [str(path) for path in args.inputs],
         },
     )
-    print(json.dumps({"stage": "aggregate_evaluations", "examples": len(rows)}), flush=True)
+    _report("aggregate_evaluations", examples=len(rows))
 
 
+@beartype
 def build_parser() -> argparse.ArgumentParser:
+    """Expose separate workers so Snakemake can schedule and reuse each stage."""
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -1437,7 +1423,9 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+@beartype
 def main(argv: Sequence[str] | None = None) -> None:
+    """Dispatch one pipeline worker; Snakemake owns scheduling and retries."""
     args = build_parser().parse_args(argv)
     args.func(args)
 

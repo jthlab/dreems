@@ -10,11 +10,14 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from beartype import beartype
 
 from dreems import simulation, simulation_config, workflow_io
 
 
+@beartype
 def example_metadata(example: Mapping[str, Any], index: int) -> dict[str, Any]:
+    """Summarize an example for pack sidecars without storing its large arrays."""
     graph = example["graph"]
     edges = np.asarray(graph["edges"], dtype=np.int32)
     positions = np.asarray(example["active_positions"], dtype=np.float64)
@@ -96,6 +99,7 @@ def example_metadata(example: Mapping[str, Any], index: int) -> dict[str, Any]:
     }
 
 
+@beartype
 def generate_example(
     *,
     config_path: Path,
@@ -103,16 +107,18 @@ def generate_example(
     example_id: int,
     output: Path,
 ) -> None:
+    """Generate one example using a seed determined by its split and index."""
+    if example_id < 0:
+        raise ValueError("example_id must be nonnegative")
     config = workflow_io.load_config(config_path)
     sim = simulation_config.simulation_config(config)
-    base_seed = int(sim.get("seed", config.get("seed", 12001)))
     seed_shard, sampling_mode = simulation.counterfactual_sampling_assignment(
         sim,
         example_id,
         split=split,
     )
     seed = simulation.raw_example_seed(
-        base_seed=base_seed,
+        base_seed=sim["seed"],
         split=split,
         shard=seed_shard,
         index=0,
@@ -141,6 +147,7 @@ def generate_example(
     print(json.dumps({"stage": "generate_raw_example", "output": str(output)}), flush=True)
 
 
+@beartype
 def pack_examples(
     *,
     inputs: Sequence[Path],
@@ -152,7 +159,12 @@ def pack_examples(
     start_index: int,
 ) -> None:
     """Combine ordered one-example worker outputs into a reusable raw pack."""
-
+    if pack_index < 0 or start_index < 0:
+        raise ValueError("pack_index and start_index must be nonnegative")
+    if split not in simulation.SPLIT_SEED_OFFSETS:
+        raise ValueError(f"unknown raw generation split {split!r}")
+    config = workflow_io.load_config(config_path)
+    sim = simulation_config.simulation_config(config)
     examples: list[dict[str, Any]] = []
     rows: list[dict[str, Any]] = []
     for offset, path in enumerate(inputs):
@@ -170,8 +182,6 @@ def pack_examples(
     if not examples:
         raise ValueError("cannot create an empty raw pack")
     workflow_io.write_pickle(output, examples)
-    config = workflow_io.load_config(config_path)
-    sim = simulation_config.simulation_config(config)
     workflow_io.write_json(
         metadata,
         {
@@ -181,7 +191,7 @@ def pack_examples(
             "start_index": start_index,
             "stop_index": start_index + len(examples),
             "examples": len(examples),
-            "base_seed": int(sim.get("seed", config.get("seed", 12001))),
+            "base_seed": sim["seed"],
             "simulation_config": str(config_path),
             "simulation_config_sha256": hashlib.sha256(config_path.read_bytes()).hexdigest(),
             "rows": rows,
@@ -201,7 +211,9 @@ def pack_examples(
     )
 
 
+@beartype
 def build_parser() -> argparse.ArgumentParser:
+    """CLI used by the raw-generation and packing Snakemake rules."""
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -222,7 +234,9 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+@beartype
 def main(argv: Sequence[str] | None = None) -> None:
+    """Run one corpus task; Snakemake manages parallel workers and reuse."""
     args = build_parser().parse_args(argv)
     if args.command == "generate":
         generate_example(

@@ -97,6 +97,57 @@ def test_paired_stats_keeps_mse_when_correlation_is_undefined() -> None:
     assert summary["mse_advantage"] == pytest.approx(0.2)
 
 
+def test_merge_scenario_snp_rows_requires_a_paired_design(tmp_path: Path) -> None:
+    low = tmp_path / "low.csv"
+    high = tmp_path / "high.csv"
+    common = {
+        "index": 0,
+        "scenario_truth": "barrier",
+        "scenario_mask": "full",
+        "scenario_replicate": 0,
+        "scenario_seed": 10,
+        "num_nodes": 96,
+        "num_edges": 249,
+        "num_samples": 960,
+        "num_sampled_nodes": 96,
+        "dreems_edge_log_corr": 0.8,
+        "dreems_edge_log_mse": 0.3,
+        "dreems_edge_log_rms": 0.5,
+        "dreems_map_edge_log_corr": 0.75,
+        "dreems_map_edge_log_mse": 0.25,
+        "dreems_map_edge_log_rms": 0.45,
+        "feems_edge_log_corr": 0.6,
+        "feems_edge_log_mse": 0.4,
+        "feems_edge_log_rms": 0.4,
+    }
+    benchmark_gallery.write_rows(low, [{**common, "num_snps": 75}])
+    benchmark_gallery.write_rows(
+        high,
+        [
+            {
+                **common,
+                "num_snps": 1000,
+                "dreems_edge_log_corr": 0.9,
+                "dreems_edge_log_mse": 0.2,
+            }
+        ],
+    )
+
+    rows = benchmark_gallery.merge_scenario_snp_rows(low, high)
+
+    assert rows[0]["dreems_corr_gain"] == pytest.approx(0.1)
+    assert rows[0]["dreems_mse_reduction"] == pytest.approx(0.1)
+    assert rows[0]["low_snps"] == 75
+    assert rows[0]["high_snps"] == 1000
+
+    benchmark_gallery.write_rows(
+        high,
+        [{**common, "scenario_mask": "left_missing", "num_snps": 1000}],
+    )
+    with pytest.raises(ValueError, match="scenario_mask"):
+        benchmark_gallery.merge_scenario_snp_rows(low, high)
+
+
 def test_prediction_slice_uses_replicate_offsets(tmp_path: Path) -> None:
     path = tmp_path / "predictions.npz"
     np.savez_compressed(
@@ -202,7 +253,14 @@ def test_h2h_example_figure_smoke(tmp_path: Path) -> None:
         dreems_map=truth * 0.8,
         sample_count=np.array([1.0, 0.0, 2.0]),
     )
-    np.savez_compressed(feems_path, feems=truth * 0.6)
+    np.savez_compressed(
+        feems_path,
+        feems=truth * 0.6,
+        positions=positions,
+        edges=edges,
+        truth=truth,
+        sample_count=np.array([1.0, 0.0, 2.0]),
+    )
     rows = {
         0: {
             "index": "0",

@@ -79,9 +79,28 @@ On Great Lakes, replace the local profile with `workflow/profiles/slurm`.
 The Snakemake workflow in `workflow/` generates each simulation in an
 independent job, prepares diffusion-band and all-pair conditioner features per
 example, computes mergeable normalization statistics, trains JAX models, and
-evaluates held-out examples independently. One-example worker outputs are
+evaluates simulations. One-example worker outputs are
 temporary: Snakemake compacts them into reusable raw packs before feature
 preparation, avoiding hundreds of thousands of small scratch files.
+
+`workflow/release.Snakefile` is the current training entry point. It builds raw
+packs, sampling views, the core model, and the frozen-core surface gate in one
+DAG. It does not need an older checkpoint or pre-existing sampling-view files.
+Both launchers use this workflow and `workflow/config.release.yaml` by default.
+Set `outdir` to scratch on Great Lakes and `publish_dir` to a durable directory.
+
+```bash
+uv run --frozen --no-sync snakemake all \
+    -s workflow/release.Snakefile \
+    --configfile workflow/config.release.yaml \
+    --profile workflow/profiles/local \
+    --config outdir=/path/to/work publish_dir=/path/to/models
+```
+
+This is the full production-sized training recipe, not a quick demonstration.
+For a small smoke run, use `workflow/Snakefile` with `workflow/config.example.yaml`.
+The training workflow's evaluation includes examples used for early stopping;
+independent performance estimates come from the separate H2H workflow.
 
 The production lineage is recorded in separate configs:
 
@@ -145,8 +164,8 @@ workflow/run_maturin.sh
 ```
 
 Override resources with `DREEMS_LOCAL_CORES`, `DREEMS_LOCAL_MEM_MB`, and
-`DREEMS_LOCAL_GPUS`. Set `DREEMS_CONFIG` to use the smoke or another explicit
-config.
+`DREEMS_LOCAL_GPUS`. For another workflow, set both `DREEMS_CONFIG` and
+`DREEMS_SNAKEFILE`; the smoke run uses `config.example.yaml` with `Snakefile`.
 
 On Great Lakes, the Slurm profile uses account `jonth0`. The controller itself
 may run as one Slurm job; Snakemake submits every worker:
@@ -159,9 +178,9 @@ workflow/run_great_lakes.sh
 From an existing controller allocation, run:
 
 ```bash
-uv run --no-sync snakemake \
-    -s workflow/Snakefile \
-    --configfile workflow/config.production.yaml \
+uv run --frozen --no-sync snakemake \
+    -s workflow/release.Snakefile \
+    --configfile workflow/config.release.yaml \
     --profile workflow/profiles/slurm \
     --config outdir=/path/to/scratch/dreems/conditioned_diffusion_bands
 ```
@@ -202,6 +221,13 @@ not tuning parameters. The genotype convenience path computes both
 automatically, using the retained SNP count by default; pass an
 LD-adjusted `effective_snps` value when appropriate.
 
+The covariance rows and columns must follow `observed_nodes` in the same order.
+If `observed_nodes` is omitted, rows must follow the increasing indices of nodes
+with positive sample counts. Counts refer to individuals, not allele copies.
+Use a connected graph with no self edges or duplicate undirected edges.
+Indices and counts must be integer-valued; fractional values are rejected, not
+rounded. Integral floats, such as those read from CSV, are accepted.
+
 ### From VCF-Zarr
 
 DREEMS accepts an xarray genotype dataset using the standard sgkit dimensions
@@ -240,9 +266,20 @@ nearest graph node, and computes node-level covariance. Ploidy affects allele
 frequency and MAF calculation; the trained model consumes the resulting
 standardized covariance and does not require ploidy-specific weights.
 
+Calls must be signed integer allele codes, not dosages or genotype probabilities.
+A `-1` allele or a true `call_genotype_mask` entry makes the whole sample call
+missing. Mixed ploidy (`-2` padding) is rejected. A sample with no called genotypes
+among the retained variants must be removed before conversion; it cannot count
+as an observation simply because its missing values can be imputed.
+
+The default filters are MAF >= 0.05 and variant call rate >= 0.8. Apply study-specific
+sample, read-depth, genotype-quality, and LD filters before conversion. This
+constructor does not perform those checks or infer an LD-adjusted SNP count.
+
 DREEMS surfaces are relative: the global log offset is not identifiable.
-`edge_log_migration_mean` and `edge_relative_migration_mean` are the trained
-neural posterior summaries; the latter has geometric mean one. By default,
+`edge_log_migration_mean` is the neural posterior mean log rate.
+`edge_relative_migration_mean` is its exponential, normalized to geometric mean
+one; it is not the arithmetic posterior mean of migration. By default,
 `dreems.infer` also reports the covariance-refined MAP point estimate as
 `edge_log_migration_refined` and `edge_relative_migration_refined`. The
 reported posterior SD belongs to the neural posterior, not to the refined
@@ -255,7 +292,10 @@ and one retains the full predicted contrast. The lower-level
 to skip refinement.
 
 The lower-level numpy API remains available through `DREEMSInput`,
-`NodeCovarianceInput`, and `load_model`.
+`NodeCovarianceInput`, and `load_model`. Unlike `dreems.infer`, the lower-level
+`predict` methods default to neural inference only. Pass
+`refinement_config=True` to add MAP refinement there, or `--refine` on the CLI.
+Reuse a model loaded with `dreems.load_model()` when predicting several datasets.
 
 The lower-level array interface is also available from the command line:
 
@@ -301,6 +341,10 @@ dreems --feems \
 - `dreems.calibration`: post-hoc posterior SD calibration.
 - `dreems.metrics`: centered edge-log surface metrics.
 - `dreems.feems`: FEEMS baseline protocols with leave-one-out CV defaults.
+- `dreems.feems_benchmark`: independent FEEMS fold and final-fit workers.
+- `dreems.h2h`: DREEMS benchmark inference, paired reports, and the combined CLI.
+- `dreems.benchmark_data`: shared simulated-case input and scoring fields.
+- `dreems.validation`: array checks shared by inference and benchmark inputs.
 
 ## Manuscript And Results
 

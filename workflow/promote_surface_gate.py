@@ -4,55 +4,60 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
-import hashlib
 import json
-import os
-import tempfile
 import zipfile
+from numbers import Integral, Real
 from pathlib import Path
 from typing import Any
 
 import jax
 import numpy as np
+from beartype import beartype
 
+from dreems import calibration as sd_calibration
 from dreems import checkpoints
+from dreems.workflow_io import _atomic_output, sha256
 
 ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 SURFACE_GATE_FIELDS = {"surface_gate_hidden", "surface_gate_out"}
 
 
-def sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
+@beartype
 def read_archive(path: Path) -> tuple[dict[str, Any], bytes]:
-    with zipfile.ZipFile(path) as archive:
-        metadata = json.loads(archive.read(checkpoints.CHECKPOINT_METADATA))
-        params = archive.read(checkpoints.CHECKPOINT_PARAMS)
-    if not isinstance(metadata, dict):
-        raise TypeError(f"checkpoint metadata in {path} is not an object")
-    return metadata, params
+    """Read validated metadata and the original Equinox bytes without reserializing."""
+    members, metadata = checkpoints._read_checkpoint_archive(path)
+    return metadata, members[checkpoints.CHECKPOINT_PARAMS]
 
 
+@beartype
 def read_json(path: Path) -> dict[str, Any]:
+    """Require a report object, not an arbitrary JSON value."""
     value = json.loads(path.read_text())
     if not isinstance(value, dict):
         raise TypeError(f"expected a JSON object in {path}")
     return value
 
 
+@beartype
 def read_json_lines(path: Path) -> list[dict[str, Any]]:
-    return [json.loads(line) for line in path.read_text().splitlines() if line]
+    """Read training records in their original order."""
+    records = [json.loads(line) for line in path.read_text().splitlines() if line]
+    if not all(isinstance(record, dict) for record in records):
+        raise ValueError(f"expected JSON objects in {path}")
+    return records
 
 
+@beartype
 def assert_equal_normalization(
     left: checkpoints.DREEMSCheckpoint,
     right: checkpoints.DREEMSCheckpoint,
 ) -> None:
+    """A frozen core must see the same feature and target scales."""
     if left.normalization != right.normalization:
         raise ValueError(f"normalization differs between {left.path} and {right.path}")
 
 
+@beartype
 def assert_equal_model_fields(
     left: checkpoints.DREEMSCheckpoint,
     right: checkpoints.DREEMSCheckpoint,
@@ -64,17 +69,19 @@ def assert_equal_model_fields(
     for field in dataclasses.fields(left.params):
         if field.name in excluded:
             continue
-        left_leaves = jax.tree.leaves(getattr(left.params, field.name))
-        right_leaves = jax.tree.leaves(getattr(right.params, field.name))
-        if len(left_leaves) != len(right_leaves):
+        left_leaves, left_tree = jax.tree.flatten(getattr(left.params, field.name))
+        right_leaves, right_tree = jax.tree.flatten(getattr(right.params, field.name))
+        if left_tree != right_tree:
             raise ValueError(f"model field {field.name} has a different tree structure")
         for index, (left_leaf, right_leaf) in enumerate(
             zip(left_leaves, right_leaves, strict=True)
         ):
-            if not np.array_equal(np.asarray(left_leaf), np.asarray(right_leaf)):
+            left_array, right_array = np.asarray(left_leaf), np.asarray(right_leaf)
+            if left_array.dtype != right_array.dtype or not np.array_equal(left_array, right_array):
                 raise ValueError(f"model field {field.name} leaf {index} changed")
 
 
+@beartype
 def verified_training_stage(
     *,
     checkpoint_metadata: dict[str, Any],
@@ -82,6 +89,7 @@ def verified_training_stage(
     history_path: Path,
     name: str,
 ) -> dict[str, Any]:
+    """Match the best saved step to its record in the completed training run."""
     summary = read_json(summary_path)
     history = read_json_lines(history_path)
     training_run = summary.get("training_run")
@@ -89,15 +97,50 @@ def verified_training_stage(
         raise ValueError(f"{name} summary has no training_run")
     if training_run.get("history") != history:
         raise ValueError(f"{name} summary and JSON-lines history disagree")
-    if not training_run.get("restored_best_validation", False):
+    if training_run.get("restored_best_validation") is not True:
         raise ValueError(f"{name} did not restore its best validation checkpoint")
 
     checkpoint_run = checkpoint_metadata.get("training_run")
     if not isinstance(checkpoint_run, dict):
         raise ValueError(f"{name} checkpoint has no training_run")
-    for field in ("best_step", "best_validation_loss"):
+    for field in (
+        "best_step",
+        "best_validation_loss",
+        "early_stopping_metric",
+        "best_validation_metric",
+    ):
         if checkpoint_run.get(field) != training_run.get(field):
             raise ValueError(f"{name} checkpoint and summary disagree on {field}")
+    step = training_run.get("best_step")
+    if isinstance(step, bool) or not isinstance(step, Integral) or step < 0:
+        raise ValueError(f"{name} has no valid best_step")
+    loss = training_run.get("best_validation_loss")
+    if isinstance(loss, bool) or not isinstance(loss, Real) or not np.isfinite(loss):
+        raise ValueError(f"{name} has no finite best_validation_loss")
+    metric_name = training_run.get("early_stopping_metric")
+    if not isinstance(metric_name, str):
+        raise ValueError(f"{name} has no early-stopping metric name")
+    # Best checkpoints contain a snapshot, not necessarily the run's full history.
+    # The legacy field best_validation_loss holds the chosen stopping metric.
+    records = [record for record in history if record.get("step") == step]
+    if len(records) != 1 or records[0].get(metric_name) != loss:
+        raise ValueError(f"{name} best step does not match its training history")
+    saved_metrics = checkpoint_run.get("best_validation_metrics")
+    if (
+        not isinstance(saved_metrics, dict)
+        or saved_metrics.get("step") != step
+        or saved_metrics.get(metric_name) != loss
+        or any(records[0].get(key) != value for key, value in saved_metrics.items())
+    ):
+        raise ValueError(f"{name} checkpoint best metrics differ from its training history")
+    metric = training_run.get("best_validation_metric")
+    if (
+        isinstance(metric, bool)
+        or not isinstance(metric, Real)
+        or not np.isfinite(metric)
+        or records[0].get(metric_name) != metric
+    ):
+        raise ValueError(f"{name} early-stopping metric does not match its best step")
     return {
         "losses": summary.get("losses"),
         "training_config": checkpoint_metadata.get("training_config"),
@@ -105,6 +148,7 @@ def verified_training_stage(
     }
 
 
+@beartype
 def verify_h2h_report(
     *,
     checkpoint: Path,
@@ -113,19 +157,26 @@ def verify_h2h_report(
     expected_examples: int,
     label: str,
 ) -> None:
+    """Refuse a benchmark report from another checkpoint or protocol."""
+    if isinstance(expected_examples, bool) or expected_examples <= 0:
+        raise ValueError("expected_examples must be positive")
     protocol = read_json(protocol_path)
     report = read_json(report_path)
     if report.get("protocol") != protocol:
         raise ValueError(f"{label} report and protocol file disagree")
-    recorded_hash = protocol.get("dreems", {}).get("checkpoint_sha256")
+    dreems_protocol = protocol.get("dreems")
+    if not isinstance(dreems_protocol, dict):
+        raise ValueError(f"{label} protocol has no DREEMS checkpoint information")
+    recorded_hash = dreems_protocol.get("checkpoint_sha256")
     if recorded_hash != sha256(checkpoint):
         raise ValueError(f"{label} report does not use the promoted checkpoint")
-    if report.get("examples") != expected_examples:
+    if type(report.get("examples")) is not int or report["examples"] != expected_examples:
         raise ValueError(
             f"{label} report has {report.get('examples')} examples; expected {expected_examples}"
         )
 
 
+@beartype
 def verify_calibration_reports(
     *,
     fit_path: Path,
@@ -134,14 +185,24 @@ def verify_calibration_reports(
     calibration: dict[str, Any],
     expected_examples: int,
 ) -> dict[str, int]:
+    """Require one fitted calibration and three nonempty, disjoint example lists."""
+    if isinstance(expected_examples, bool) or expected_examples < 3:
+        raise ValueError("calibration requires at least three expected examples")
     fit = read_json(fit_path)
     selection = read_json(selection_path)
     verification = read_json(verification_path)
     selected = selection.get("selected")
-    if selected not in fit.get("candidates", {}):
+    fitted = fit.get("candidates")
+    if not isinstance(fitted, dict) or not isinstance(selected, str) or selected not in fitted:
         raise ValueError("selected SD calibration is absent from the fit report")
     numerical_calibration = dict(calibration)
     numerical_calibration.pop("provenance", None)
+    sd_calibration.SDCalibration.from_dict(numerical_calibration)
+    if (
+        not isinstance(fitted[selected], dict)
+        or fitted[selected].get("calibration") != numerical_calibration
+    ):
+        raise ValueError("selected SD calibration differs from its fitted candidate")
     if selection.get("calibration") != numerical_calibration:
         raise ValueError("selected SD calibration differs from checkpoint metadata")
     if (
@@ -150,11 +211,31 @@ def verify_calibration_reports(
     ):
         raise ValueError("verification report does not describe the selected calibration")
 
-    split_sets = [
-        set(fit.get("split_examples", [])),
-        set(selection.get("split_examples", [])),
-        set(verification.get("split_examples", [])),
-    ]
+    metrics = selection.get("candidate_metrics")
+    if (
+        not isinstance(metrics, dict)
+        or set(metrics) != set(fitted)
+        or not all(isinstance(value, dict) for value in metrics.values())
+    ):
+        raise ValueError("selection metrics do not cover the fitted candidates")
+    scores = {name: values.get("graph_balanced_nll") for name, values in metrics.items()}
+    if any(
+        isinstance(value, bool) or not isinstance(value, Real) or not np.isfinite(value)
+        for value in scores.values()
+    ):
+        raise ValueError("selection NLL scores must be finite")
+    if scores[selected] != min(scores.values()):
+        raise ValueError("selected SD calibration does not minimize selection NLL")
+    split_sets = []
+    for label, report in (("fit", fit), ("selection", selection), ("verification", verification)):
+        indices = report.get("split_examples")
+        if not isinstance(indices, list) or not indices:
+            raise ValueError(f"SD calibration {label} split must be a nonempty list")
+        if any(type(index) is not int or index < 0 for index in indices):
+            raise ValueError(f"SD calibration {label} split must contain nonnegative integers")
+        if len(set(indices)) != len(indices):
+            raise ValueError(f"SD calibration {label} split contains duplicate examples")
+        split_sets.append(set(indices))
     if any(
         left & right for index, left in enumerate(split_sets) for right in split_sets[index + 1 :]
     ):
@@ -168,13 +249,16 @@ def verify_calibration_reports(
     }
 
 
+@beartype
 def zip_member(name: str, contents: bytes) -> tuple[zipfile.ZipInfo, bytes]:
+    """Fix ZIP headers so identical release inputs yield identical archives."""
     info = zipfile.ZipInfo(name, ZIP_TIMESTAMP)
     info.compress_type = zipfile.ZIP_DEFLATED
     info.external_attr = 0o600 << 16
     return info, contents
 
 
+@beartype
 def promote(
     *,
     core: Path,
@@ -196,6 +280,30 @@ def promote(
     expected_hard_examples: int,
     output: Path,
 ) -> None:
+    """Publish only after checking frozen weights, training records, and evaluation."""
+    inputs = [
+        core,
+        surface_gate,
+        calibrated_surface_gate,
+        *training_configs,
+        surface_gate_summary,
+        surface_gate_history,
+        core_summary,
+        core_history,
+        calibration_fit,
+        calibration_selection,
+        calibration_verification,
+        broad_protocol,
+        broad_report,
+        hard_protocol,
+        hard_report,
+    ]
+    if any(
+        output.resolve() == path.resolve() or (output.exists() and output.samefile(path))
+        for path in inputs
+    ):
+        raise ValueError("promotion output must not overwrite one of its inputs")
+    input_hashes = {path: sha256(path) for path in inputs}
     core_checkpoint = checkpoints.load_checkpoint(core)
     gated = checkpoints.load_checkpoint(surface_gate)
     calibrated = checkpoints.load_checkpoint(calibrated_surface_gate)
@@ -254,6 +362,14 @@ def promote(
         calibration=calibration,
         expected_examples=expected_broad_examples,
     )
+    recorded_hashes = [
+        read_json(path).get("checkpoint_sha256")
+        for path in (calibration_fit, calibration_selection, calibration_verification)
+    ]
+    if any(value is not None for value in recorded_hashes) and any(
+        value != input_hashes[surface_gate] for value in recorded_hashes
+    ):
+        raise ValueError("calibration reports do not all describe the promoted checkpoint")
 
     calibration = dict(calibration)
     calibration["provenance"] = calibration_split_sizes
@@ -265,23 +381,23 @@ def promote(
         "surface_gate": gate_stage,
     }
     gated_metadata["provenance"] = {
-        "broad_h2h_protocol_sha256": sha256(broad_protocol),
-        "broad_h2h_report_sha256": sha256(broad_report),
-        "calibration_fit_report_sha256": sha256(calibration_fit),
-        "calibration_selection_report_sha256": sha256(calibration_selection),
-        "calibration_verification_report_sha256": sha256(calibration_verification),
-        "core_checkpoint_sha256": sha256(core),
-        "core_training_history_sha256": sha256(core_history),
-        "core_training_summary_sha256": sha256(core_summary),
+        "broad_h2h_protocol_sha256": input_hashes[broad_protocol],
+        "broad_h2h_report_sha256": input_hashes[broad_report],
+        "calibration_fit_report_sha256": input_hashes[calibration_fit],
+        "calibration_selection_report_sha256": input_hashes[calibration_selection],
+        "calibration_verification_report_sha256": input_hashes[calibration_verification],
+        "core_checkpoint_sha256": input_hashes[core],
+        "core_training_history_sha256": input_hashes[core_history],
+        "core_training_summary_sha256": input_hashes[core_summary],
         "frozen_core_verified": True,
-        "hard_h2h_protocol_sha256": sha256(hard_protocol),
-        "hard_h2h_report_sha256": sha256(hard_report),
+        "hard_h2h_protocol_sha256": input_hashes[hard_protocol],
+        "hard_h2h_report_sha256": input_hashes[hard_report],
         "posterior_sd_calibration_reused": False,
-        "surface_gate_checkpoint_sha256": sha256(surface_gate),
-        "surface_gate_training_history_sha256": sha256(surface_gate_history),
-        "surface_gate_training_summary_sha256": sha256(surface_gate_summary),
+        "surface_gate_checkpoint_sha256": input_hashes[surface_gate],
+        "surface_gate_training_history_sha256": input_hashes[surface_gate_history],
+        "surface_gate_training_summary_sha256": input_hashes[surface_gate_summary],
         "training_configs": [
-            {"path": str(path), "sha256": sha256(path)} for path in training_configs
+            {"path": str(path), "sha256": input_hashes[path]} for path in training_configs
         ],
     }
 
@@ -290,24 +406,18 @@ def promote(
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
-    output.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        dir=output.parent,
-        prefix=f".{output.name}.",
-        suffix=".tmp",
-        delete=False,
-    ) as temporary:
-        temporary_path = Path(temporary.name)
-    try:
-        with zipfile.ZipFile(temporary_path, "w") as archive:
+    with _atomic_output(output) as handle:
+        with zipfile.ZipFile(handle, "w") as archive:
             archive.writestr(*zip_member(checkpoints.CHECKPOINT_METADATA, metadata_bytes))
             archive.writestr(*zip_member(checkpoints.CHECKPOINT_PARAMS, gated_params))
-        os.replace(temporary_path, output)
-    finally:
-        temporary_path.unlink(missing_ok=True)
+        for path, digest in input_hashes.items():
+            if sha256(path) != digest:
+                raise ValueError(f"promotion input changed during verification: {path}")
 
 
+@beartype
 def main() -> None:
+    """Expose the same checked promotion operation to Snakemake and the CLI."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--core", type=Path, required=True)
     parser.add_argument("--surface-gate", type=Path, required=True)

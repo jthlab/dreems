@@ -22,6 +22,8 @@ notebook_scenarios:
 
 feems_archive: /home/jonth/turbo/dreems/feems_scenarios_exact_h2h_20260830/feems_results.tar.gz
 feems_archive_checksum: /home/jonth/turbo/dreems/feems_scenarios_exact_h2h_20260830/feems_results.tar.gz.sha256
+# Explicitly reproduce pre-hash results; genotype identity remains unverified.
+allow_legacy_feems_archive: true
 feems_final_mem_mb: 2000
 feems_final_runtime: 15m
 feems_partition: standard

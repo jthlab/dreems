@@ -1,20 +1,37 @@
+"""CPU refinement of a predicted surface against observed covariance.
+
+Sparse solves supply analytic gradients. This is separate from the JAX neural
+model and is not differentiable through the public NumPy API.
+"""
+
+# ruff: noqa: F722,F821,UP037
+
 from __future__ import annotations
 
-import math
 import time
 from dataclasses import dataclass
+from numbers import Real as RealNumber
 from typing import Any
 
 import numpy as np
 import scipy.sparse as sp
-import scipy.sparse.linalg as spla
+from beartype import beartype
+from jaxtyping import Float, Int, Real, jaxtyped
+from scipy.sparse.csgraph import connected_components
 
 from dreems import features
+from dreems.features import centered as centered
+from dreems.features import line_graph_laplacian as line_graph_laplacian
 
 
+@beartype
 @dataclass(frozen=True)
 class CovarianceFit:
-    """Scale-fitted off-diagonal covariance agreement."""
+    """Off-diagonal fit after centering and fitting nonnegative nuisance scales.
+
+    ``r2`` uses zero as its reference prediction, not the off-diagonal mean;
+    it is not squared Pearson correlation. Constant fields have undefined corr.
+    """
 
     corr: float
     r2: float
@@ -23,6 +40,7 @@ class CovarianceFit:
     q_scale: float = 0.0
 
     def to_prefixed_dict(self, prefix: str) -> dict[str, float]:
+        """Export scalar diagnostics under a caller-supplied metric prefix."""
         return {
             f"{prefix}_corr": self.corr,
             f"{prefix}_r2": self.r2,
@@ -32,6 +50,7 @@ class CovarianceFit:
         }
 
 
+@beartype
 @dataclass(frozen=True)
 class CovarianceScales:
     """Non-negative scales for migration and local-diversity covariance."""
@@ -40,19 +59,37 @@ class CovarianceScales:
     q_scale: float = 0.0
 
 
+@beartype
 @dataclass(frozen=True)
 class DREEMSMapRefinementConfig:
-    """Configuration for covariance MAP refinement of edge log-conductances."""
+    """Settings for constrained covariance fitting around a DREEMS prediction.
+
+    Radius limits the RMS edge change in units of the floored prior SD. Zero
+    disables this limit; it does not freeze the surface. SDs are not refitted.
+    """
 
     steps: int = 50
-    learning_rate: float = 0.15
-    smoothness_weight: float = 1.0e-4
-    sd_floor: float = 0.25
-    trust_region_radius: float = 0.5
+    learning_rate: RealNumber = 0.15
+    smoothness_weight: RealNumber = 1.0e-4
+    sd_floor: RealNumber = 0.25
+    trust_region_radius: RealNumber = 0.5
     edge_batch_size: int = 256
     log_every: int = 10
 
+    def __post_init__(self) -> None:
+        if self.steps < 0:
+            raise ValueError("steps must be non-negative")
+        if self.edge_batch_size <= 0 or self.log_every <= 0:
+            raise ValueError("edge_batch_size and log_every must be positive")
+        for name in ("learning_rate", "smoothness_weight", "trust_region_radius"):
+            value = getattr(self, name)
+            if not np.isfinite(value) or value < 0.0:
+                raise ValueError(f"{name} must be finite and non-negative")
+        if not np.isfinite(self.sd_floor) or self.sd_floor <= 0.0:
+            raise ValueError("sd_floor must be finite and positive")
 
+
+@beartype
 @dataclass(frozen=True)
 class DREEMSMapRefinementResult:
     """Result of DREEMS-prior MAP refinement."""
@@ -67,31 +104,25 @@ class DREEMSMapRefinementResult:
     node_log_q: np.ndarray | None = None
 
 
-def centered(values: np.ndarray) -> np.ndarray:
-    array = np.asarray(values, dtype=np.float64)
-    if array.size == 0:
-        return array
-    finite = np.isfinite(array)
-    if not np.any(finite):
-        return np.zeros_like(array, dtype=np.float64)
-    out = array.astype(np.float64, copy=True)
-    out[~finite] = float(np.mean(out[finite]))
-    return out - float(np.mean(out))
-
-
-def symmetrize(matrix: np.ndarray) -> np.ndarray:
+@jaxtyped(typechecker=beartype)
+def symmetrize(matrix: Real[np.ndarray, "size size"]) -> Float[np.ndarray, "size size"]:
+    """Average a square matrix with its transpose in float64."""
     matrix = np.asarray(matrix, dtype=np.float64)
     return 0.5 * (matrix + matrix.T)
 
 
-def center_matrix(matrix: np.ndarray) -> np.ndarray:
+@jaxtyped(typechecker=beartype)
+def center_matrix(matrix: Real[np.ndarray, "size size"]) -> Float[np.ndarray, "size size"]:
+    """Remove the constant covariance mode on both observed-node axes."""
     matrix = symmetrize(matrix)
     count = int(matrix.shape[0])
     projector = np.eye(count, dtype=np.float64) - np.ones((count, count)) / float(count)
     return symmetrize(projector @ matrix @ projector)
 
 
-def safe_corr(left: np.ndarray, right: np.ndarray) -> float:
+@jaxtyped(typechecker=beartype)
+def safe_corr(left: Real[np.ndarray, "*shape"], right: Real[np.ndarray, "*shape"]) -> float:
+    """Pearson r after mean filling, or NaN for fewer than three or constant values."""
     left = centered(np.ravel(left))
     right = centered(np.ravel(right))
     finite = np.isfinite(left) & np.isfinite(right)
@@ -99,61 +130,43 @@ def safe_corr(left: np.ndarray, right: np.ndarray) -> float:
         return float("nan")
     left = left[finite]
     right = right[finite]
-    denom = math.sqrt(float(np.dot(left, left) * np.dot(right, right)))
+    denom = np.sqrt(np.dot(left, left) * np.dot(right, right))
     return float(np.dot(left, right) / denom) if denom > 0.0 else float("nan")
 
 
-def line_graph_laplacian(num_nodes: int, edges: np.ndarray) -> sp.csr_matrix:
-    num_edges = int(edges.shape[0])
-    incident: list[list[int]] = [[] for _node in range(int(num_nodes))]
-    for edge_index, (left, right) in enumerate(np.asarray(edges, dtype=np.int64)):
-        incident[int(left)].append(edge_index)
-        incident[int(right)].append(edge_index)
-
-    rows: list[int] = []
-    cols: list[int] = []
-    for edge_indices in incident:
-        for outer in range(len(edge_indices)):
-            for inner in range(outer + 1, len(edge_indices)):
-                left = edge_indices[outer]
-                right = edge_indices[inner]
-                rows.extend([left, right])
-                cols.extend([right, left])
-    if not rows:
-        return sp.csr_matrix((num_edges, num_edges), dtype=np.float64)
-    adjacency = sp.coo_matrix(
-        (np.ones(len(rows), dtype=np.float64), (rows, cols)),
-        shape=(num_edges, num_edges),
-    ).tocsr()
-    degree = np.asarray(adjacency.sum(axis=1)).ravel()
-    return (sp.diags(degree) - adjacency).tocsr()
-
-
+@jaxtyped(typechecker=beartype)
 def edge_line_roughness(
-    edge_logs: np.ndarray,
+    edge_logs: Real[np.ndarray, "edge"],
     *,
     num_nodes: int,
-    edges: np.ndarray,
+    edges: Int[np.ndarray, "edge 2"],
 ) -> float:
+    """RMS log-conductance contrast between incident edges."""
     edge_logs = centered(edge_logs)
     line_laplacian = line_graph_laplacian(int(num_nodes), np.asarray(edges, dtype=np.int32))
     energy = float(edge_logs @ (line_laplacian @ edge_logs))
-    return math.sqrt(max(energy, 0.0) / float(max(edge_logs.shape[0], 1)))
+    return float(np.sqrt(max(energy, 0.0) / max(edge_logs.shape[0], 1)))
 
 
-def posterior_sd_scale(prior_sd: np.ndarray, sd_floor: float) -> np.ndarray:
+@jaxtyped(typechecker=beartype)
+def posterior_sd_scale(
+    prior_sd: Real[np.ndarray, "edge"], sd_floor: float
+) -> Float[np.ndarray, "edge"]:
+    """Floor the prior SD, using one for unavailable entries in diagnostics."""
     sd = np.asarray(prior_sd, dtype=np.float64)
     sd = np.where(np.isfinite(sd), sd, 1.0)
     return np.maximum(sd, float(sd_floor))
 
 
+@jaxtyped(typechecker=beartype)
 def trust_region_diagnostics(
-    edge_logs: np.ndarray,
+    edge_logs: Real[np.ndarray, "edge"],
     *,
-    initial_logs: np.ndarray,
-    prior_sd: np.ndarray,
+    initial_logs: Real[np.ndarray, "edge"],
+    prior_sd: Real[np.ndarray, "edge"],
     sd_floor: float,
 ) -> dict[str, float]:
+    """Measure centered edge changes in raw log units and prior-SD units."""
     sd = posterior_sd_scale(prior_sd, sd_floor)
     delta = centered(np.asarray(edge_logs, dtype=np.float64) - np.asarray(initial_logs))
     scaled = delta / sd
@@ -164,16 +177,21 @@ def trust_region_diagnostics(
     }
 
 
+@jaxtyped(typechecker=beartype)
 def project_edge_log_trust_region(
-    edge_logs: np.ndarray,
+    edge_logs: Real[np.ndarray, "edge"],
     *,
-    initial_logs: np.ndarray,
-    prior_sd: np.ndarray,
+    initial_logs: Real[np.ndarray, "edge"],
+    prior_sd: Real[np.ndarray, "edge"],
     sd_floor: float,
     radius: float,
     max_edge_radius: float,
-) -> np.ndarray:
-    """Project an edge field into the uncertainty-scaled DREEMS trust region."""
+) -> Float[np.ndarray, "edge"]:
+    """Center and contract an edge update to satisfy the requested SD bounds.
+
+    This is a feasible radial contraction, not a nearest-point projection in
+    the weighted norm. Each nonpositive radius disables that particular bound.
+    """
 
     candidate = centered(np.asarray(edge_logs, dtype=np.float64))
     radius = float(radius)
@@ -186,6 +204,12 @@ def project_edge_log_trust_region(
     scaled = centered(candidate - initial) / sd
     if max_edge_radius > 0.0:
         scaled = np.clip(scaled, -max_edge_radius, max_edge_radius)
+        # Clipping with unequal SDs breaks zero-mean log changes. Recenter first,
+        # then contract so restoring the constant mode cannot violate a bound.
+        scaled = centered(scaled * sd) / sd
+        maximum = np.max(np.abs(scaled))
+        if maximum > max_edge_radius:
+            scaled *= max_edge_radius / maximum
     if radius > 0.0:
         rms = float(np.sqrt(np.mean(scaled * scaled)))
         if rms > radius:
@@ -193,13 +217,15 @@ def project_edge_log_trust_region(
     return centered(initial + scaled * sd)
 
 
+@jaxtyped(typechecker=beartype)
 def empirical_observed_covariance(
     *,
-    sample_covariance: np.ndarray,
-    sample_nodes: np.ndarray,
+    sample_covariance: Real[np.ndarray, "sample sample"],
+    sample_nodes: Int[np.ndarray, "sample"],
     num_nodes: int,
     effective_snps: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Average sample covariance within demes, retaining only observed demes."""
     summaries = features.covariance_deme_summaries(
         sample_covariance,
         sample_nodes,
@@ -216,15 +242,17 @@ def empirical_observed_covariance(
     return covariance, observed_nodes, sample_count[observed_nodes]
 
 
+@jaxtyped(typechecker=beartype)
 def validate_observed_covariance(
     *,
-    node_covariance: np.ndarray,
-    observed_nodes: np.ndarray,
-    observed_sample_count: np.ndarray,
+    node_covariance: Real[np.ndarray, "observed observed"],
+    observed_nodes: Int[np.ndarray, "observed"],
+    observed_sample_count: Real[np.ndarray, "observed"],
     num_nodes: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Check node order, covariance shape, and positive observation counts."""
     covariance = symmetrize(np.asarray(node_covariance, dtype=np.float64))
-    nodes = np.asarray(observed_nodes, dtype=np.int32)
+    nodes = np.asarray(observed_nodes)
     counts = np.asarray(observed_sample_count, dtype=np.float64)
     if covariance.ndim != 2 or covariance.shape[0] != covariance.shape[1]:
         raise ValueError("node_covariance must be square")
@@ -242,42 +270,39 @@ def validate_observed_covariance(
         raise ValueError("observed_nodes are outside the graph")
     if np.any(~np.isfinite(counts)) or np.any(counts <= 0.0):
         raise ValueError("observed_sample_count must be finite and positive")
-    return covariance, nodes, counts
+    return covariance, nodes.astype(np.int32), counts
 
 
+@jaxtyped(typechecker=beartype)
 def source_potentials(
     *,
     num_nodes: int,
-    edges: np.ndarray,
-    edge_logs: np.ndarray,
-    source_nodes: np.ndarray,
-) -> np.ndarray:
+    edges: Int[np.ndarray, "edge 2"],
+    edge_logs: Float[np.ndarray, "edge"],
+    source_nodes: Int[np.ndarray, "source"],
+) -> Float[np.ndarray, "node source"]:
+    """Compute grounded Green columns for the supplied edge conductances."""
+    if not np.all(np.isfinite(edge_logs)):
+        raise ValueError("edge_logs must be finite")
+    if np.any(edges < 0) or np.any(edges >= num_nodes):
+        raise ValueError("edges are outside the graph")
     laplacian = features.sparse_laplacian(
         int(num_nodes), np.asarray(edges, dtype=np.int32), edge_logs
     )
-    if int(num_nodes) < 2:
-        return np.zeros((int(num_nodes), int(source_nodes.shape[0])), dtype=np.float64)
-    ground = int(num_nodes) - 1
-    reduced = laplacian[:ground, :ground].tocsc()
-    rhs = np.zeros((ground, int(source_nodes.shape[0])), dtype=np.float64)
-    for column, node in enumerate(source_nodes.astype(np.int64, copy=False)):
-        if int(node) != ground:
-            rhs[int(node), column] = 1.0
-    solved = np.asarray(spla.spsolve(reduced, rhs), dtype=np.float64)
-    if solved.ndim == 1:
-        solved = solved[:, None]
-    potentials = np.zeros((int(num_nodes), int(source_nodes.shape[0])), dtype=np.float64)
-    potentials[:ground, :] = solved
-    return potentials
+    if not np.all(np.isfinite(laplacian.data)):
+        raise ValueError("edge_logs produced non-finite conductances")
+    return features.grounded_source_potentials(num_nodes, laplacian, source_nodes)
 
 
+@jaxtyped(typechecker=beartype)
 def model_covariance_at_observed_nodes(
     *,
     num_nodes: int,
-    edges: np.ndarray,
-    edge_logs: np.ndarray,
-    observed_nodes: np.ndarray,
-) -> np.ndarray:
+    edges: Int[np.ndarray, "edge 2"],
+    edge_logs: Float[np.ndarray, "edge"],
+    observed_nodes: Int[np.ndarray, "observed"],
+) -> Float[np.ndarray, "observed observed"]:
+    """Return the grounded Green covariance; contrasts remove the ground choice."""
     potentials = source_potentials(
         num_nodes=int(num_nodes),
         edges=edges,
@@ -287,12 +312,13 @@ def model_covariance_at_observed_nodes(
     return symmetrize(potentials[observed_nodes])
 
 
+@jaxtyped(typechecker=beartype)
 def q_covariance_at_observed_nodes(
     *,
-    node_log_q: np.ndarray,
-    observed_nodes: np.ndarray,
-    observed_sample_count: np.ndarray,
-) -> np.ndarray:
+    node_log_q: Real[np.ndarray, "node"],
+    observed_nodes: Int[np.ndarray, "observed"],
+    observed_sample_count: Real[np.ndarray, "observed"],
+) -> Float[np.ndarray, "observed observed"]:
     """Return the relative local-diversity covariance for observed deme means.
 
     ``node_log_q`` is a relative log coalescence-rate field. Its arbitrary
@@ -310,8 +336,8 @@ def q_covariance_at_observed_nodes(
         raise ValueError("observed_nodes and observed_sample_count must have matching shapes")
     if np.any(observed_nodes < 0) or np.any(observed_nodes >= node_log_q.shape[0]):
         raise ValueError("observed_nodes are outside node_log_q")
-    if np.any(observed_sample_count <= 0.0):
-        raise ValueError("observed_sample_count must be positive")
+    if np.any(~np.isfinite(observed_sample_count)) or np.any(observed_sample_count <= 0.0):
+        raise ValueError("observed_sample_count must be finite and positive")
 
     observed_log_q = node_log_q[observed_nodes]
     finite = np.isfinite(observed_log_q)
@@ -324,19 +350,22 @@ def q_covariance_at_observed_nodes(
     return np.diag(relative_variance)
 
 
+@beartype
 def offdiag_indices(count: int) -> tuple[np.ndarray, np.ndarray]:
+    """Select each unordered off-diagonal pair exactly once."""
     return np.triu_indices(int(count), k=1)
 
 
+@jaxtyped(typechecker=beartype)
 def normalized_pair_indices(
-    pair_indices: tuple[np.ndarray, np.ndarray] | None,
+    pair_indices: tuple[Int[np.ndarray, "*shape"], Int[np.ndarray, "*shape"]] | None,
     *,
     count: int,
 ) -> tuple[np.ndarray, np.ndarray]:
+    """Validate a supplied pair subset, or use all off-diagonal pairs."""
     if pair_indices is None:
         return offdiag_indices(int(count))
-    row = np.asarray(pair_indices[0], dtype=np.int64)
-    col = np.asarray(pair_indices[1], dtype=np.int64)
+    row, col = pair_indices
     if row.shape != col.shape:
         raise ValueError("pair index arrays must have the same shape")
     if row.ndim != 1:
@@ -351,26 +380,35 @@ def normalized_pair_indices(
     return row.astype(np.int64, copy=False), col.astype(np.int64, copy=False)
 
 
-def fit_nonnegative_scale(target: np.ndarray, basis: np.ndarray) -> float:
+@jaxtyped(typechecker=beartype)
+def fit_nonnegative_scale(
+    target: Real[np.ndarray, "pair"], basis: Real[np.ndarray, "pair"]
+) -> float:
+    """Fit a scalar least-squares coefficient with a nonnegative constraint."""
     denom = float(np.dot(basis, basis))
     if denom <= 0.0:
         return 0.0
     return max(float(np.dot(target, basis) / denom), 0.0)
 
 
+@jaxtyped(typechecker=beartype)
 def fit_covariance_scales(
-    target: np.ndarray,
-    model_basis: np.ndarray,
-    q_basis: np.ndarray | None = None,
+    target: Real[np.ndarray, "pair"],
+    model_basis: Real[np.ndarray, "pair"],
+    q_basis: Real[np.ndarray, "pair"] | None = None,
 ) -> CovarianceScales:
     """Solve the one- or two-component non-negative least-squares problem."""
 
     target = np.asarray(target, dtype=np.float64)
     model_basis = np.asarray(model_basis, dtype=np.float64)
+    if not np.all(np.isfinite(target)) or not np.all(np.isfinite(model_basis)):
+        raise ValueError("target and model_basis must be finite")
     if q_basis is None:
         return CovarianceScales(alpha=fit_nonnegative_scale(target, model_basis))
 
     q_basis = np.asarray(q_basis, dtype=np.float64)
+    if not np.all(np.isfinite(q_basis)):
+        raise ValueError("q_basis must be finite")
     if target.shape != model_basis.shape or target.shape != q_basis.shape:
         raise ValueError("target and covariance bases must have matching shapes")
 
@@ -406,14 +444,16 @@ def fit_covariance_scales(
     return min(candidates, key=residual_energy)
 
 
+@jaxtyped(typechecker=beartype)
 def covariance_fit(
     *,
-    empirical_covariance: np.ndarray,
-    model_covariance: np.ndarray,
-    q_covariance: np.ndarray | None = None,
+    empirical_covariance: Real[np.ndarray, "observed observed"],
+    model_covariance: Real[np.ndarray, "observed observed"],
+    q_covariance: Real[np.ndarray, "observed observed"] | None = None,
     pair_indices: tuple[np.ndarray, np.ndarray] | None = None,
     scales: CovarianceScales | None = None,
 ) -> CovarianceFit:
+    """Score centered off-diagonal covariance, optionally using fixed scales."""
     empirical_centered = center_matrix(empirical_covariance)
     model_centered = center_matrix(model_covariance)
     q_centered = None if q_covariance is None else center_matrix(q_covariance)
@@ -422,8 +462,13 @@ def covariance_fit(
     model = model_centered[row, col]
     q_basis = None if q_centered is None else q_centered[row, col]
     fitted_scales = scales or fit_covariance_scales(target, model, q_basis)
-    if fitted_scales.alpha < 0.0 or fitted_scales.q_scale < 0.0:
-        raise ValueError("covariance scales must be non-negative")
+    if (
+        not np.isfinite(fitted_scales.alpha)
+        or not np.isfinite(fitted_scales.q_scale)
+        or fitted_scales.alpha < 0.0
+        or fitted_scales.q_scale < 0.0
+    ):
+        raise ValueError("covariance scales must be finite and non-negative")
     if q_basis is None and fitted_scales.q_scale != 0.0:
         raise ValueError("q_scale must be zero when q_covariance is not supplied")
     prediction = fitted_scales.alpha * model
@@ -441,23 +486,35 @@ def covariance_fit(
     )
 
 
+@jaxtyped(typechecker=beartype)
 def covariance_objective_and_gradient(
     *,
-    edge_logs: np.ndarray,
-    initial_logs: np.ndarray,
-    prior_sd: np.ndarray,
+    edge_logs: Real[np.ndarray, "edge"],
+    initial_logs: Real[np.ndarray, "edge"],
+    prior_sd: Real[np.ndarray, "edge"],
     num_nodes: int,
-    edges: np.ndarray,
-    observed_nodes: np.ndarray,
-    empirical_centered_covariance: np.ndarray,
+    edges: Int[np.ndarray, "edge 2"],
+    observed_nodes: Int[np.ndarray, "observed"],
+    empirical_centered_covariance: Real[np.ndarray, "observed observed"],
     line_laplacian: sp.csr_matrix,
-    q_centered_covariance: np.ndarray | None = None,
+    q_centered_covariance: Real[np.ndarray, "observed observed"] | None = None,
     pair_indices: tuple[np.ndarray, np.ndarray] | None = None,
     prior_weight: float,
     smoothness_weight: float,
     sd_floor: float,
     edge_batch_size: int,
 ) -> tuple[float, np.ndarray, dict[str, float]]:
+    """Evaluate least squares plus penalties and the analytic edge gradient.
+
+    The Green derivative for edge e is -w[e] * v[e] * v[e].T, where v is
+    the centered potential drop across that edge. Nuisance scales are solved
+    exactly at each step; their derivative vanishes in the profiled objective.
+    The public refinement loop uses a hard trust region and prior_weight=0.
+    """
+    if edge_batch_size <= 0:
+        raise ValueError("edge_batch_size must be positive")
+    if not np.all(np.isfinite(edge_logs)) or not np.all(np.isfinite(initial_logs)):
+        raise ValueError("edge log conductances must be finite")
     edge_logs = centered(edge_logs)
     initial_logs = centered(initial_logs)
     potentials = source_potentials(
@@ -508,8 +565,11 @@ def covariance_objective_and_gradient(
     )
     smooth_grad = float(smoothness_weight) * smooth_vec / float(edge_logs.shape[0])
 
-    total_grad = centered(data_grad + prior_grad + smooth_grad)
+    total_grad = data_grad + prior_grad + smooth_grad
     total_loss = data_loss + prior_loss + smooth_loss
+    if not np.isfinite(total_loss) or not np.all(np.isfinite(total_grad)):
+        raise FloatingPointError("refinement objective or gradient is non-finite")
+    total_grad = centered(total_grad)
     stats = {
         "loss": float(total_loss),
         "data_loss": float(data_loss),
@@ -529,25 +589,27 @@ def covariance_objective_and_gradient(
     return float(total_loss), total_grad, stats
 
 
+@jaxtyped(typechecker=beartype)
 def refine_edge_log_conductance(
     *,
-    sample_covariance: np.ndarray | None = None,
-    sample_nodes: np.ndarray | None = None,
-    node_covariance: np.ndarray | None = None,
-    observed_nodes: np.ndarray | None = None,
-    observed_sample_count: np.ndarray | None = None,
-    node_coordinates: np.ndarray,
-    edges: np.ndarray,
-    initial_edge_logs: np.ndarray,
-    initial_edge_sd: np.ndarray | None = None,
-    initial_node_log_q: np.ndarray | None = None,
+    sample_covariance: Real[np.ndarray, "sample sample"] | None = None,
+    sample_nodes: Int[np.ndarray, "sample"] | None = None,
+    node_covariance: Real[np.ndarray, "observed observed"] | None = None,
+    observed_nodes: Int[np.ndarray, "observed"] | None = None,
+    observed_sample_count: Real[np.ndarray, "observed"] | None = None,
+    node_coordinates: Real[np.ndarray, "node 2"],
+    edges: Int[np.ndarray, "edge 2"],
+    initial_edge_logs: Real[np.ndarray, "edge"],
+    initial_edge_sd: Real[np.ndarray, "edge"] | None = None,
+    initial_node_log_q: Real[np.ndarray, "node"] | None = None,
     effective_snps: int | None = None,
     config: DREEMSMapRefinementConfig | None = None,
     fit_pair_indices: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> DREEMSMapRefinementResult:
     """Refine edge log-conductances against the observed covariance.
 
-    The objective is a MAP-style criterion:
+    This is constrained least squares, not the FEEMS Gaussian likelihood or
+    an update of the neural posterior distribution. The criterion is:
 
     data = offdiag least squares between centered empirical covariance and
         alpha * centered Green covariance plus an optional scaled local
@@ -555,37 +617,49 @@ def refine_edge_log_conductance(
         non-negative scales fitted at each step;
     smooth = optional quadratic penalty on the line-graph Laplacian.
 
+    A hard RMS bound on centered changes, scaled by the prior SD, restricts
+    departure from the initial field. There is no soft Gaussian-prior penalty
+    in this loop. The optional q field stays fixed apart from its fitted scale.
+    History losses describe the point before the named update; update/trust
+    diagnostics describe the point after it. The final fit is scored separately.
+
     This implementation uses analytic sparse-solve gradients and Adam updates.
     It is intentionally CPU-friendly and does not depend on JAX autodiff.
     """
 
     cfg = config or DREEMSMapRefinementConfig()
-    if cfg.steps < 0:
-        raise ValueError("steps must be non-negative")
-    if cfg.learning_rate < 0.0:
-        raise ValueError("learning_rate must be non-negative")
-    if cfg.trust_region_radius < 0.0:
-        raise ValueError("trust_region_radius must be non-negative")
-    if cfg.edge_batch_size <= 0:
-        raise ValueError("edge_batch_size must be positive")
-
     started = time.perf_counter()
     node_coordinates = np.asarray(node_coordinates, dtype=np.float64)
+    if node_coordinates.shape[0] < 2 or edges.shape[0] == 0:
+        raise ValueError("refinement requires at least two connected graph nodes")
+    if not np.all(np.isfinite(node_coordinates)):
+        raise ValueError("node_coordinates must be finite")
+    if np.any(edges < 0) or np.any(edges >= node_coordinates.shape[0]):
+        raise ValueError("edges are outside the graph")
+    if np.any(edges[:, 0] == edges[:, 1]):
+        raise ValueError("edges must not contain self loops")
+    if len(np.unique(np.sort(edges, axis=1), axis=0)) != len(edges):
+        raise ValueError("edges must not contain duplicates")
+    if not np.all(np.isfinite(initial_edge_logs)):
+        raise ValueError("initial_edge_logs must be finite")
     edges = np.asarray(edges, dtype=np.int32)
     initial_logs = centered(np.asarray(initial_edge_logs, dtype=np.float64))
-    if initial_logs.shape != (edges.shape[0],):
-        raise ValueError("initial_edge_logs must have shape (edges,)")
+    topology = features.sparse_laplacian(
+        node_coordinates.shape[0], edges, np.zeros_like(initial_logs)
+    )
+    if connected_components(topology, directed=False, return_labels=False) != 1:
+        raise ValueError("refinement requires a connected graph")
     if initial_edge_sd is None:
         prior_sd = np.ones_like(initial_logs, dtype=np.float64)
     else:
         prior_sd = np.asarray(initial_edge_sd, dtype=np.float64)
-        if prior_sd.shape != initial_logs.shape:
-            raise ValueError("initial_edge_sd must have shape (edges,)")
+        if not np.all(np.isfinite(prior_sd)) or np.any(prior_sd < 0.0):
+            raise ValueError("initial_edge_sd must be finite and non-negative")
     node_log_q = None
     if initial_node_log_q is not None:
+        if not np.all(np.isfinite(initial_node_log_q)):
+            raise ValueError("initial_node_log_q must be finite")
         node_log_q = centered(np.asarray(initial_node_log_q, dtype=np.float64))
-        if node_log_q.shape != (node_coordinates.shape[0],):
-            raise ValueError("initial_node_log_q must have shape (nodes,)")
 
     if node_covariance is not None:
         if sample_covariance is not None or sample_nodes is not None:
@@ -605,6 +679,10 @@ def refine_edge_log_conductance(
             raise ValueError(
                 "sample_covariance and sample_nodes are required when node_covariance is omitted"
             )
+        if not np.all(np.isfinite(sample_covariance)):
+            raise ValueError("sample_covariance must be finite")
+        if np.any(sample_nodes < 0) or np.any(sample_nodes >= node_coordinates.shape[0]):
+            raise ValueError("sample_nodes are outside the graph")
         empirical, observed_nodes, observed_sample_count = empirical_observed_covariance(
             sample_covariance=np.asarray(sample_covariance, dtype=np.float64),
             sample_nodes=np.asarray(sample_nodes, dtype=np.int32),
@@ -661,11 +739,15 @@ def refine_edge_log_conductance(
             sd_floor=float(cfg.sd_floor),
             edge_batch_size=int(cfg.edge_batch_size),
         )
+        if not np.isfinite(_loss) or not np.all(np.isfinite(grad)):
+            raise FloatingPointError(f"non-finite refinement objective or gradient at step {step}")
         first_moment = beta1 * first_moment + (1.0 - beta1) * grad
         second_moment = beta2 * second_moment + (1.0 - beta2) * (grad * grad)
         first_hat = first_moment / (1.0 - beta1**step)
         second_hat = second_moment / (1.0 - beta2**step)
         update = float(cfg.learning_rate) * first_hat / (np.sqrt(second_hat) + eps)
+        if not np.all(np.isfinite(update)) or not np.all(np.isfinite(second_moment)):
+            raise FloatingPointError(f"non-finite refinement update at step {step}")
         logs = project_edge_log_trust_region(
             logs - update,
             initial_logs=initial_logs,

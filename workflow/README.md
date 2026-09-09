@@ -2,8 +2,9 @@
 
 This directory contains the Snakemake paths used to generate the synthetic
 corpus, construct DREEMS features, fit the model, and evaluate held-out
-simulations. The production release has three explicit configs:
+simulations. The production release has four relevant configs:
 `config.snp_range_experiment.yaml` records the broad-SNP corpus,
+`config.sampling_robustness.yaml` records the derived sampling masks,
 `config.full_retrain.yaml` records the from-scratch core and frozen surface-gate
 fits, and `config.surface_gate_release.yaml` records fresh SD calibration and
 release packaging. `config.example.yaml` is a small CPU smoke run.
@@ -25,7 +26,8 @@ The model lineage is:
 
 1. The broad corpus contains 61,440 Rust coalescent simulations spanning
    50-10,000 retained SNPs. The core training stream adds 8,192 structured
-   sampling-mask views, while 1,152 held-out graphs drive early stopping.
+   sampling-mask views, while 1,152 validation examples drive early stopping.
+   Views of the same held-out graph are not independent graphs.
 2. `Snakefile` fit the v2 initializer-gate model from random initialization.
    Its selected checkpoint SHA-256 is
    `86cd7b1aecf36ce5bf0cf3a709cc3b7be721baa4b356d9578595ad3d9d0cc671`.
@@ -49,18 +51,32 @@ and contract.
 ## Statistical Recipe
 
 Each synthetic example is generated independently with a deterministic seed.
+`simulation.seed` takes precedence over the top-level `seed`; if both are absent
+or null, the base seed is 12001. The worker snapshot records the resolved seed.
+The historical split and example-index offsets are unchanged, so existing raw
+packs with explicit seeds remain reproducible.
+
 The base production corpus uses:
 
 - the sparse Rust island coalescent simulator;
 - direct sample-covariance output rather than retained genotype matrices;
 - symmetric migration and diploid samples;
-- markers conditioned on MAF 0.05-0.95;
+- markers filtered to derived-allele frequency 0.05-0.95, or MAF at least 0.05;
 - 50-10,000 retained SNPs per example, balanced across four log-scale bins;
 - masked grids, FEEMS triangular lattices, and global landmass graphs;
 - graph sizes extending to roughly 1,400 nodes, broad sampling density, and
   variable local coalescence rate `q`;
 - constant, smooth, barrier, Gaussian-process, earth-like, and
   landscape-conditioned migration surfaces.
+
+The production setting is `island_marker_model: conditioned_random_marker`:
+complete a genealogy, choose one marker uniformly along its total branch length,
+then apply the frequency filter. Every completed tree gets a marker, so this
+mode does not reject trees according to mutation probability. `first_mutation`
+and the small-graph msprime adapter use different marker-selection procedures;
+they are not interchangeable backends for this production recipe. The Python
+island fallback implements the same three marker modes, but seeds are specific
+to the backend. Production generation requires Rust explicitly.
 
 The workflow downloads the pinned Natural Earth 50m land archive once on the
 controller, verifies its SHA-256, and exposes the extracted Cartopy cache as a
@@ -72,8 +88,10 @@ covariance, transforms those signals through five fixed graph-diffusion bands,
 and includes the all-pair diagonal-adjoint linearized-resistance conditioner.
 Coordinate axes and signed edge directions are excluded from model features;
 endpoint summaries are symmetric and path support is shared across all equally
-short routes. Uniform rotation, reflection, scale, edge reversal, and node
-relabeling therefore do not change predictions.
+short routes. This removes explicit dependence on coordinate axes and edge
+orientation. Floating-point rounding and nonunique eigenvectors at repeated
+covariance eigenvalues can still perturb the computed features under equivalent
+graph representations.
 The neural network is a 10-layer, 128-channel edge-aware residual GNN with a
 three-layer context branch. The prepared node and edge dimensions are 109 and
 253. An edgewise gate blends the neural proposal with the linearized
@@ -160,6 +178,34 @@ not regenerate the raw covariance corpus; changing feature construction starts
 again at preparation, and changing the simulation recipe starts again at raw
 generation.
 
+### Prepared Packs And Normalization
+
+Preparation writes ordered lists of feature dictionaries plus a small dimension
+sidecar. Training scans those sidecars to choose fixed padding sizes; it reads
+the pack itself only when dimension metadata is absent. Feature widths must
+agree across examples and packs. Counts in metadata are checked before integer
+conversion, so a fractional count cannot silently change a training limit.
+
+Normalization sums each feature and its square in float64 over training data
+only. Node and edge statistics are weighted by their row counts, not equally
+by graph. The stored target moments use uncentered log rates; normalization
+then centers each graph's targets and divides by the saved target scale.
+Feature SDs use the configured floor; target SDs retain the existing `1e-6`
+offset. Validation and inference reuse these training statistics.
+
+Streaming batches shuffle packs and examples with a fixed seed. Paired sampling
+views stay together with their anchor; group sizes must agree and divide the
+batch size. Leftover examples carry into the next pack or epoch. Empty input
+sets fail rather than looping indefinitely. Progress is written as flushed JSON
+records, while Snakemake owns scheduling, retries, and reuse of completed files.
+
+The evaluation worker can read multiple packs. Its `replicate` IDs follow input
+order across those packs even though prediction batches are sorted by graph
+size. Prediction arrays have matching replicate IDs and offsets; CSV rows are
+sorted by replicate ID. Separate evaluation jobs also retain their source pack,
+and aggregation assigns `replicate_global` across jobs. CSV and NPZ outputs are
+replaced only after serialization completes.
+
 ## Smoke Run
 
 Install the locked CPU environment:
@@ -211,6 +257,11 @@ DREEMS_RUN_ROOT=/scratch/jonth_root/jonth0/jonth/dreems/topology_diffusion_bands
 workflow/run_great_lakes.sh
 ```
 
+The Great Lakes profile queries live job status with `squeue`, rather than
+waiting for accounting records to appear in `sacct`. Completed jobs currently
+remain visible for four hours (`MinJobAge=14400`). On another cluster, check this
+retention setting or override it with `--slurm-status-command sacct`.
+
 ## Broad SNP-Count Retraining
 
 `config.snp_range_experiment.yaml` retrains DREEMS from scratch on the same
@@ -238,6 +289,7 @@ On Great Lakes, launch the experiment with the Rust simulator required:
 ```bash
 DREEMS_BUILD_RUST=1 \
 DREEMS_CONFIG=workflow/config.snp_range_experiment.yaml \
+DREEMS_SNAKEFILE=workflow/Snakefile \
 DREEMS_RUN_ROOT=/scratch/jonth_root/jonth0/jonth/dreems_snp_range \
 sbatch workflow/run_great_lakes.sh
 ```
@@ -291,6 +343,33 @@ FEEMS head-to-head evaluation is intentionally separate from model training.
 FEEMS is neither an input to the production model nor part of its training loss.
 
 ## FEEMS Head-To-Head
+
+FEEMS folds and final fits call `dreems.feems_benchmark` directly. They depend on
+the FEEMS adapter, shared input/score utilities, and the locked environment, not
+on the neural model or gallery renderer. DREEMS cases track the checkpoint plus
+feature, inference, refinement, and calibration code. Each method has its own
+Snakemake benchmark file. The combined `python -m dreems.h2h` commands remain
+available for direct use.
+
+Real-data rendering tracks grid resolution, topography limits, zoom, and DPI as
+rule parameters. Changing those settings redraws maps without refitting the
+model. An environment lock change can still invalidate both methods: numerical
+library changes need verification too.
+
+`real_data_gallery.Snakefile` consumes prepared covariance NPZs and their JSON
+metadata. These are archived, already-filtered inputs; the inference worker does
+not apply MAF filtering, imputation, or other genotype QC. For a new dataset, use
+the public genotype/xarray API to prepare inputs first. New prediction reports
+record hashes of both prepared files and the checkpoint. The renderer checks
+recorded input hashes and array alignment before drawing a panel. Older reports
+remain readable, but their input identity cannot be established retroactively.
+
+Topographic tiles use normal HTTPS certificate verification. Sites with a local
+certificate authority can configure Requests through `REQUESTS_CA_BUNDLE`.
+If a download fails, rendering warns and uses the lower-resolution stock map;
+configuration and programming errors are not treated as network failures.
+Rendering, including interpolation and map clipping, does not alter edge
+estimates. It also does not add environmental covariates to inference.
 
 `h2h.Snakefile` compares the packaged checkpoint with FEEMS on a fixed
 synthetic test set. Each example must contain genotypes, sample-to-node
@@ -352,6 +431,32 @@ results whose protocol is not the documented leave-one-observed-deme-out
 procedure. It also depends on a numerical parity test between the official
 serial FEEMS routine and the fold-parallel adapter.
 
+### Reusing Saved FEEMS Fits
+
+Set `feems_archive` and `feems_archive_checksum` to reuse an existing
+`feems_results.tar.gz` instead of fitting FEEMS again. The restore rule checks
+the supplied archive's digest even if it has been renamed or moved. It accepts
+only the expected regular JSON/NPZ files, validates all requested cases, and
+then replaces those files individually. Other results in the work directory
+are left alone. Packaging uses one deterministic archive writer for both newly
+computed and restored fits.
+
+New FEEMS and DREEMS case reports record the SHA-256 of their input pickle.
+Archive reuse requires that hash to match the current input; aggregation also
+rejects a pair with different recorded hashes. These are byte-level checks, so
+benchmark input files should be kept unchanged. The restore rule additionally
+checks graph coordinates, edge order, generating truth, sample counts, SNP
+count, and the declared LOO protocol. Loading and checking the raw inputs runs
+as a CPU job, not in the Snakemake controller.
+
+The historical release archives predate input hashes. Their configs explicitly
+set `allow_legacy_feems_archive: true`. Those runs still perform the structural
+checks, but `feems_archive_verification.json` labels their genotype identity
+`legacy_unverified`: matching geometry and sample counts cannot prove that
+the original fit used the same genotype matrix. The workflow does not add a
+new hash to an old fit and present it as original evidence. This opt-in is for
+reproducing retained results; new benchmarks should leave it disabled.
+
 ### Sampling-Mask Audit
 
 `config.feems_scenarios.yaml` crosses barrier, anisotropic, and homogeneous
@@ -367,10 +472,67 @@ DREEMS_CONFIG=workflow/config.feems_scenarios.yaml \
 sbatch workflow/run_great_lakes.sh
 ```
 
-### Sampling-Robustness Training
+### Fresh Release Training
 
-`sampling_robustness.Snakefile` repairs sensitivity to where samples were
-collected without generating another SNP corpus. It selects densely observed
+`release.Snakefile` composes the existing generation/training rules with
+sampling-view preparation. It uses the scientific settings in
+`config.snp_range_experiment.yaml` and `config.full_retrain.yaml`, replaces their
+historical storage paths, and applies overrides from `config.release.yaml`.
+The default run has 61,440 training examples and 4,096 additional examples for
+validation and diagnostics. It is a full production run.
+
+On Great Lakes:
+
+```bash
+export DREEMS_RUN_ROOT=/scratch/jonth_root/jonth0/$USER/dreems/release
+mkdir -p "$DREEMS_RUN_ROOT"
+sbatch --output="$DREEMS_RUN_ROOT/controller-%j.out" \
+    --error="$DREEMS_RUN_ROOT/controller-%j.err" \
+    workflow/run_great_lakes.sh \
+    --config publish_dir=/home/jonth/turbo/dreems/release
+```
+
+The controller uses the native Slurm executor under `jonth0`. Generation remains
+one job per example; packing, sampling views, training, and evaluation have
+separate rules. Both launchers default to this release workflow. On Maturin:
+
+```bash
+DREEMS_RUN_ROOT=/path/to/work bash workflow/run_maturin.sh \
+    --config publish_dir=/path/to/models
+```
+
+The release workflow keeps its `.snakemake` state and default worker logs under
+`outdir`, not in the source checkout. Relative storage paths are resolved before
+changing the working directory. Snakemake opens its controller log before reading
+that setting, so a small `.snakemake/log` directory can remain in the checkout.
+To put that log on scratch too, pass `--directory "$DREEMS_RUN_ROOT"` and use
+absolute storage paths in any config overrides.
+
+Set `raw_source_dir` to an existing corpus's `raw` directory to reuse it. Set
+`train_examples`, `test_examples`, and `raw_pack_size` to that corpus's counts
+and packing scheme. A new run gets its own `outdir`; the source packs remain
+inputs rather than targets to regenerate. The workflow prepares the sampling
+views itself, with no dependency on a pretrained checkpoint.
+
+The core uses all selected training masks and the first
+`core_validation_mask_packs` of masked validation data. The later gate uses all
+selected masks and ordinary replay packs, with the core frozen. Graph features
+are configured once for both ordinary and masked examples. Optimizer changes
+do not invalidate those features. A changed mask seed does invalidate masked
+views, but not raw simulations or ordinary replay features.
+
+The gate's validation limit includes every selected validation pack. A partial
+last raw pack can make the actual count smaller than that limit; the training
+summary records the loaded count. This does not discard validation examples.
+The ordinary `eval/summary.json` includes early-stopping validation examples and
+is a training diagnostic, not an independent benchmark. Use `h2h.Snakefile` for
+independent model comparisons. SD calibration and verified package promotion
+can run separately or through the optional `validated_release` target below.
+
+### Sampling-View Preparation
+
+`sampling_robustness.Snakefile` derives sampling views without generating another
+SNP corpus or fitting a model. It selects densely observed
 simulations from the existing raw train and test splits, then derives four
 observations from each simulation: the original dense sample, a random 10%
 sample, two separated outer regions, and a sample with one end of the graph
@@ -378,20 +540,41 @@ missing. All four observations retain the same graph, covariance submatrix,
 and migration truth. Batches keep each four-member group together so the loss
 can compare sparse predictions with their dense anchor.
 
-The training mix also replays ordinary examples from the source corpus. This
-guards against improving the structured masks by degrading the broader data
-distribution. The workflow first trains the small initializer gate with the
-graph-balanced neural core frozen, then fine-tunes the complete model at a lower
-learning rate. Both checkpoints are evaluated on held-out replay and paired
-counterfactual examples.
+It also prepares ordinary replay packs from the source corpus. The release
+trainer combines these with the masked examples. The old initializer-gate
+fine-tune and whole-model fine-tune have been removed from this preparation
+workflow; they were not stages of the released from-scratch model.
+
+Selection is a Snakemake checkpoint, so its input metadata can be generated
+earlier in the same DAG. Standalone preparation discovers an existing corpus;
+`source_pack_counts: {train: N, test: M}` declares packs that do not yet exist.
+The release entry point supplies those counts automatically.
+
+```bash
+uv run --frozen --no-sync snakemake prepared \
+    -s workflow/sampling_robustness.Snakefile \
+    --configfile workflow/config.sampling_robustness.yaml \
+    --profile workflow/profiles/slurm \
+    --config source_corpus=/path/to/corpus outdir=/path/to/views
+```
+
+### Full Retraining
+
+The commands below reuse existing raw packs. On another machine, set
+`source_corpus` in the sampling config to the corpus root and `raw_source_dir`
+in the full-retrain config to its `raw` subdirectory. Update the output and
+supplemental-pack paths too.
+The checked-in absolute paths record the release run, not portable defaults.
+
+For the historical two-command procedure, first build sampling views and replay
+packs. This target needs no checkpoint:
 
 ```bash
 DREEMS_SNAKEFILE=workflow/sampling_robustness.Snakefile \
 DREEMS_CONFIG=workflow/config.sampling_robustness.yaml \
-sbatch workflow/run_great_lakes.sh
+sbatch workflow/run_great_lakes.sh prepared \
+  --config source_corpus=/path/to/corpus outdir=/path/to/views
 ```
-
-### Full Retraining
 
 `config.full_retrain.yaml` is layered after `config.snp_range_experiment.yaml`.
 It reuses the saved Rust/MAF-conditioned raw covariance corpus, re-prepares all
@@ -416,6 +599,81 @@ stages and their complete histories to Turbo. Changing a training
 hyperparameter therefore does not repeat covariance simulation or mask
 construction.
 
+On Maturin, use the same environment variables with
+`bash workflow/run_maturin.sh` instead of `sbatch workflow/run_great_lakes.sh`.
+Both launchers accept `DREEMS_CONFIG_FILES` and `DREEMS_SNAKEFILE`. Training uses
+a private temporary staging directory and does not require Slurm environment
+variables when run locally.
+
+`tests/test_training_workflow.py` exercises simulation, preparation, training,
+evaluation, publishing, and frozen-core gate training on a tiny CPU corpus. It
+also checks that an unchanged rerun does nothing and that changing the learning
+rate leaves raw data, training feature packs, and normalization up to date.
+Temporary per-example evaluation features are rebuilt when needed. The test
+checks workflow behavior, not predictive performance. It also starts the release
+entry point from an empty directory and checks that it creates sampling views,
+trains both stages, evaluates the selected gate, calibrates its SD, and writes a
+candidate in one invocation. The test's cached FEEMS results are synthetic test
+fixtures. They check reuse and provenance, not statistical performance.
+
+### Evaluate A Release Candidate
+
+The `validated_release` target connects the existing training, H2H, calibration,
+and promotion rules. Enable it with a `release_validation` mapping in your
+release config. Each benchmark accepts an ordinary H2H config file with local
+overrides. For example:
+
+```yaml
+release_validation:
+  broad:
+    configfile: workflow/config.full_retrain_h2h.yaml
+    input_pattern: /path/to/broad/example_{example}.pkl
+    metadata_pattern: /path/to/broad/example_{example}.metadata.json
+    feems_archive: /path/to/broad/feems_results.tar.gz
+    feems_archive_checksum: /path/to/broad/feems_results.tar.gz.sha256
+  hard:
+    configfile: workflow/config.full_retrain_hard_edges.yaml
+    input_pattern: /path/to/hard/example_{example}.pkl
+    metadata_pattern: /path/to/hard/example_{example}.metadata.json
+    feems_archive: /path/to/hard/feems_results.tar.gz
+    feems_archive_checksum: /path/to/hard/feems_results.tar.gz.sha256
+```
+
+The H2H configs declare the example IDs or range; override those too when using
+a different benchmark. Use data independent of training and early stopping.
+The workflow cannot establish independence from filenames alone. Config-file
+paths are relative to the repository; data paths are resolved from the launch
+directory before Snakemake changes its working directory. Absolute data paths
+are least ambiguous on the cluster.
+
+```bash
+uv run --frozen --no-sync snakemake validated_release \
+    -s workflow/release.Snakefile \
+    --configfile /path/to/release.yaml \
+    --profile workflow/profiles/slurm
+```
+
+This writes training artifacts under `outdir/model`, broad and hard reports and
+galleries under `outdir/benchmarks`, and the calibrated candidate at
+`outdir/release/dreems_candidate.dreems.zip`. It never replaces the packaged
+checkpoint. Keep `outdir` on scratch; copy reviewed release artifacts to Turbo.
+The default `all` target remains training-only.
+
+Saved FEEMS archives are restored and checked by the H2H module. Changing the
+neural training settings does not refit FEEMS or regenerate raw simulations.
+Without an archive, the ordinary H2H rules fit FEEMS; inspect a dry run before
+launching. New neural predictions record their checkpoint's SHA-256. This
+target requires matching hashes during calibration, so predictions from an
+older model cannot silently calibrate a new one.
+
+The broad predictions are partitioned into disjoint SD fit, selection, and
+verification subsets. Only the last subset estimates held-out coverage. The
+H2H reports describe the selected gate before this SD recalibration: its plain
+DREEMS means are unchanged, but MAP refinement can change when its prior SD
+changes. Evaluate the final candidate with `h2h.Snakefile` before reporting its
+MAP performance. Promotion checks lineage and consistency, not a minimum
+accuracy or improvement over FEEMS.
+
 ### Surface Gate And Release
 
 The staged section of `Snakefile` adds one graph-level gate to the selected
@@ -437,3 +695,8 @@ uv run --frozen --no-sync snakemake \
 The checked-in release config records the exact archived inputs used for the
 0.3.0 package. Override its scratch and Turbo paths only when reproducing the
 same promotion from a relocated artifact archive.
+
+Legacy prediction archives without checkpoint hashes remain supported by this
+standalone workflow for historical reproduction. Their checkpoint identity
+cannot be verified. Set `require_checkpoint_hash: true` for new runs; that
+requires regenerating only the neural predictions, not the saved FEEMS fits.

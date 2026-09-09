@@ -1,4 +1,9 @@
-"""Feature construction for the production DREEMS graph model."""
+"""Covariance, sampling-support, and diffusion features for the graph model.
+
+Preprocessing runs in NumPy/SciPy on CPU; the learned model runs in JAX. Column
+order is part of the checkpoint contract, including zeroed coordinate columns.
+The current encoding uses observed-node covariance for every input format.
+"""
 
 # ruff: noqa: F722,F821,UP037
 
@@ -9,10 +14,13 @@ from collections.abc import Mapping
 from typing import Any, Literal
 
 import numpy as np
+import scipy.linalg as la
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 from beartype import beartype
-from jaxtyping import Float, Int, jaxtyped
+from jaxtyping import Float, Int, Real, jaxtyped
+
+from dreems.validation import validate_diploid_dosages
 
 EDGE_CONDITIONER_FEATURE_NAMES = (
     "linearized_resistance_edge_log_centered",
@@ -24,7 +32,9 @@ SpatialEncoding = Literal["embedded", "topology", "topology_node_covariance"]
 SPATIAL_ENCODINGS = ("embedded", "topology", "topology_node_covariance")
 
 
+@beartype
 def centered(values: np.ndarray) -> np.ndarray:
+    """Center finite values, filling missing entries with their finite mean."""
     array = np.asarray(values, dtype=np.float64)
     if array.size == 0:
         return array.astype(np.float64)
@@ -36,11 +46,21 @@ def centered(values: np.ndarray) -> np.ndarray:
     return filled - float(np.mean(filled))
 
 
+@beartype
 def centered_edge_feature(values: np.ndarray) -> np.ndarray:
+    """Store a centered initializer as the model's float32 edge channel."""
     return centered(np.asarray(values, dtype=np.float64)).astype(np.float32)
 
 
-def symmetric_psd_eigh(matrix: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+@jaxtyped(typechecker=beartype)
+def symmetric_psd_eigh(
+    matrix: Real[np.ndarray, "size size"],
+) -> tuple[Float[np.ndarray, "size"], Float[np.ndarray, "size size"]]:
+    """Factor a symmetric covariance, retrying numerical convergence failures.
+
+    This does not project onto the PSD cone. Callers discard small or negative
+    eigenvalues explicitly when constructing covariance factors.
+    """
     covariance = np.asarray(matrix, dtype=np.float64)
     covariance = 0.5 * (covariance + covariance.T)
     if not np.all(np.isfinite(covariance)):
@@ -55,14 +75,49 @@ def symmetric_psd_eigh(matrix: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
                 return np.linalg.eigh(covariance + relative_jitter * scale * identity)
             except np.linalg.LinAlgError:
                 continue
-        vectors, values, _ = np.linalg.svd(covariance, full_matrices=False)
-        return values, vectors
+        # A different symmetric eigensolver keeps eigenvalue signs. SVD would
+        # turn negative covariance modes into positive variance.
+        return la.eigh(covariance, driver="evr")
+
+
+@jaxtyped(typechecker=beartype)
+def _covariance_factors(
+    covariance: Float[np.ndarray, "size size"],
+    effective_snps: int,
+) -> Float[np.ndarray, "size rank"]:
+    """Return F with F @ F.T / effective_snps equal to the retained covariance."""
+    values, vectors = symmetric_psd_eigh(covariance)
+    keep = values > max(np.max(values) * 1e-10, 1e-12) if values.size else values > 0.0
+    if not np.any(keep):
+        return np.zeros((covariance.shape[0], 1), dtype=np.float64)
+    return vectors[:, keep] * np.sqrt(values[keep] * effective_snps)[None, :]
+
+
+@jaxtyped(typechecker=beartype)
+def _factor_deme_summaries(
+    factors: Float[np.ndarray, "nodes rank"],
+    sample_count: Float[np.ndarray, "nodes"],
+    effective_snps: int,
+) -> dict[str, np.ndarray | int]:
+    """Summaries of identical virtual samples at each deme, not observed SNPs."""
+    squared = factors * factors
+    return {
+        "effective_snps": effective_snps,
+        "sample_count": sample_count,
+        "sum_x": factors * sample_count[:, None],
+        "sum_x2": squared * sample_count[:, None],
+        "mean_x": factors,
+        "mean_x2": squared,
+        "diag_mean": np.sum(squared, axis=1) / effective_snps,
+    }
 
 
 @jaxtyped(typechecker=beartype)
 def standardized_polymorphic_genotypes(
     genotypes: "Float[np.ndarray, 'samples snps']",
 ) -> "Float[np.ndarray, 'samples polymorphic_snps']":
+    """Center and sample-standardize diploid SNPs, dropping constant columns."""
+    validate_diploid_dosages(genotypes)
     allele_sum = genotypes.sum(axis=0)
     polymorphic = (allele_sum > 0.0) & (allele_sum < 2.0 * genotypes.shape[0])
     if not np.any(polymorphic):
@@ -82,6 +137,7 @@ def standardized_deme_summaries(
     sample_nodes: "Int[np.ndarray, 'samples']",
     num_nodes: int,
 ) -> dict[str, np.ndarray | int]:
+    """Aggregate standardized diploid genotypes while retaining SNP columns."""
     standardized = standardized_polymorphic_genotypes(genotypes)
     effective_snps = int(standardized.shape[1])
     sample_count = np.bincount(sample_nodes, minlength=num_nodes).astype(np.float64)
@@ -112,10 +168,12 @@ def standardized_deme_summaries(
     }
 
 
+@jaxtyped(typechecker=beartype)
 def nearest_node_assignments(
-    sample_coordinates: np.ndarray,
-    node_coordinates: np.ndarray,
-) -> np.ndarray:
+    sample_coordinates: Real[np.ndarray, "samples 2"],
+    node_coordinates: Real[np.ndarray, "nodes 2"],
+) -> Int[np.ndarray, "samples"]:
+    """Assign samples by Euclidean distance; ties use the first node index."""
     samples = np.asarray(sample_coordinates, dtype=np.float64)
     nodes = np.asarray(node_coordinates, dtype=np.float64)
     if samples.ndim != 2 or samples.shape[1] != 2:
@@ -126,13 +184,19 @@ def nearest_node_assignments(
     return np.argmin(np.sum(diff * diff, axis=2), axis=1).astype(np.int32)
 
 
+@jaxtyped(typechecker=beartype)
 def covariance_deme_summaries(
-    sample_covariance: np.ndarray,
-    sample_nodes: np.ndarray,
+    sample_covariance: Real[np.ndarray, "samples samples"],
+    sample_nodes: Int[np.ndarray, "samples"],
     num_nodes: int,
     *,
     effective_snps: int | None = None,
 ) -> dict[str, np.ndarray | int]:
+    """Average sample-covariance factors at nodes for the earlier encodings.
+
+    The columns are covariance factors, not independent markers. ``effective_snps``
+    sets their scale; it cannot be recovered from the covariance alone.
+    """
     covariance = np.asarray(sample_covariance, dtype=np.float64)
     sample_nodes = np.asarray(sample_nodes, dtype=np.int32)
     if covariance.ndim != 2 or covariance.shape[0] != covariance.shape[1]:
@@ -145,41 +209,18 @@ def covariance_deme_summaries(
     covariance = 0.5 * (covariance + covariance.T)
     sample_count = np.bincount(sample_nodes, minlength=num_nodes).astype(np.float64)
     weights = np.zeros((num_nodes, sample_nodes.shape[0]), dtype=np.float64)
-    for sample_index, node in enumerate(sample_nodes):
-        count = sample_count[int(node)]
-        if count > 0.0:
-            weights[int(node), sample_index] = 1.0 / count
+    weights[sample_nodes, np.arange(sample_nodes.size)] = 1.0 / sample_count[sample_nodes]
     effective = int(effective_snps or max(covariance.shape[0], 2))
     effective = max(effective, 2)
-    values, vectors = symmetric_psd_eigh(covariance)
-    keep = (
-        values > max(float(np.max(values)) * 1e-10, 1e-12)
-        if values.size
-        else np.zeros((0,), dtype=bool)
-    )
-    if np.any(keep):
-        sample_factors = vectors[:, keep] * np.sqrt(values[keep] * float(effective))[None, :]
-        factors = weights @ sample_factors
-    else:
-        factors = np.zeros((num_nodes, 1), dtype=np.float64)
-    diagonal = np.sum(factors * factors, axis=1) / float(effective)
-    sum_x = factors * sample_count[:, None]
-    sum_x2 = factors * factors * sample_count[:, None]
-    return {
-        "effective_snps": effective,
-        "sample_count": sample_count,
-        "sum_x": sum_x,
-        "sum_x2": sum_x2,
-        "mean_x": factors,
-        "mean_x2": factors * factors,
-        "diag_mean": diagonal,
-    }
+    factors = weights @ _covariance_factors(covariance, effective)
+    return _factor_deme_summaries(factors, sample_count, effective)
 
 
+@jaxtyped(typechecker=beartype)
 def node_covariance_deme_summaries(
-    node_covariance: np.ndarray,
-    observed_nodes: np.ndarray,
-    node_sample_count: np.ndarray,
+    node_covariance: Real[np.ndarray, "observed observed"],
+    observed_nodes: Int[np.ndarray, "observed"],
+    node_sample_count: Real[np.ndarray, "nodes"],
     num_nodes: int,
     *,
     effective_snps: int,
@@ -208,37 +249,16 @@ def node_covariance_deme_summaries(
 
     root_count = np.sqrt(observed_count)
     expanded_gram = root_count[:, None] * covariance * root_count[None, :]
-    values, vectors = symmetric_psd_eigh(expanded_gram)
-    keep = (
-        values > max(float(np.max(values)) * 1e-10, 1e-12)
-        if values.size
-        else np.zeros((0,), dtype=bool)
-    )
-    if np.any(keep):
-        observed_factors = (
-            vectors[:, keep]
-            * np.sqrt(np.maximum(values[keep], 0.0) * float(effective))[None, :]
-            / root_count[:, None]
-        )
-        factors = np.zeros((num_nodes, observed_factors.shape[1]), dtype=np.float64)
-        factors[observed_nodes] = observed_factors
-    else:
-        factors = np.zeros((num_nodes, 1), dtype=np.float64)
-    diagonal = np.sum(factors * factors, axis=1) / float(effective)
-    return {
-        "effective_snps": effective,
-        "sample_count": sample_count,
-        "sum_x": factors * sample_count[:, None],
-        "sum_x2": factors * factors * sample_count[:, None],
-        "mean_x": factors,
-        "mean_x2": factors * factors,
-        "diag_mean": diagonal,
-    }
+    observed_factors = _covariance_factors(expanded_gram, effective) / root_count[:, None]
+    factors = np.zeros((num_nodes, observed_factors.shape[1]), dtype=np.float64)
+    factors[observed_nodes] = observed_factors
+    return _factor_deme_summaries(factors, sample_count, effective)
 
 
+@jaxtyped(typechecker=beartype)
 def sample_covariance_to_node_covariance(
-    sample_covariance: np.ndarray,
-    sample_nodes: np.ndarray,
+    sample_covariance: Real[np.ndarray, "samples samples"],
+    sample_nodes: Int[np.ndarray, "samples"],
     num_nodes: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Collapse sample covariance to covariance among observed graph nodes."""
@@ -265,7 +285,12 @@ def sample_covariance_to_node_covariance(
     return node_covariance, observed_nodes, sample_count
 
 
-def example_sample_nodes(example: Mapping[str, Any], active_positions: np.ndarray) -> np.ndarray:
+@jaxtyped(typechecker=beartype)
+def example_sample_nodes(
+    example: Mapping[str, Any],
+    active_positions: Real[np.ndarray, "nodes 2"],
+) -> Int[np.ndarray, "observations"]:
+    """Return graph indices for samples, or observed nodes for node covariance."""
     if "node_covariance" in example:
         return np.asarray(example["observed_nodes"], dtype=np.int32)
     if "sample_nodes" in example:
@@ -278,6 +303,7 @@ def example_sample_nodes(example: Mapping[str, Any], active_positions: np.ndarra
     )
 
 
+@beartype
 def example_deme_summaries(
     example: Mapping[str, Any],
     active_positions: np.ndarray,
@@ -285,43 +311,8 @@ def example_deme_summaries(
     *,
     canonical_node_covariance: bool = False,
 ) -> tuple[np.ndarray, dict[str, np.ndarray | int]]:
+    """Read one input format, using a common node covariance in production."""
     sample_nodes = example_sample_nodes(example, active_positions)
-    if canonical_node_covariance:
-        if "node_covariance" in example:
-            effective_snps = int(example["effective_snps"])
-            node_covariance = np.asarray(example["node_covariance"], dtype=np.float64)
-            observed_nodes = np.asarray(example["observed_nodes"], dtype=np.int32)
-            node_sample_count = np.asarray(example["node_sample_count"], dtype=np.float64)
-        else:
-            if "sample_covariance" in example:
-                sample_covariance = np.asarray(example["sample_covariance"], dtype=np.float64)
-                effective_snps = int(
-                    example.get("effective_snps") or max(sample_covariance.shape[0], 2)
-                )
-            elif "genotypes" in example:
-                standardized = standardized_polymorphic_genotypes(
-                    np.asarray(example["genotypes"], dtype=np.float64)
-                )
-                effective_snps = int(standardized.shape[1])
-                sample_covariance = standardized @ standardized.T / float(effective_snps)
-            else:
-                raise ValueError(
-                    "example must contain node_covariance, sample_covariance, or genotypes"
-                )
-            node_covariance, observed_nodes, node_sample_count = (
-                sample_covariance_to_node_covariance(
-                    sample_covariance,
-                    sample_nodes,
-                    num_nodes,
-                )
-            )
-        return sample_nodes, node_covariance_deme_summaries(
-            node_covariance,
-            observed_nodes,
-            node_sample_count,
-            num_nodes,
-            effective_snps=effective_snps,
-        )
     if "node_covariance" in example:
         return sample_nodes, node_covariance_deme_summaries(
             np.asarray(example["node_covariance"], dtype=np.float64),
@@ -331,29 +322,51 @@ def example_deme_summaries(
             effective_snps=int(example["effective_snps"]),
         )
     if "sample_covariance" in example:
-        return sample_nodes, covariance_deme_summaries(
-            np.asarray(example["sample_covariance"], dtype=np.float64),
+        sample_covariance = np.asarray(example["sample_covariance"], dtype=np.float64)
+        effective_snps = (
+            int(example["effective_snps"]) if example.get("effective_snps") is not None else None
+        )
+    elif "genotypes" in example:
+        genotypes = np.asarray(example["genotypes"], dtype=np.float64)
+        if not canonical_node_covariance:
+            return sample_nodes, standardized_deme_summaries(genotypes, sample_nodes, num_nodes)
+        standardized = standardized_polymorphic_genotypes(genotypes)
+        effective_snps = standardized.shape[1]
+        sample_covariance = standardized @ standardized.T / effective_snps
+    else:
+        raise ValueError("example must contain node_covariance, sample_covariance, or genotypes")
+
+    if canonical_node_covariance:
+        covariance, observed, counts = sample_covariance_to_node_covariance(
+            sample_covariance,
             sample_nodes,
             num_nodes,
-            effective_snps=(
-                int(example["effective_snps"])
-                if example.get("effective_snps") is not None
-                else None
-            ),
         )
-    if "genotypes" in example:
-        return sample_nodes, standardized_deme_summaries(
-            np.asarray(example["genotypes"], dtype=np.float64),
-            sample_nodes,
+        return sample_nodes, node_covariance_deme_summaries(
+            covariance,
+            observed,
+            counts,
             num_nodes,
+            effective_snps=effective_snps or max(sample_covariance.shape[0], 2),
         )
-    raise ValueError("example must contain node_covariance, sample_covariance, or genotypes")
+    return sample_nodes, covariance_deme_summaries(
+        sample_covariance,
+        sample_nodes,
+        num_nodes,
+        effective_snps=effective_snps,
+    )
 
 
+@beartype
 def deme_covariance_scores(
     summaries: Mapping[str, np.ndarray | int],
     covariance_components: int,
 ) -> np.ndarray:
+    """Return leading covariance scores, zero-padded at unobserved nodes.
+
+    Signs use the largest-magnitude entry of each component. A repeated eigenvalue
+    still has no unique eigenbasis; this sign convention does not resolve that.
+    """
     sample_count = np.asarray(summaries["sample_count"], dtype=np.float64)
     mean_x = np.asarray(summaries["mean_x"], dtype=np.float64)
     effective_snps = int(summaries["effective_snps"])
@@ -378,7 +391,9 @@ def deme_covariance_scores(
     return scores
 
 
+@beartype
 def scaled_log_support(values: np.ndarray) -> np.ndarray:
+    """Compress nonnegative support to [0, 1] within an example."""
     logged = np.log1p(np.maximum(values, 0.0))
     max_value = float(logged.max()) if logged.size > 0 else 0.0
     if max_value <= 0.0:
@@ -386,14 +401,18 @@ def scaled_log_support(values: np.ndarray) -> np.ndarray:
     return (logged / max_value).astype(np.float64)
 
 
+@beartype
 def absolute_log_support(values: np.ndarray) -> np.ndarray:
+    """Compress support without removing its between-example magnitude."""
     return np.log1p(np.maximum(values, 0.0)).astype(np.float64)
 
 
+@beartype
 def shortest_path_tree(
     start: int,
     adjacency: list[list[tuple[int, int]]],
 ) -> tuple[np.ndarray, np.ndarray]:
+    """Choose one BFS path per node for checkpoints using the embedded encoding."""
     parent = np.full(len(adjacency), -1, dtype=np.int32)
     parent_edge = np.full(len(adjacency), -1, dtype=np.int32)
     queue = [start]
@@ -411,6 +430,7 @@ def shortest_path_tree(
     return parent, parent_edge
 
 
+@beartype
 def shortest_path_dag(
     start: int,
     adjacency: list[list[tuple[int, int]]],
@@ -442,6 +462,7 @@ def shortest_path_dag(
     return order, predecessors, distance, log_path_count
 
 
+@beartype
 def distribute_over_shortest_paths(
     start: int,
     right_nodes: list[int],
@@ -484,12 +505,14 @@ def distribute_over_shortest_paths(
             node_totals[parent] += contribution
 
 
+@beartype
 def path_from_tree(
     start: int,
     target: int,
     parent: np.ndarray,
     parent_edge: np.ndarray,
 ) -> list[int]:
+    """Return edge indices on a BFS path, or an empty list if none exists."""
     if start == target:
         return []
     if parent[target] < 0:
@@ -505,12 +528,20 @@ def path_from_tree(
     return path
 
 
+@beartype
 def deme_covariance_precision_summaries(
     summaries: Mapping[str, np.ndarray | int],
     edges: np.ndarray,
     *,
     path_routing: Literal["single_shortest", "all_shortest"] = "single_shortest",
 ) -> dict[str, np.ndarray]:
+    """Summarize direct and path support for the feature encoder.
+
+    The precision channels are heuristics, not calibrated uncertainties. For
+    covariance inputs, the columns in ``mean_x`` are synthetic factors rather than
+    SNPs, so their fourth moments are not observed genotype fourth moments.
+    Production shares support across all equally short paths.
+    """
     if path_routing not in {"single_shortest", "all_shortest"}:
         raise ValueError(f"unsupported path routing: {path_routing!r}")
 
@@ -699,7 +730,9 @@ def deme_covariance_precision_summaries(
     }
 
 
+@beartype
 def standardized_signal_columns(values: np.ndarray) -> np.ndarray:
+    """Fill missing entries, standardize each signal, and clip it to [-8, 8]."""
     signals = np.asarray(values, dtype=np.float64)
     if signals.ndim == 1:
         signals = signals[:, None]
@@ -724,10 +757,38 @@ def standardized_signal_columns(values: np.ndarray) -> np.ndarray:
     return out.astype(np.float64)
 
 
+@jaxtyped(typechecker=beartype)
+def geometry_conductance(
+    node_coordinates: Real[np.ndarray, "nodes 2"],
+    edges: Int[np.ndarray, "edges 2"],
+    *,
+    length_weighted: bool,
+) -> Float[np.ndarray, "edges"]:
+    """Reference conductances shared by diffusion and resistance initialization.
+
+    Inverse edge lengths are relative to the median positive length and clipped to
+    [0.25, 4]. They use geography only, never predicted migration.
+    """
+    if not length_weighted:
+        return np.ones(edges.shape[0], dtype=np.float64)
+    node_coordinates = np.asarray(node_coordinates, dtype=np.float64)
+    delta = node_coordinates[edges[:, 1]] - node_coordinates[edges[:, 0]]
+    length = np.linalg.norm(delta, axis=1)
+    positive = length[np.isfinite(length) & (length > 0.0)]
+    reference = np.median(positive) if positive.size else 1.0
+    return np.clip(
+        reference / np.maximum(length, max(reference * 1e-6, 1e-12)),
+        0.25,
+        4.0,
+    ).astype(np.float64)
+
+
+@jaxtyped(typechecker=beartype)
 def geometry_normalized_laplacian(
-    positions: np.ndarray,
-    edges: np.ndarray,
+    positions: Real[np.ndarray, "nodes 2"],
+    edges: Int[np.ndarray, "edges 2"],
 ) -> sp.csr_matrix:
+    """Return D^-1/2 (D-W) D^-1/2 for the fixed geographic conductances."""
     positions = np.asarray(positions, dtype=np.float64)
     edges = np.asarray(edges, dtype=np.int32)
     num_nodes = int(positions.shape[0])
@@ -738,11 +799,7 @@ def geometry_normalized_laplacian(
 
     left = edges[:, 0].astype(np.int64)
     right = edges[:, 1].astype(np.int64)
-    lengths = np.linalg.norm(positions[right] - positions[left], axis=1)
-    positive = lengths[np.isfinite(lengths) & (lengths > 0.0)]
-    reference_length = float(np.median(positive)) if positive.size else 1.0
-    weights = reference_length / np.maximum(lengths, max(reference_length * 1e-6, 1e-12))
-    weights = np.clip(weights, 0.25, 4.0)
+    weights = geometry_conductance(positions, edges, length_weighted=True)
 
     degree = np.bincount(
         np.concatenate([left, right]),
@@ -765,20 +822,32 @@ def geometry_normalized_laplacian(
     return sp.coo_matrix((data, (rows, cols)), shape=(num_nodes, num_nodes)).tocsr()
 
 
+@jaxtyped(typechecker=beartype)
 def diffusion_band_summaries(
-    positions: np.ndarray,
-    edges: np.ndarray,
+    positions: Real[np.ndarray, "nodes 2"],
+    edges: Int[np.ndarray, "edges 2"],
     signals: np.ndarray,
     *,
     times: tuple[float, ...] = DIFFUSION_BAND_TIMES,
 ) -> dict[str, np.ndarray]:
+    """Split standardized signals into heat-diffusion bands on a fixed graph.
+
+    For S(t)=exp(-tL), the blocks are X-S(t0)X, S(t0)X-S(t1)X, ..., S(tK)X.
+    They sum to X. Each edge gets absolute contrasts, log squared contrasts, and
+    endpoint magnitudes in that same block order. No dense heat matrix is formed.
+    """
     positions = np.asarray(positions, dtype=np.float64)
     edges = np.asarray(edges, dtype=np.int32)
     signals = standardized_signal_columns(signals)
     num_nodes = int(positions.shape[0])
     num_edges = int(edges.shape[0])
     signal_count = int(signals.shape[1]) if signals.ndim == 2 else 0
-    band_count = len(times) + 1
+    if signals.shape[0] != num_nodes:
+        raise ValueError("signals must have one row per graph node")
+    if any(not np.isfinite(value) or value < 0.0 for value in times) or any(
+        right <= left for left, right in zip(times, times[1:], strict=False)
+    ):
+        raise ValueError("diffusion times must be finite, nonnegative, and increasing")
     if num_nodes == 0 or signal_count == 0:
         empty_node = np.zeros((num_nodes, 0), dtype=np.float64)
         empty_edge = np.zeros((num_edges, 0), dtype=np.float64)
@@ -788,54 +857,29 @@ def diffusion_band_summaries(
             "edge_squared_contrast": empty_edge,
             "edge_endpoint_energy": empty_edge,
         }
-    if num_edges == 0:
-        node_width = signal_count * band_count
-        edge_width = signal_count * band_count
-        return {
-            "node_bands": np.zeros((num_nodes, node_width), dtype=np.float64),
-            "edge_abs_contrast": np.zeros((num_edges, edge_width), dtype=np.float64),
-            "edge_squared_contrast": np.zeros((num_edges, edge_width), dtype=np.float64),
-            "edge_endpoint_energy": np.zeros((num_edges, edge_width), dtype=np.float64),
-        }
-
     laplacian = geometry_normalized_laplacian(positions, edges)
-    lowpasses: list[np.ndarray] = []
-    for time_value in times:
-        smoothed = spla.expm_multiply((-float(time_value)) * laplacian, signals)
-        lowpasses.append(np.asarray(smoothed, dtype=np.float64))
-
     bands = []
     previous = signals
-    for smoothed in lowpasses:
+    for time_value in times:
+        smoothed = np.asarray(
+            spla.expm_multiply((-time_value) * laplacian, signals),
+            dtype=np.float64,
+        )
         bands.append(previous - smoothed)
         previous = smoothed
     bands.append(previous)
     node_bands = np.concatenate(bands, axis=1)
     left = edges[:, 0].astype(np.int64)
     right = edges[:, 1].astype(np.int64)
-    edge_abs_blocks = []
-    edge_squared_blocks = []
-    edge_energy_blocks = []
-    for band in bands:
-        contrast = band[right] - band[left]
-        abs_contrast = np.abs(contrast)
-        edge_abs_blocks.append(abs_contrast)
-        edge_squared_blocks.append(np.log1p(contrast * contrast))
-        edge_energy_blocks.append(0.5 * (np.abs(band[left]) + np.abs(band[right])))
+    contrast = node_bands[right] - node_bands[left]
     return {
         "node_bands": np.nan_to_num(node_bands, copy=False).astype(np.float64),
-        "edge_abs_contrast": np.nan_to_num(
-            np.concatenate(edge_abs_blocks, axis=1),
-            copy=False,
-        ).astype(np.float64),
-        "edge_squared_contrast": np.nan_to_num(
-            np.concatenate(edge_squared_blocks, axis=1),
-            copy=False,
-        ).astype(np.float64),
+        "edge_abs_contrast": np.nan_to_num(np.abs(contrast), copy=False),
+        "edge_squared_contrast": np.nan_to_num(np.log1p(contrast * contrast), copy=False),
         "edge_endpoint_energy": np.nan_to_num(
-            np.concatenate(edge_energy_blocks, axis=1),
+            0.5 * (np.abs(node_bands[left]) + np.abs(node_bands[right])),
             copy=False,
-        ).astype(np.float64),
+        ),
     }
 
 
@@ -846,6 +890,11 @@ def graph_features(
     *,
     spatial_encoding: SpatialEncoding = "embedded",
 ) -> tuple[np.ndarray, np.ndarray]:
+    """Build checkpoint-ordered node and edge columns for one observation.
+
+    The topology encodings retain zero placeholders for x/y and dx/dy. Removing
+    those columns would change every following feature's meaning to a saved model.
+    """
     if spatial_encoding not in SPATIAL_ENCODINGS:
         raise ValueError(f"unsupported spatial encoding: {spatial_encoding!r}")
     topology = spatial_encoding in {"topology", "topology_node_covariance"}
@@ -929,10 +978,8 @@ def graph_features(
     )
     left_count = sample_count[edges[:, 0]]
     right_count = sample_count[edges[:, 1]]
-    left_se = np.zeros_like(left_count)
-    right_se = np.zeros_like(right_count)
-    left_se[left_count > 0.0] = 1.0 / np.sqrt(effective_snps * left_count[left_count > 0.0])
-    right_se[right_count > 0.0] = 1.0 / np.sqrt(effective_snps * right_count[right_count > 0.0])
+    left_se = node_se[edges[:, 0]]
+    right_se = node_se[edges[:, 1]]
     delta_features = np.zeros_like(delta) if topology else delta / max_length
     left_log_count = np.log1p(left_count)
     right_log_count = np.log1p(right_count)
@@ -971,12 +1018,14 @@ def graph_features(
     return node_x, edge_x
 
 
+@beartype
 def prepare_examples(
     examples: list[Mapping[str, Any]],
     *,
     covariance_components: int,
     spatial_encoding: SpatialEncoding = "embedded",
 ) -> list[dict[str, np.ndarray]]:
+    """Build unnormalized features; absent training targets are filled with zeros."""
     out: list[dict[str, np.ndarray]] = []
     for example in examples:
         node_x, edge_x = graph_features(
@@ -1012,10 +1061,12 @@ def prepare_examples(
     return out
 
 
+@beartype
 def apply_normalization(
     items: list[dict[str, np.ndarray]],
     stats: Mapping[str, Any],
 ) -> list[dict[str, np.ndarray]]:
+    """Apply saved feature statistics and center each example's log-rate targets."""
     node_mean = np.asarray(stats["node_mean"], dtype=np.float32)[None, :]
     node_std = np.asarray(stats["node_std"], dtype=np.float32)[None, :]
     edge_mean = np.asarray(stats["edge_mean"], dtype=np.float32)[None, :]
@@ -1087,12 +1138,14 @@ def apply_normalization(
     return out
 
 
+@beartype
 def normalize_prepared(
     train: list[dict[str, np.ndarray]],
     validation: list[dict[str, np.ndarray]] | None = None,
     *,
     std_floor: float = 0.2,
 ) -> tuple[list[dict[str, np.ndarray]], list[dict[str, np.ndarray]] | None, dict[str, object]]:
+    """Fit normalization on training examples only, then apply it to both splits."""
     if not train:
         raise ValueError("cannot normalize an empty training set")
     train_node = np.concatenate([x["node_x"] for x in train], axis=0)
@@ -1120,15 +1173,19 @@ def normalize_prepared(
     return normalized_train, normalized_validation, stats
 
 
+@beartype
 def pad_examples(
     items: list[dict[str, np.ndarray]],
     max_nodes: int | None = None,
     max_edges: int | None = None,
 ) -> dict[str, np.ndarray]:
+    """Zero-pad graphs to a shared shape and mark real nodes and edges with masks."""
     if not items:
         raise ValueError("cannot pad an empty example list")
-    max_nodes = max_nodes or max(x["node_x"].shape[0] for x in items)
-    max_edges = max_edges or max(x["edges"].shape[0] for x in items)
+    if max_nodes is None:
+        max_nodes = max(x["node_x"].shape[0] for x in items)
+    if max_edges is None:
+        max_edges = max(x["edges"].shape[0] for x in items)
     batch = len(items)
     node_dim = items[0]["node_x"].shape[1]
     edge_dim = items[0]["edge_x"].shape[1]
@@ -1148,6 +1205,24 @@ def pad_examples(
     for index, item in enumerate(items):
         n = item["node_x"].shape[0]
         e = item["edges"].shape[0]
+        if n > max_nodes or e > max_edges:
+            raise ValueError(f"example {index} exceeds the requested padding dimensions")
+        expected_shapes = {
+            "node_x": (n, node_dim),
+            "edge_x": (e, edge_dim),
+            "edges": (e, 2),
+            "y": (e,),
+            "q": (n,),
+            "edge_initializer": (e,),
+            "edge_initializer_valid": (e,),
+        }
+        for name, shape in expected_shapes.items():
+            if name in item and item[name].shape != shape:
+                raise ValueError(f"example {index}: {name} must have shape {shape}")
+        if not np.issubdtype(item["edges"].dtype, np.integer):
+            raise ValueError(f"example {index}: edges must contain integer node indices")
+        if np.any(item["edges"] < 0) or np.any(item["edges"] >= n):
+            raise ValueError(f"example {index}: edges contain an out-of-range node index")
         node_x[index, :n] = item["node_x"]
         edge_x[index, :e] = item["edge_x"]
         edges[index, :e] = item["edges"]
@@ -1184,11 +1259,64 @@ def pad_examples(
     }
 
 
+@jaxtyped(typechecker=beartype)
+def grounded_source_potentials(
+    num_nodes: int,
+    laplacian: sp.csr_matrix,
+    source_nodes: Int[np.ndarray, "sources"],
+) -> Float[np.ndarray, "nodes sources"]:
+    """Solve sampled-node potentials with the last graph node fixed to zero.
+
+    A column represents unit current entering its source and leaving the ground.
+    Grounding removes the constant mode of a connected graph Laplacian; centering
+    the observed covariance later removes the arbitrary choice of ground.
+    """
+    if laplacian.shape != (num_nodes, num_nodes):
+        raise ValueError("laplacian shape must match num_nodes")
+    if np.any(source_nodes < 0) or np.any(source_nodes >= num_nodes):
+        raise ValueError("source_nodes are outside the graph")
+    potentials = np.zeros((num_nodes, source_nodes.shape[0]), dtype=np.float64)
+    if num_nodes < 2 or source_nodes.size == 0:
+        return potentials
+    ground = num_nodes - 1
+    reduced = laplacian[:ground, :ground].tocsc()
+    rhs = np.zeros((ground, source_nodes.shape[0]), dtype=np.float64)
+    ungrounded = source_nodes != ground
+    rhs[source_nodes[ungrounded], np.flatnonzero(ungrounded)] = 1.0
+    solved = np.asarray(spla.spsolve(reduced, rhs), dtype=np.float64)
+    if solved.ndim == 1:
+        solved = solved[:, None]
+    if not np.all(np.isfinite(solved)):
+        raise ValueError("resistance solve returned non-finite potentials")
+    potentials[:ground, :] = solved
+    return potentials
+
+
+@jaxtyped(typechecker=beartype)
+def line_graph_laplacian(num_nodes: int, edges: Int[np.ndarray, "edges 2"]) -> sp.csr_matrix:
+    """Couple edges that share endpoints using unsigned incidence products."""
+    num_edges = edges.shape[0]
+    incidence = sp.coo_matrix(
+        (
+            np.ones(2 * num_edges, dtype=np.float64),
+            (edges.ravel(), np.repeat(np.arange(num_edges), 2)),
+        ),
+        shape=(num_nodes, num_edges),
+    ).tocsr()
+    adjacency = (incidence.T @ incidence).tocsr()
+    adjacency.setdiag(0.0)
+    adjacency.eliminate_zeros()
+    degree = np.asarray(adjacency.sum(axis=1)).ravel()
+    return (sp.diags(degree) - adjacency).tocsr()
+
+
+@jaxtyped(typechecker=beartype)
 def sparse_laplacian(
     num_nodes: int,
-    edges: np.ndarray,
-    edge_log_rates: np.ndarray,
+    edges: Int[np.ndarray, "edges 2"],
+    edge_log_rates: Float[np.ndarray, "edges"],
 ) -> sp.csr_matrix:
+    """Assemble the weighted graph Laplacian from log conductances."""
     rates = np.exp(np.asarray(edge_log_rates, dtype=np.float64))
     rows = []
     cols = []
@@ -1202,16 +1330,20 @@ def sparse_laplacian(
     return sp.coo_matrix((data, (rows, cols)), shape=(num_nodes, num_nodes)).tocsr()
 
 
+@beartype
 def edge_conditioner_config(config: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Read the conditioner settings stored with a checkpoint or training run."""
     edge_conditioner = config.get("edge_conditioner")
     if not isinstance(edge_conditioner, Mapping):
         raise ValueError("model metadata is missing edge_conditioner")
     return edge_conditioner
 
 
+@beartype
 def _linearized_conditioner_observation(
     example: Mapping[str, Any],
 ) -> tuple[np.ndarray, np.ndarray, int | None, np.ndarray | None]:
+    """Resolve the covariance rows, graph indices, SNP count, and deme counts."""
     active_positions = np.asarray(example["active_positions"], dtype=np.float64)
     sample_nodes = example_sample_nodes(example, active_positions)
     if "node_covariance" in example:
@@ -1241,10 +1373,12 @@ def _linearized_conditioner_observation(
     raise ValueError("example must contain node_covariance, sample_covariance, or genotypes")
 
 
+@beartype
 def _fit_all_pair_diagonal_resistance_proxy(
     example: Mapping[str, Any],
     config: Mapping[str, Any],
 ) -> tuple[np.ndarray, dict[str, object]]:
+    """Run the initializer with checkpoint settings and attach workflow diagnostics."""
     from dreems.linearized import all_pair_adjoint_conductance_initializer
 
     graph = example["graph"]
@@ -1279,22 +1413,26 @@ def _fit_all_pair_diagonal_resistance_proxy(
     return estimate.edge_log_conductance.astype(np.float32), diagnostics
 
 
+@beartype
 def fit_linearized_resistance_proxy(
     example: Mapping[str, Any],
     config: Mapping[str, Any],
 ) -> tuple[np.ndarray, dict[str, object]]:
+    """Validate the saved method name before constructing its edge feature."""
     conditioner = edge_conditioner_config(config)
     if conditioner.get("method") != "all_pair_diagonal_adjoint":
         raise ValueError("DREEMS requires the all-pair diagonal-adjoint conditioner")
     return _fit_all_pair_diagonal_resistance_proxy(example, config)
 
 
+@beartype
 def append_edge_conditioner_features_to_item(
     item: dict[str, np.ndarray],
     edge_values: np.ndarray | None,
     *,
     valid: bool,
 ) -> dict[str, np.ndarray]:
+    """Append the centered initializer and a validity flag without mutating input."""
     edge_count = int(np.asarray(item["edges"]).shape[0])
     if valid and edge_values is not None:
         values = np.asarray(edge_values, dtype=np.float64)
@@ -1319,6 +1457,7 @@ def append_edge_conditioner_features_to_item(
     return out
 
 
+@beartype
 def append_edge_conditioner_features_for_checkpoint(
     prepared: list[dict[str, np.ndarray]],
     examples: list[Mapping[str, Any]],
@@ -1327,6 +1466,11 @@ def append_edge_conditioner_features_for_checkpoint(
     *,
     fail_on_error: bool = True,
 ) -> list[dict[str, np.ndarray]]:
+    """Add missing conditioner columns, reporting failures instead of hiding them.
+
+    Inference raises on a failed solve by default. Corpus preparation may opt
+    into zero features with a zero validity flag using ``fail_on_error=False``.
+    """
     if not prepared:
         return prepared
     conditioner_kind = str(edge_conditioner_config(model).get("kind"))

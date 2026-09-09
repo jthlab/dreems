@@ -4,6 +4,7 @@ from pathlib import Path
 
 import networkx as nx
 import numpy as np
+import pytest
 import yaml
 
 from dreems import notebook_scenarios
@@ -11,6 +12,25 @@ from dreems import notebook_scenarios
 
 def _config() -> dict[str, object]:
     return {"notebook_scenarios": {}}
+
+
+@pytest.mark.parametrize("value", [2.5, -1, True, "1000", np.nan, [2]])
+@pytest.mark.parametrize("key", ["num_snps", "retained_snps"])
+def test_notebook_settings_reject_invalid_counts(key, value):
+    with pytest.raises(ValueError):
+        notebook_scenarios.scenario_count({"notebook_scenarios": {key: value}})
+
+
+@pytest.mark.parametrize("value", [-1, 0.25, 1j])
+def test_notebook_maf_filter_rejects_incomplete_or_noninteger_calls(value):
+    calls = np.full((3, 4, 2), value)
+    with pytest.raises(ValueError, match="integer"):
+        notebook_scenarios.maf_filtered_dosages(calls)
+
+
+def test_notebook_haplotype_layout_must_include_complete_diploids():
+    with pytest.raises(ValueError, match="deme order"):
+        notebook_scenarios._calls_for_nodes(np.zeros((3, 12), dtype=np.uint8), np.asarray([0]))
 
 
 def test_notebook_graph_preserves_networkx_edge_order() -> None:
@@ -76,6 +96,42 @@ def test_maf_filter_is_applied_after_sample_subsetting() -> None:
     dosages, keep = notebook_scenarios.maf_filtered_dosages(calls)
     np.testing.assert_array_equal(keep, [True, True, False, False])
     assert dosages.shape == (10, 2)
+
+
+def test_model_snp_target_is_applied_after_maf_filtering() -> None:
+    calls = np.zeros((4, 10, 2), dtype=np.uint8)
+    calls[0, :2, 0] = 1
+    calls[1, :3, 0] = 1
+    calls[2, 0, 0] = 1
+    calls[3, :, :] = 1
+
+    selected_calls, dosages, available = notebook_scenarios.select_model_snps(
+        calls,
+        target_snps=2,
+    )
+
+    assert available == 3
+    np.testing.assert_array_equal(selected_calls, calls[:2])
+    assert dosages.shape == (10, 2)
+    with pytest.raises(ValueError, match="only 3 pass"):
+        notebook_scenarios.select_model_snps(calls, target_snps=4)
+
+
+def test_unsigned_notebook_calls_use_the_public_genotype_path() -> None:
+    graph, positions = notebook_scenarios.notebook_graph()
+    nodes = np.asarray([0, 1], dtype=np.int32)
+    calls = np.random.default_rng(3).integers(0, 2, size=(12, 20, 2), dtype=np.uint8)
+    data = notebook_scenarios._notebook_dataset(
+        calls, selected_nodes=nodes, raw_positions=positions, edges=graph["edges"]
+    )
+    dosages, _ = notebook_scenarios.maf_filtered_dosages(calls)
+    standardized = (dosages - dosages.mean(axis=0)) / dosages.std(axis=0, ddof=1)
+    deme_means = standardized.reshape(2, 10, -1).mean(axis=1)
+    expected = deme_means @ deme_means.T / standardized.shape[1]
+    np.testing.assert_allclose(data.node_covariance.values, expected, rtol=1e-6, atol=1e-8)
+    np.testing.assert_array_equal(data.observed_nodes.values, nodes)
+    assert data.attrs["retained_variants"] == standardized.shape[1]
+    assert calls.dtype == np.uint8
 
 
 def test_exact_h2h_config_records_source_checksum() -> None:

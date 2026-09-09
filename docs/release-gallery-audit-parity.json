@@ -1,0 +1,19 @@
+{
+  "checkpoint_rows_exact": 4096,
+  "packed_slices_exact": 128,
+  "broad_cases_exact": 512,
+  "scenario_cases_exact": 24,
+  "snp_pairs_exact": 12,
+  "checkpoint_csv_byte_identical": true,
+  "statistics_exact": true,
+  "pixel_identical_figures": 10,
+  "rendering_dpi": 70,
+  "public_parameters_and_defaults_preserved": true,
+  "selection_changes": {},
+  "unchanged_packaged_checkpoint_sha256": "454cb50f4c7ef1213e001d700d1bf9e9f6a353b5c8be5619aae06e9d7a22cc15",
+  "comparisons": {
+    "arrays": 5208,
+    "scalars": 647872
+  },
+  "elapsed_seconds": 102.34624539827928
+}

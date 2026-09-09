@@ -1,5 +1,7 @@
 """Synthetic graph motifs, sample designs, and landscape cases."""
 
+# ruff: noqa: F722, F821, UP037
+
 from __future__ import annotations
 
 import math
@@ -8,6 +10,8 @@ from typing import Any
 
 import numpy as np
 import scipy.sparse as sp
+from beartype import beartype
+from jaxtyping import Bool, Int, Real, jaxtyped
 from scipy.sparse.csgraph import shortest_path
 from scipy.spatial import cKDTree
 
@@ -27,39 +31,46 @@ from dreems.geography import (
     standardize,
 )
 from dreems.simulation_config import (
+    _finite_setting,
+    _integer_setting,
+    _weight_probabilities,
     choose_weighted_name,
     draw_local_diploids_per_node,
     draw_weighted_positive_float,
     draw_weighted_positive_int,
     local_simulation_metadata,
     string_list,
+    validate_sampling_settings,
 )
 
 
+@beartype
 def sample_grid_dimensions(
     rng: np.random.Generator,
     sim: Mapping[str, Any],
 ) -> tuple[int, int]:
+    """Draw height and width independently from inclusive recipe bounds."""
     height = int(rng.integers(int(sim["min_height"]), int(sim["max_height"]) + 1))
     width = int(rng.integers(int(sim["min_width"]), int(sim["max_width"]) + 1))
     return height, width
 
 
+@beartype
 def choose_sample_regime(
     rng: np.random.Generator,
     sim: Mapping[str, Any],
     local: dict[str, Any],
 ) -> dict[str, Any]:
+    """Choose a sampling regime and apply its overrides to the local recipe."""
     regimes = sim.get("sample_regimes") or []
     if regimes:
         weights = np.asarray(
-            [float(regime.get("weight", 1.0)) for regime in regimes],
+            [_finite_setting(regime.get("weight", 1.0), "regime weight") for regime in regimes],
             dtype=np.float64,
         )
-        weights = np.where(np.isfinite(weights) & (weights > 0.0), weights, 0.0)
-        if float(weights.sum()) <= 0.0:
-            weights = np.ones(len(regimes), dtype=np.float64)
-        weights /= float(weights.sum())
+        weights = _weight_probabilities(weights)
+        for row in regimes:
+            validate_sampling_settings({**local, **row})
         regime = dict(regimes[int(rng.choice(len(regimes), p=weights))])
         local["sample_regime"] = str(regime.get("name", "sample_regime"))
         local["sample_design"] = str(
@@ -79,9 +90,13 @@ def choose_sample_regime(
             if key in regime:
                 local[key] = regime[key]
         if "diploids_per_node" in regime:
-            local["diploids_per_node"] = max(int(regime["diploids_per_node"]), 1)
+            local["diploids_per_node"] = _integer_setting(
+                regime["diploids_per_node"], "diploids_per_node"
+            )
         elif "diploids_per_site" in regime:
-            local["diploids_per_node"] = max(int(regime["diploids_per_site"]), 1)
+            local["diploids_per_node"] = _integer_setting(
+                regime["diploids_per_site"], "diploids_per_site"
+            )
         else:
             local["diploids_per_node"] = draw_local_diploids_per_node(rng, local)
         return local
@@ -92,11 +107,23 @@ def choose_sample_regime(
     return local
 
 
+@beartype
 def draw_sample_nodes_from_positions(
     rng: np.random.Generator,
     positions: np.ndarray,
     local: Mapping[str, Any],
 ) -> np.ndarray:
+    """Draw individual-to-node assignments, retaining at least two sampled nodes.
+
+    The historical max_samples setting caps both the site draw and the total
+    individuals. Repeated node IDs represent distinct diploid individuals.
+    A one-node graph can only supply repeated samples at that node.
+    """
+    validate_sampling_settings(local)
+    if positions.ndim != 2 or positions.shape[1] != 2 or not np.all(np.isfinite(positions)):
+        raise ValueError("positions must contain finite pairs of coordinates")
+    if positions.shape[0] == 0:
+        raise ValueError("cannot draw samples from an empty graph")
     num_nodes = int(positions.shape[0])
     sample_design = str(local.get("sample_design", "sites"))
     diploids_per_node = max(int(local.get("diploids_per_node", 1)), 1)
@@ -201,6 +228,7 @@ def draw_sample_nodes_from_positions(
     return cap_total_samples(np.asarray(nearest, dtype=np.int32))
 
 
+@beartype
 def node_mean_edge_values(
     num_nodes: int,
     edges: np.ndarray,
@@ -219,6 +247,7 @@ def node_mean_edge_values(
     return sums / np.maximum(counts, 1.0)
 
 
+@beartype
 def node_barrier_proximity(
     num_nodes: int,
     edges: np.ndarray,
@@ -250,13 +279,16 @@ def node_barrier_proximity(
     return standardize(direct + 0.5 * neighboring)
 
 
+@beartype
 def sampling_correlation(values: np.ndarray, score: np.ndarray) -> float:
+    """Measure sampling association; return NaN when either field is constant."""
     left = standardize(np.asarray(values, dtype=np.float64))
     right = standardize(np.asarray(score, dtype=np.float64))
     denominator = float(np.linalg.norm(left) * np.linalg.norm(right))
     return float(np.dot(left, right) / denominator) if denominator > 0.0 else float("nan")
 
 
+@beartype
 def apply_migration_associated_sampling(
     rng: np.random.Generator,
     case: dict[str, Any],
@@ -264,7 +296,13 @@ def apply_migration_associated_sampling(
     *,
     mode: str,
 ) -> dict[str, Any]:
-    """Resample site identities while preserving sample counts and graph truth."""
+    """Resample sites before simulation, preserving counts and graph truth.
+
+    Positive and negative modes favor high and low incident log migration;
+    barrier proximity favors nodes near low-conductance edges. Accessibility
+    noise varies smoothly in space. Existing per-site counts are permuted
+    across the selected sites, not redrawn.
+    """
 
     supported = {
         "independent",
@@ -369,13 +407,24 @@ def apply_migration_associated_sampling(
     return case
 
 
+@jaxtyped(typechecker=beartype)
 def choose_path_sample_sites(
     rng: np.random.Generator,
-    positions: np.ndarray,
-    edges: np.ndarray,
+    positions: Real[np.ndarray, "nodes 2"],
+    edges: Int[np.ndarray, "edges 2"],
     sampled_sites: int,
-) -> np.ndarray:
+) -> Int[np.ndarray, "sites"]:
+    """Space sites along a random long path, falling back to a spatial transect.
+
+    Distances use Euclidean edge lengths. Disconnected graphs are allowed:
+    if the selected component has no suitable path, the transect can cross
+    components. Site counts are clamped to the available nodes.
+    """
     num_nodes = int(positions.shape[0])
+    if num_nodes == 0 or not np.all(np.isfinite(positions)):
+        raise ValueError("positions must contain at least one finite coordinate pair")
+    if np.any(edges < 0) or np.any(edges >= num_nodes):
+        raise ValueError("edges must refer to valid node indices")
     sampled_sites = min(max(int(sampled_sites), 1), num_nodes)
     if sampled_sites >= num_nodes:
         return np.arange(num_nodes, dtype=np.int32)
@@ -388,18 +437,13 @@ def choose_path_sample_sites(
         shape=(num_nodes, num_nodes),
     )
     start = int(rng.integers(0, num_nodes))
-    distances = shortest_path(graph, directed=False, indices=start, unweighted=False)
+    distances, predecessors = shortest_path(
+        graph, directed=False, indices=start, unweighted=False, return_predecessors=True
+    )
     finite = np.flatnonzero(np.isfinite(distances))
     if finite.shape[0] >= sampled_sites:
         far = finite[np.argsort(distances[finite])[-max(8, sampled_sites) :]]
         end = int(rng.choice(far))
-        _distance, predecessors = shortest_path(
-            graph,
-            directed=False,
-            indices=start,
-            unweighted=False,
-            return_predecessors=True,
-        )
         path = reconstruct_shortest_path(predecessors, start, end)
         if path.shape[0] >= sampled_sites:
             selected = path[np.rint(np.linspace(0, path.shape[0] - 1, sampled_sites)).astype(int)]
@@ -407,22 +451,46 @@ def choose_path_sample_sites(
             if selected.shape[0] >= min(sampled_sites, 2):
                 return selected
 
+    return _projected_sample_sites(
+        rng, positions, sampled_sites, quantile_bounds=(0.04, 0.96), jitter_scale=0.04
+    )
+
+
+@jaxtyped(typechecker=beartype)
+def _projected_sample_sites(
+    rng: np.random.Generator,
+    positions: Real[np.ndarray, "nodes 2"],
+    sampled_sites: int,
+    *,
+    quantile_bounds: tuple[float, float],
+    jitter_scale: float,
+) -> Int[np.ndarray, "sites"]:
+    """Choose distinct sites near jittered quantiles of a random spatial axis."""
     coords = positions - positions.mean(axis=0, keepdims=True)
     direction = rng.normal(size=2)
     direction = direction / max(float(np.linalg.norm(direction)), 1e-12)
     projection = coords @ direction
     chosen = []
-    for value in np.quantile(projection, np.linspace(0.04, 0.96, sampled_sites)):
-        jitter = rng.normal(scale=0.04 * max(float(np.ptp(projection)), 1.0))
+    for value in np.quantile(projection, np.linspace(*quantile_bounds, sampled_sites)):
+        jitter = rng.normal(scale=jitter_scale * max(float(np.ptp(projection)), 1.0))
         chosen.append(int(np.argmin(np.abs(projection - value - jitter))))
     chosen = list(dict.fromkeys(chosen))
     if len(chosen) < sampled_sites:
-        remaining = [int(idx) for idx in np.argsort(projection) if int(idx) not in set(chosen)]
+        chosen_set = set(chosen)
+        remaining = [int(idx) for idx in np.argsort(projection) if int(idx) not in chosen_set]
         chosen.extend(remaining[: sampled_sites - len(chosen)])
     return np.asarray(chosen[:sampled_sites], dtype=np.int32)
 
 
-def reconstruct_shortest_path(predecessors: np.ndarray, start: int, end: int) -> np.ndarray:
+@jaxtyped(typechecker=beartype)
+def reconstruct_shortest_path(
+    predecessors: Int[np.ndarray, "nodes"], start: int, end: int
+) -> Int[np.ndarray, "path"]:
+    """Follow SciPy predecessor indices; unreachable or cyclic paths are empty."""
+    if not 0 <= start < predecessors.size or not 0 <= end < predecessors.size:
+        raise ValueError("path endpoints must refer to predecessor indices")
+    if np.any(predecessors >= predecessors.size):
+        raise ValueError("predecessors contain an out-of-range node index")
     path = [int(end)]
     current = int(end)
     while current != int(start):
@@ -435,11 +503,18 @@ def reconstruct_shortest_path(predecessors: np.ndarray, start: int, end: int) ->
     return np.asarray(path[::-1], dtype=np.int32)
 
 
+@beartype
 def draw_feems_lattice_sample_nodes(
     rng: np.random.Generator,
     positions: np.ndarray,
     local: Mapping[str, Any],
 ) -> tuple[np.ndarray, dict[str, Any]]:
+    """Draw regional binomial diploid counts, thin sites, then cap individuals.
+
+    Keep the per-node RNG order: each nonempty binomial draw is immediately
+    followed by its site-thinning draw. Vectorizing these separately changes
+    every subsequent seeded example.
+    """
     start = float(local["feems_lattice_barrier_startpt"])
     end = float(local["feems_lattice_barrier_endpt"])
     sample_prob = draw_weighted_positive_float(
@@ -492,11 +567,13 @@ def draw_feems_lattice_sample_nodes(
     return sample_nodes_array, metadata
 
 
+@beartype
 def draw_feems_lattice_case(
     rng: np.random.Generator,
     sim: Mapping[str, Any],
     local: Mapping[str, Any],
 ) -> dict[str, Any]:
+    """Draw a triangular lattice with FEEMS-style surfaces and regional sampling."""
     rows = draw_weighted_positive_int(
         rng,
         value=sim["feems_lattice_rows"],
@@ -559,6 +636,7 @@ def draw_feems_lattice_case(
     }
 
 
+@beartype
 def draw_grid_case(
     rng: np.random.Generator,
     sim: Mapping[str, Any],
@@ -569,6 +647,7 @@ def draw_grid_case(
     height: int | None = None,
     width: int | None = None,
 ) -> dict[str, Any]:
+    """Draw a masked grid and its fields; draw both dimensions if either is absent."""
     if height is None or width is None:
         height, width = sample_grid_dimensions(rng, sim)
     if mask_kind is None:
@@ -597,16 +676,19 @@ def draw_grid_case(
     }
 
 
+@beartype
 def draw_target_grid_dimensions(
     rng: np.random.Generator,
     target_nodes: int,
 ) -> tuple[int, int]:
+    """Choose a random aspect ratio near the requested rectangular node count."""
     aspect = float(rng.uniform(0.65, 1.45))
     height = max(4, int(round(math.sqrt(target_nodes / aspect))))
     width = max(4, int(round(height * aspect)))
     return height, width
 
 
+@beartype
 def draw_earth_like_case(
     rng: np.random.Generator,
     sim: Mapping[str, Any],
@@ -614,6 +696,7 @@ def draw_earth_like_case(
     *,
     surface_kind: str,
 ) -> dict[str, Any]:
+    """Draw synthetic coast/island masks, not geographic crops from a world map."""
     target_nodes = int(rng.integers(int(sim["earth_min_nodes"]), int(sim["earth_max_nodes"]) + 1))
     for _attempt in range(50):
         height, width = draw_target_grid_dimensions(rng, target_nodes)
@@ -642,6 +725,7 @@ def draw_earth_like_case(
     raise RuntimeError("could not build synthetic earth-like graph")
 
 
+@beartype
 def draw_weighted_diploids(
     rng: np.random.Generator,
     *,
@@ -649,10 +733,14 @@ def draw_weighted_diploids(
     high: int,
     weights: object,
 ) -> int:
-    candidates = [str(value) for value in range(max(int(low), 1), max(int(high), 1) + 1)]
+    """Draw individuals per sampled site from the inclusive count range."""
+    low = _integer_setting(low, "low")
+    high = _integer_setting(high, "high")
+    candidates = [str(value) for value in range(low, high + 1)]
     return int(choose_weighted_name(rng, candidates, weights))
 
 
+@beartype
 def global_landscape_environment(
     rng: np.random.Generator,
     positions: np.ndarray,
@@ -661,13 +749,11 @@ def global_landscape_environment(
     land_xy: Any,
     local: Mapping[str, Any],
 ) -> dict[str, Any]:
-    from shapely.geometry import Point
+    """Combine real coastlines with synthetic habitat and latitude effects."""
+    import shapely
 
     boundary = land_xy.boundary
-    coast_distance = np.asarray(
-        [boundary.distance(Point(float(x), float(y))) for x, y in positions],
-        dtype=np.float64,
-    )
+    coast_distance = shapely.distance(boundary, shapely.points(positions))
     extent = max(float(np.ptp(positions[:, 0])), float(np.ptp(positions[:, 1])), 1.0)
     coast_scale = float(rng.uniform(0.04, 0.16) * extent)
     coast_proximity = np.exp(-coast_distance / max(coast_scale, 1e-6))
@@ -702,11 +788,13 @@ def global_landscape_environment(
     }
 
 
+@beartype
 def global_landscape_ridge(
     rng: np.random.Generator,
     positions: np.ndarray,
     strength_scale: float,
 ) -> dict[str, Any]:
+    """Draw a synthetic mountain-like ridge, not an observed elevation profile."""
     center = np.mean(positions, axis=0)
     extent = max(float(np.ptp(positions[:, 0])), float(np.ptp(positions[:, 1])), 1.0)
     theta = float(rng.uniform(0.0, math.pi))
@@ -731,6 +819,7 @@ def global_landscape_ridge(
     }
 
 
+@beartype
 def global_landscape_surfaces(
     rng: np.random.Generator,
     *,
@@ -741,6 +830,11 @@ def global_landscape_surfaces(
     land_xy: Any,
     local: Mapping[str, Any],
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    """Draw migration and local coalescence fields on a real land/water mesh.
+
+    Water and coast locations come from the map. Ridges and habitat variation
+    are procedural features, with independent random strengths and locations.
+    """
     env = global_landscape_environment(rng, positions, lonlat, land_mask, land_xy, local)
     ridge = global_landscape_ridge(
         rng,
@@ -830,16 +924,26 @@ def global_landscape_surfaces(
     return edge_log_rates, node_log_q, metadata
 
 
+@jaxtyped(typechecker=beartype)
 def choose_global_landscape_sample_sites(
     rng: np.random.Generator,
-    positions: np.ndarray,
-    edges: np.ndarray,
-    land_mask: np.ndarray,
+    positions: Real[np.ndarray, "nodes 2"],
+    edges: Int[np.ndarray, "edges 2"],
+    land_mask: Bool[np.ndarray, "nodes"],
     sampled_sites: int,
     *,
     path_probability: float = 1.0,
-) -> np.ndarray:
-    land_nodes = np.flatnonzero(np.asarray(land_mask, dtype=bool)).astype(np.int32)
+) -> Int[np.ndarray, "sites"]:
+    """Sample only land nodes using a path, uniform sites, or a spatial transect."""
+    if not np.all(np.isfinite(positions)):
+        raise ValueError("positions must contain finite coordinates")
+    if np.any(edges < 0) or np.any(edges >= positions.shape[0]):
+        raise ValueError("edges must refer to valid node indices")
+    if not np.isfinite(path_probability) or not 0 <= path_probability <= 1:
+        raise ValueError("path_probability must lie in [0, 1]")
+    land_nodes = np.flatnonzero(land_mask).astype(np.int32)
+    if not land_nodes.size:
+        raise ValueError("land_mask must include at least one sampleable node")
     sampled_sites = min(max(int(sampled_sites), 1), land_nodes.shape[0])
     if sampled_sites >= land_nodes.shape[0]:
         return land_nodes
@@ -848,43 +952,37 @@ def choose_global_landscape_sample_sites(
     old_to_land[land_nodes] = np.arange(land_nodes.shape[0], dtype=np.int32)
     land_edge_mask = land_mask[edges[:, 0]] & land_mask[edges[:, 1]]
     land_edges = old_to_land[edges[land_edge_mask]]
-    path_probability = float(np.clip(path_probability, 0.0, 1.0))
     if land_edges.shape[0] >= max(sampled_sites - 1, 1) and rng.random() < path_probability:
-        try:
-            selected = choose_path_sample_sites(
-                rng,
-                positions[land_nodes],
-                land_edges.astype(np.int32, copy=False),
-                sampled_sites,
-            )
-            if selected.shape[0] >= min(sampled_sites, 2):
-                return land_nodes[selected[:sampled_sites]]
-        except Exception:  # noqa: BLE001
-            pass
+        selected = choose_path_sample_sites(
+            rng,
+            positions[land_nodes],
+            land_edges.astype(np.int32, copy=False),
+            sampled_sites,
+        )
+        if selected.shape[0] >= min(sampled_sites, 2):
+            return land_nodes[selected[:sampled_sites]]
 
     if rng.random() < 0.35:
         return rng.choice(land_nodes, size=sampled_sites, replace=False).astype(np.int32)
 
-    coords = positions[land_nodes] - np.mean(positions[land_nodes], axis=0, keepdims=True)
-    direction = rng.normal(size=2)
-    direction = direction / max(float(np.linalg.norm(direction)), 1e-12)
-    projection = coords @ direction
-    chosen: list[int] = []
-    for value in np.quantile(projection, np.linspace(0.03, 0.97, sampled_sites)):
-        jitter = rng.normal(scale=0.035 * max(float(np.ptp(projection)), 1.0))
-        chosen.append(int(np.argmin(np.abs(projection - value - jitter))))
-    chosen = list(dict.fromkeys(chosen))
-    if len(chosen) < sampled_sites:
-        remaining = [idx for idx in np.argsort(projection) if int(idx) not in set(chosen)]
-        chosen.extend(int(idx) for idx in remaining[: sampled_sites - len(chosen)])
-    return land_nodes[np.asarray(chosen[:sampled_sites], dtype=np.int32)]
+    return land_nodes[
+        _projected_sample_sites(
+            rng,
+            positions[land_nodes],
+            sampled_sites,
+            quantile_bounds=(0.03, 0.97),
+            jitter_scale=0.035,
+        )
+    ]
 
 
+@beartype
 def draw_global_landscape_case(
     rng: np.random.Generator,
     sim: Mapping[str, Any],
     local: Mapping[str, Any],
 ) -> dict[str, Any]:
+    """Draw a world-map mesh; sampled fractions use land nodes as the denominator."""
     region = build_global_landscape_mesh(rng, sim)
     positions = np.asarray(region["positions"], dtype=np.float64)
     lonlat = np.asarray(region["lonlat"], dtype=np.float64)
@@ -1001,6 +1099,7 @@ def draw_global_landscape_case(
     }
 
 
+@beartype
 def draw_known_graph_case(
     rng: np.random.Generator,
     sim: Mapping[str, Any],
@@ -1013,6 +1112,11 @@ def draw_known_graph_case(
     diploids_per_site: int,
     metadata: Mapping[str, Any],
 ) -> dict[str, Any]:
+    """Attach random fields to fixed geometry and sites using the local recipe.
+
+    ``sim`` is retained for the shared case-generator calling convention;
+    this generator only needs its already-resolved ``local`` settings.
+    """
     surface = draw_surface(rng, surface_kind=surface_kind, local=local)
     q_surface = draw_q_surface(rng, local)
     sample_nodes = np.repeat(
@@ -1036,6 +1140,7 @@ def draw_known_graph_case(
     }
 
 
+@beartype
 def draw_wolflike_case(
     rng: np.random.Generator,
     sim: Mapping[str, Any],
@@ -1043,6 +1148,11 @@ def draw_wolflike_case(
     *,
     surface_kinds: Sequence[str],
 ) -> dict[str, Any]:
+    """Draw a synthetic corridor/coast mesh with path-biased sampling.
+
+    This does not load the empirical wolf graph. Sampled fractions use all
+    active graph nodes, unlike the land-only fractions of world-map crops.
+    """
     source = choose_weighted_name(
         rng,
         string_list(sim.get("wolflike_graph_sources"), default=["synthetic-corridor", "land"]),

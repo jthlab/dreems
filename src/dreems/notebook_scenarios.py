@@ -8,9 +8,7 @@ structure so the expensive msprime simulations run exactly three times.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
-import os
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -22,8 +20,12 @@ import networkx as nx
 import numpy as np
 import scipy.sparse as sp
 import xarray as xr
+from beartype import beartype
 
 from dreems import corpus, features, genotypes, workflow_io
+from dreems.validation import _integer_array, _real_array, validate_graph_arrays
+from dreems.workflow_io import sha256 as _sha256
+from dreems.workflow_io import write_npz as _atomic_npz
 
 TRUTHS = ("barrier", "anisotropy", "homogeneous")
 MASKS = ("full", "random_10pct", "outer_slabs", "left_missing")
@@ -36,88 +38,11 @@ SIMULATION_SEED = 10
 MIN_MAF = 0.05
 MIN_CALL_RATE = 0.8
 
-OUTER_SLAB_NODES = np.asarray(
-    [
-        0,
-        1,
-        2,
-        9,
-        10,
-        11,
-        12,
-        13,
-        14,
-        21,
-        22,
-        23,
-        24,
-        25,
-        26,
-        33,
-        34,
-        35,
-        36,
-        37,
-        38,
-        45,
-        46,
-        47,
-        48,
-        49,
-        50,
-        57,
-        58,
-        59,
-        60,
-        61,
-        62,
-        69,
-        70,
-        71,
-        72,
-        73,
-        74,
-        81,
-        82,
-        83,
-        84,
-        85,
-        86,
-        93,
-        94,
-        95,
-    ],
-    dtype=np.int32,
-)
-LEFT_MISSING_NODES = np.asarray(
-    [
-        0,
-        1,
-        2,
-        12,
-        13,
-        14,
-        24,
-        25,
-        26,
-        36,
-        37,
-        38,
-        48,
-        49,
-        50,
-        60,
-        61,
-        62,
-        72,
-        73,
-        74,
-        84,
-        85,
-        86,
-    ],
-    dtype=np.int32,
-)
+# Exact zero-based columns selected in the source notebook, in row-major order.
+OUTER_SLAB_NODES = np.flatnonzero(
+    np.isin(np.arange(NUM_NODES) % COLUMNS, (0, 1, 2, 9, 10, 11))
+).astype(np.int32)
+LEFT_MISSING_NODES = np.flatnonzero(np.arange(NUM_NODES) % COLUMNS < 3).astype(np.int32)
 
 
 @dataclass(frozen=True)
@@ -129,13 +54,24 @@ class NotebookScenarioSpec:
     mask: str
 
 
+@beartype
 def _settings(config: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Validate optional SNP counts without changing the notebook's defaults."""
     settings = config.get("notebook_scenarios")
     if not isinstance(settings, Mapping):
         raise ValueError("config must contain a notebook_scenarios mapping")
+    settings = dict(settings)
+    for key in ("num_snps", "retained_snps"):
+        if key not in settings or (key == "retained_snps" and settings[key] is None):
+            continue
+        value = _integer_array(np.asarray(settings[key]), name=key, dtype=np.int64)
+        if value.ndim != 0 or value.item() < 1:
+            raise ValueError(f"notebook_scenarios.{key} must be a positive integer")
+        settings[key] = value.item()
     return settings
 
 
+@beartype
 def scenario_count(config: Mapping[str, Any]) -> int:
     """Return the fixed number of distinct inference cells in the notebook."""
 
@@ -143,17 +79,21 @@ def scenario_count(config: Mapping[str, Any]) -> int:
     return len(TRUTHS) * len(MASKS)
 
 
+@beartype
 def scenario_spec(config: Mapping[str, Any], example_id: int) -> NotebookScenarioSpec:
     """Map a stable zero-based example ID to notebook truth and mask."""
 
     total = scenario_count(config)
-    index = int(example_id)
+    if isinstance(example_id, bool):
+        raise ValueError("example_id must be an integer, not a boolean")
+    index = example_id
     if index < 0 or index >= total:
         raise ValueError(f"notebook scenario example_id must be in [0, {total}), got {index}")
     truth_index, mask_index = divmod(index, len(MASKS))
     return NotebookScenarioSpec(index, TRUTHS[truth_index], MASKS[mask_index])
 
 
+@beartype
 def sampled_nodes(truth: str, mask: str) -> np.ndarray:
     """Return the exact node IDs selected by one notebook cell."""
 
@@ -179,6 +119,7 @@ def sampled_nodes(truth: str, mask: str) -> np.ndarray:
     raise ValueError(f"unknown notebook mask: {mask!r}")
 
 
+@beartype
 def observed_node_count(config: Mapping[str, Any], example_id: int) -> int:
     """Return the number of official FEEMS LOO folds for one notebook cell."""
 
@@ -186,6 +127,7 @@ def observed_node_count(config: Mapping[str, Any], example_id: int) -> int:
     return int(sampled_nodes(spec.truth, spec.mask).size)
 
 
+@beartype
 def notebook_graph() -> tuple[dict[str, np.ndarray], np.ndarray]:
     """Build the NetworkX lattice in the notebook's original edge order."""
 
@@ -207,6 +149,7 @@ def notebook_graph() -> tuple[dict[str, np.ndarray], np.ndarray]:
     return graph, positions
 
 
+@beartype
 def edge_rates(truth: str, positions: np.ndarray, edges: np.ndarray) -> np.ndarray:
     """Return the raw migration rates assigned in the source notebook."""
 
@@ -236,9 +179,11 @@ def edge_rates(truth: str, positions: np.ndarray, edges: np.ndarray) -> np.ndarr
     return rates.astype(np.float64)
 
 
+@beartype
 def _demography(
     truth: str,
 ) -> tuple[msprime.Demography, dict[str, np.ndarray], np.ndarray, np.ndarray]:
+    """Keep the notebook's deme order, symmetric migration, and ancestral split."""
     graph, positions = notebook_graph()
     edges = np.asarray(graph["edges"], dtype=np.int32)
     rates = edge_rates(truth, positions, edges)
@@ -268,15 +213,9 @@ def _demography(
     return demography, graph, positions, rates
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
+@beartype
 def _source_provenance(config: Mapping[str, Any]) -> tuple[Path, str]:
+    """Refuse a notebook revision other than the one named in the config."""
     settings = _settings(config)
     source = Path(str(settings["source_notebook"])).expanduser().resolve()
     expected = str(settings["source_notebook_sha256"])
@@ -288,14 +227,7 @@ def _source_provenance(config: Mapping[str, Any]) -> tuple[Path, str]:
     return source, observed
 
 
-def _atomic_npz(path: Path, **arrays: np.ndarray) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    with temporary.open("wb") as stream:
-        np.savez_compressed(stream, **arrays)
-    os.replace(temporary, path)
-
-
+@beartype
 def generate_base(
     *,
     config_path: Path,
@@ -309,9 +241,7 @@ def generate_base(
     _source, source_hash = _source_provenance(config)
     if truth not in TRUTHS:
         raise ValueError(f"unknown notebook truth: {truth!r}")
-    num_snps = int(settings.get("num_snps", 1000))
-    if num_snps <= 0:
-        raise ValueError("notebook_scenarios.num_snps must be positive")
+    num_snps = settings.get("num_snps", 1000)
 
     demography, graph, positions, rates = _demography(truth)
     samples = {f"P{node}": DIPLOIDS_PER_NODE for node in range(NUM_NODES)}
@@ -388,7 +318,16 @@ def generate_base(
     )
 
 
+@beartype
 def _calls_for_nodes(haplotypes: np.ndarray, nodes: np.ndarray) -> np.ndarray:
+    """Select complete diploids in the notebook's fixed deme-major haplotype order."""
+    if haplotypes.ndim != 2 or haplotypes.shape[1] != NUM_NODES * DIPLOIDS_PER_NODE * PLOIDY:
+        raise ValueError("base haplotypes must contain every notebook diploid in deme order")
+    if haplotypes.dtype.kind not in "iu" or np.any(haplotypes < 0):
+        raise ValueError("base haplotypes must contain nonnegative integer allele codes")
+    nodes = _integer_array(nodes, name="sample nodes", dtype=np.int32)
+    if nodes.ndim != 1 or np.any(nodes < 0) or np.any(nodes >= NUM_NODES):
+        raise ValueError("sample nodes must index the notebook lattice")
     binary = np.asarray(haplotypes)[np.max(haplotypes, axis=1) <= 1].T
     individuals = ((nodes[:, None] * DIPLOIDS_PER_NODE) + np.arange(DIPLOIDS_PER_NODE)).ravel()
     haploid_rows = np.column_stack((PLOIDY * individuals, PLOIDY * individuals + 1)).ravel()
@@ -396,12 +335,17 @@ def _calls_for_nodes(haplotypes: np.ndarray, nodes: np.ndarray) -> np.ndarray:
     return selected.reshape(individuals.size, PLOIDY, selected.shape[1]).transpose(2, 0, 1)
 
 
+@beartype
 def maf_filtered_dosages(calls: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Apply the notebook's complete-data biallelic and MAF filter."""
 
     calls = np.asarray(calls)
     if calls.ndim != 3 or calls.shape[2] != PLOIDY:
         raise ValueError("calls must have shape (variants, samples, 2)")
+    if calls.dtype.kind not in "iu" or np.any(calls < 0):
+        raise ValueError("notebook calls must contain complete nonnegative integer allele codes")
+    if not calls.shape[0] or not calls.shape[1]:
+        raise ValueError("notebook calls must contain variants and samples")
     dosage = calls.sum(axis=2, dtype=np.float64)
     allele_frequency = dosage.mean(axis=1) / float(PLOIDY)
     maf = np.minimum(allele_frequency, 1.0 - allele_frequency)
@@ -412,6 +356,36 @@ def maf_filtered_dosages(calls: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return filtered, keep
 
 
+@beartype
+def select_model_snps(
+    calls: np.ndarray,
+    *,
+    target_snps: int | None,
+) -> tuple[np.ndarray, np.ndarray, int]:
+    """Select a deterministic number of post-MAF SNPs for one sample mask.
+
+    The source notebook's ``num_snps`` is the number of simulated variant rows,
+    not the number entering inference. A target makes that distinction explicit:
+    filtering still happens after sample subsetting, and the first eligible SNPs
+    are retained in simulation order.
+    """
+
+    dosages, eligible = maf_filtered_dosages(calls)
+    available = int(dosages.shape[1])
+    if target_snps is None:
+        return calls, dosages, available
+    if isinstance(target_snps, bool) or target_snps <= 0:
+        raise ValueError("notebook_scenarios.retained_snps must be positive")
+    if available < target_snps:
+        raise ValueError(
+            f"requested {target_snps} retained SNPs, but only {available} pass "
+            "the biallelic and MAF filters"
+        )
+    selected = np.flatnonzero(eligible)[:target_snps]
+    return calls[selected], dosages[:, :target_snps], available
+
+
+@beartype
 def _notebook_dataset(
     calls: np.ndarray,
     *,
@@ -419,6 +393,11 @@ def _notebook_dataset(
     raw_positions: np.ndarray,
     edges: np.ndarray,
 ) -> xr.Dataset:
+    """Reproduce the notebook's genotype-to-xarray path, including its projection."""
+    # The archive uses unsigned bytes; the genotype API uses signed allele codes.
+    calls = _integer_array(calls, name="notebook calls", dtype=np.int8)
+    if np.any(calls < 0) or np.any(calls > 1):
+        raise ValueError("notebook calls must be complete biallelic genotypes")
     sample_count = selected_nodes.size * DIPLOIDS_PER_NODE
     sample_ids = np.asarray([f"sample_{index:03d}" for index in range(sample_count)])
     sample_node_rows = np.repeat(selected_nodes, DIPLOIDS_PER_NODE)
@@ -445,6 +424,7 @@ def _notebook_dataset(
     )
 
 
+@beartype
 def derive_case(
     *,
     config_path: Path,
@@ -456,32 +436,45 @@ def derive_case(
     """Derive one notebook sampling cell from its shared full simulation."""
 
     config = workflow_io.load_config(config_path)
+    settings = _settings(config)
     _source, source_hash = _source_provenance(config)
     spec = scenario_spec(config, example_id)
-    with np.load(base) as archive:
+    base_hash = _sha256(base)
+    with np.load(base, allow_pickle=False) as archive:
         base_truth = str(archive["truth"].item())
-        raw_positions = np.asarray(archive["positions"], dtype=np.float64)
-        edges = np.asarray(archive["edges"], dtype=np.int32)
-        truth = np.asarray(archive["edge_log_rates"], dtype=np.float64)
-        haplotypes = np.asarray(archive["haplotypes"], dtype=np.uint8)
-        attempts = int(archive["attempts"].item())
+        raw_positions = _real_array(archive["positions"], name="positions")
+        edges = _integer_array(archive["edges"], name="edges", dtype=np.int32)
+        truth = _real_array(archive["edge_log_rates"], name="edge_log_rates")
+        haplotypes = archive["haplotypes"]
+        attempt_count = _integer_array(archive["attempts"], name="attempts", dtype=np.int64)
+        if attempt_count.ndim != 0 or attempt_count.item() < 1:
+            raise ValueError("base simulation attempts must be a positive integer")
+        attempts = attempt_count.item()
         base_source_hash = str(archive["source_notebook_sha256"].item())
     if base_truth != spec.truth:
         raise ValueError(f"base truth {base_truth!r} does not match case truth {spec.truth!r}")
     if base_source_hash != source_hash:
         raise ValueError("base simulation came from a different source notebook")
+    validate_graph_arrays(positions=raw_positions, edges=edges)
+    if raw_positions.shape != (NUM_NODES, 2) or truth.shape != (len(edges),):
+        raise ValueError("base geometry and truth must align with the notebook graph")
 
     selected_nodes = sampled_nodes(spec.truth, spec.mask)
     calls = _calls_for_nodes(haplotypes, selected_nodes)
-    genotype_matrix, retained = maf_filtered_dosages(calls)
-    data = _notebook_dataset(
+    biallelic_snps = int(calls.shape[0])
+    target_snps = settings.get("retained_snps")
+    model_calls, genotype_matrix, available_snps = select_model_snps(
         calls,
+        target_snps=target_snps,
+    )
+    data = _notebook_dataset(
+        model_calls,
         selected_nodes=selected_nodes,
         raw_positions=raw_positions,
         edges=edges,
     )
     retained_snps = int(data.attrs["retained_variants"])
-    if retained_snps != genotype_matrix.shape[1] or retained_snps != int(retained.sum()):
+    if retained_snps != genotype_matrix.shape[1]:
         raise RuntimeError("direct MAF filter disagrees with dreems.from_vcf_zarr")
 
     sample_nodes = np.repeat(selected_nodes, DIPLOIDS_PER_NODE).astype(np.int32)
@@ -522,6 +515,19 @@ def derive_case(
         "anisotropy": "feems_anisotropic",
         "homogeneous": "feems_homogeneous",
     }[spec.truth]
+    scenario_metadata = {
+        "scenario_truth": spec.truth,
+        "scenario_mask": spec.mask,
+        "scenario_replicate": 0,
+        "scenario_seed": SIMULATION_SEED,
+        "scenario_source_notebook_sha256": source_hash,
+        "scenario_raw_snps": int(haplotypes.shape[0]),
+        "scenario_biallelic_snps": biallelic_snps,
+        "scenario_maf_eligible_snps": available_snps,
+        "scenario_requested_retained_snps": target_snps or 0,
+        "scenario_random_sample_fraction": random_fraction,
+        "msprime_attempts": attempts,
+    }
     example: dict[str, Any] = {
         "graph": graph,
         "active_positions": projected_positions,
@@ -543,33 +549,15 @@ def derive_case(
         "feems_lattice_rows": ROWS,
         "feems_lattice_columns": COLUMNS,
         "feems_lattice_sample_prob": float(selected_nodes.size / NUM_NODES),
-        "scenario_truth": spec.truth,
-        "scenario_mask": spec.mask,
-        "scenario_replicate": 0,
-        "scenario_seed": SIMULATION_SEED,
-        "scenario_source_notebook_sha256": source_hash,
-        "scenario_raw_snps": int(haplotypes.shape[0]),
-        "scenario_biallelic_snps": int(calls.shape[0]),
-        "scenario_random_sample_fraction": random_fraction,
-        "msprime_attempts": attempts,
+        **scenario_metadata,
         "local_log_rate_std": float(np.std(truth)),
         "local_q_log_std": 0.0,
         "local_diploids_per_node": DIPLOIDS_PER_NODE,
     }
     row = corpus.example_metadata(example, spec.example_id)
-    row.update(
-        {
-            "scenario_truth": spec.truth,
-            "scenario_mask": spec.mask,
-            "scenario_replicate": 0,
-            "scenario_seed": SIMULATION_SEED,
-            "scenario_source_notebook_sha256": source_hash,
-            "scenario_raw_snps": int(haplotypes.shape[0]),
-            "scenario_biallelic_snps": int(calls.shape[0]),
-            "scenario_random_sample_fraction": random_fraction,
-            "msprime_attempts": attempts,
-        }
-    )
+    row.update(scenario_metadata)
+    if _sha256(base) != base_hash:
+        raise ValueError("base simulation changed while deriving its sampling case")
     workflow_io.write_pickle(output, [example])
     workflow_io.write_json(
         metadata,
@@ -590,7 +578,8 @@ def derive_case(
                 "observed_nodes": int(selected_nodes.size),
                 "samples": int(sample_nodes.size),
                 "raw_snps": int(haplotypes.shape[0]),
-                "biallelic_snps": int(calls.shape[0]),
+                "biallelic_snps": biallelic_snps,
+                "maf_eligible_snps": available_snps,
                 "retained_snps": retained_snps,
                 "output": str(output),
             },
@@ -600,7 +589,9 @@ def derive_case(
     )
 
 
+@beartype
 def build_parser() -> argparse.ArgumentParser:
+    """Separate expensive whole-graph simulation from cheap sampling views."""
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -618,7 +609,9 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+@beartype
 def main(argv: Sequence[str] | None = None) -> None:
+    """Run one notebook simulation or derive one cached sampling view."""
     args = build_parser().parse_args(argv)
     if args.command == "generate-base":
         generate_base(config_path=args.config, truth=args.truth, output=args.output)

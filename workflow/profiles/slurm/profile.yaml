@@ -1,4 +1,7 @@
 executor: slurm
+# Great Lakes retains completed jobs in the controller for four hours.
+# Use live status so delayed accounting records do not stall the workflow.
+slurm-status-command: squeue
 jobs: 200
 local-cores: 2
 printshellcmds: true

@@ -1,18 +1,31 @@
 """Post-hoc calibration for edge posterior standard deviations."""
 
+# ruff: noqa: UP037
+
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from numbers import Real
 from typing import Any, Literal
 
 import numpy as np
+from beartype import beartype
+from jaxtyping import Float, jaxtyped
 
 CalibrationMethod = Literal["raw", "global", "density"]
 DEFAULT_DENSITY_BREAKS = (0.10, 0.25)
+INTERVAL_LEVELS = {
+    "50": 0.6744897501960817,
+    "80": 1.2815515655446004,
+    "95": 1.959963984540054,
+}
 
 
-def _positive_finite(value: float, *, name: str) -> float:
+@beartype
+def _positive_finite(value: Any, *, name: str) -> float:
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(f"{name} must be positive and finite")
     value = float(value)
     if not np.isfinite(value) or value <= 0.0:
         raise ValueError(f"{name} must be positive and finite")
@@ -33,6 +46,7 @@ class SDCalibration:
     density_breaks: tuple[float, ...] = DEFAULT_DENSITY_BREAKS
     density_scales: tuple[float, ...] = ()
 
+    @beartype
     def __post_init__(self) -> None:
         if self.method not in ("raw", "global", "density"):
             raise ValueError(f"unknown SD calibration method: {self.method!r}")
@@ -54,43 +68,55 @@ class SDCalibration:
         object.__setattr__(self, "density_scales", scales)
 
     @classmethod
+    @beartype
     def from_squared_errors(
         cls,
         errors: np.ndarray,
         raw_sd: np.ndarray,
         *,
-        floor: float = 1e-12,
+        floor: Real = 1e-12,
     ) -> SDCalibration:
-        """Fit one global scale from a flat collection of edge errors."""
+        """Fit a global scale from residuals, which this method squares itself.
+
+        Every residual must be finite and every SD positive. ``floor`` limits
+        the denominator; small SDs do not cause observations to be discarded.
+        """
 
         graph_score = _mean_squared_standardized_error(errors, raw_sd, floor=floor)
-        if not np.isfinite(graph_score):
-            return cls()
         return cls(method="global", global_scale=max(float(np.sqrt(graph_score)), floor))
 
     @classmethod
+    @beartype
     def from_graphs(
         cls,
         errors: Sequence[np.ndarray],
         raw_sd: Sequence[np.ndarray],
-        sampled_node_fraction: Sequence[float],
+        sampled_node_fraction: Sequence[Real] | np.ndarray,
         *,
-        density_breaks: Sequence[float] = DEFAULT_DENSITY_BREAKS,
-        density_shrinkage: float = 25.0,
-        floor: float = 1e-12,
+        density_breaks: Sequence[Real] | np.ndarray = DEFAULT_DENSITY_BREAKS,
+        density_shrinkage: Real = 25.0,
+        floor: Real = 1e-12,
     ) -> SDCalibration:
         """Fit graph-balanced global and sampling-density scales.
 
         ``density_shrinkage`` is the number of global pseudo-graphs mixed into
         every density-bin estimate. It stabilizes small bins while allowing
         well-represented sparse and dense regimes to calibrate separately.
+        Empty graphs, invalid densities, and invalid residuals or SDs are errors,
+        not grounds for silently excluding a graph from calibration.
         """
 
         if len(errors) != len(raw_sd) or len(errors) != len(sampled_node_fraction):
             raise ValueError("errors, raw_sd, and sampled_node_fraction must align by graph")
         if density_shrinkage < 0.0 or not np.isfinite(density_shrinkage):
             raise ValueError("density_shrinkage must be finite and nonnegative")
-        breaks = tuple(float(value) for value in density_breaks)
+        floor = _positive_finite(floor, name="floor")
+        breaks = cls(density_breaks=tuple(density_breaks)).density_breaks
+        density = np.asarray(sampled_node_fraction, dtype=np.float64)
+        if density.shape != (len(errors),) or not density.size:
+            raise ValueError("calibration needs a nonempty vector of graph sampling fractions")
+        if np.any(~np.isfinite(density) | (density < 0.0) | (density > 1.0)):
+            raise ValueError("sampled_node_fraction must lie between zero and one")
         graph_scores = np.asarray(
             [
                 _mean_squared_standardized_error(error, sd, floor=floor)
@@ -98,14 +124,6 @@ class SDCalibration:
             ],
             dtype=np.float64,
         )
-        density = np.asarray(sampled_node_fraction, dtype=np.float64)
-        valid = (
-            np.isfinite(graph_scores) & np.isfinite(density) & (density >= 0.0) & (density <= 1.0)
-        )
-        if not np.any(valid):
-            return cls()
-        graph_scores = graph_scores[valid]
-        density = density[valid]
         global_score = float(np.mean(graph_scores))
         global_scale = max(float(np.sqrt(global_score)), floor)
 
@@ -128,6 +146,7 @@ class SDCalibration:
         )
 
     @classmethod
+    @beartype
     def from_dict(cls, payload: Mapping[str, Any] | None) -> SDCalibration:
         """Load calibration metadata; missing metadata means raw SDs."""
 
@@ -140,7 +159,9 @@ class SDCalibration:
             density_scales=tuple(payload.get("density_scales", ())),
         )
 
+    @beartype
     def to_dict(self) -> dict[str, Any]:
+        """Return the existing checkpoint metadata schema, without learned weights."""
         return {
             "schema_version": 1,
             "method": self.method,
@@ -149,39 +170,129 @@ class SDCalibration:
             "density_scales": list(self.density_scales),
         }
 
-    def scale_for_density(self, sampled_node_fraction: float | None) -> float:
+    @beartype
+    def scale_for_density(self, sampled_node_fraction: Real | None) -> float:
+        """Choose a bin with a closed upper boundary; None uses the global scale."""
+        if sampled_node_fraction is not None and (
+            not np.isfinite(sampled_node_fraction) or not 0.0 <= sampled_node_fraction <= 1.0
+        ):
+            raise ValueError("sampled_node_fraction must lie between zero and one")
         if self.method == "raw":
             return 1.0
         if self.method == "global" or sampled_node_fraction is None or not self.density_scales:
             return self.global_scale
         density = float(sampled_node_fraction)
-        if not np.isfinite(density) or density < 0.0 or density > 1.0:
-            raise ValueError("sampled_node_fraction must lie between zero and one")
         index = int(np.searchsorted(self.density_breaks, density, side="left"))
         return self.density_scales[index]
 
+    @jaxtyped(typechecker=beartype)
     def apply(
         self,
         raw_sd: np.ndarray,
         *,
-        sampled_node_fraction: float | None = None,
-    ) -> np.ndarray:
+        sampled_node_fraction: Real | None = None,
+    ) -> Float[np.ndarray, "..."] | np.float64:
+        """Scale SDs, leaving means unchanged. Zero remains zero; negative SDs fail."""
         raw = np.asarray(raw_sd, dtype=np.float64)
-        return raw * self.scale_for_density(sampled_node_fraction)
+        if np.any(~np.isfinite(raw) | (raw < 0.0)):
+            raise ValueError("raw_sd must be finite and nonnegative")
+        with np.errstate(over="ignore"):
+            scaled = raw * self.scale_for_density(sampled_node_fraction)
+        if not np.all(np.isfinite(scaled)):
+            raise ValueError("calibrated SDs overflowed")
+        return scaled
 
 
-def _mean_squared_standardized_error(
+@jaxtyped(typechecker=beartype)
+def _standardized_errors(
     errors: np.ndarray,
     raw_sd: np.ndarray,
     *,
     floor: float,
-) -> float:
+) -> Float[np.ndarray, "..."] | np.float64:
+    """Validate one graph before reducing its residuals or counting coverage."""
     error = np.asarray(errors, dtype=np.float64)
     sd = np.asarray(raw_sd, dtype=np.float64)
     if error.shape != sd.shape:
         raise ValueError("errors and raw_sd must have matching shapes")
-    valid = np.isfinite(error) & np.isfinite(sd) & (sd > floor)
-    if not np.any(valid):
-        return float("nan")
-    standardized = error[valid] / np.maximum(sd[valid], floor)
-    return float(np.mean(standardized * standardized))
+    if not error.size or not np.all(np.isfinite(error)):
+        raise ValueError("calibration errors must be nonempty and finite")
+    if np.any(~np.isfinite(sd) | (sd <= 0.0)):
+        raise ValueError("calibration SDs must be positive and finite")
+    with np.errstate(over="ignore"):
+        standardized = error / np.maximum(sd, floor)
+    if not np.all(np.isfinite(standardized)):
+        raise ValueError("standardized calibration errors overflowed")
+    return standardized
+
+
+@beartype
+def _mean_squared_standardized_error(
+    errors: np.ndarray, raw_sd: np.ndarray, *, floor: Real
+) -> float:
+    """Give each graph one squared-error score, regardless of its edge count."""
+    standardized = _standardized_errors(errors, raw_sd, floor=_positive_finite(floor, name="floor"))
+    with np.errstate(over="ignore"):
+        score = float(np.mean(standardized * standardized))
+    if not np.isfinite(score):
+        raise ValueError("squared calibration errors overflowed")
+    return score
+
+
+@beartype
+def candidates(
+    errors: Sequence[np.ndarray], raw_sd: Sequence[np.ndarray], density: np.ndarray
+) -> dict[str, SDCalibration]:
+    """Fit the same raw, global, and density options for both release workflows."""
+    density_fit = SDCalibration.from_graphs(errors, raw_sd, density, density_shrinkage=25.0)
+    return {
+        "raw": SDCalibration(),
+        "global": SDCalibration(method="global", global_scale=density_fit.global_scale),
+        "density": density_fit,
+    }
+
+
+@beartype
+def summarize(
+    errors: Sequence[np.ndarray],
+    raw_sd: Sequence[np.ndarray],
+    density: np.ndarray,
+    fitted: SDCalibration,
+) -> dict[str, float | int]:
+    """Average NLL and interval coverage within each graph, then across graphs.
+
+    NLL omits the shared log(2*pi)/2 constant. No invalid edges are silently
+    dropped: a failed fit should not improve the reported coverage.
+    """
+    if density.shape != (len(errors),) or len(raw_sd) != len(errors) or not len(errors):
+        raise ValueError("calibration arrays must align over a nonempty set of graphs")
+    nll = []
+    coverage = {level: [] for level in INTERVAL_LEVELS}
+    edge_count = 0
+    for error, sd, local_density in zip(errors, raw_sd, density, strict=True):
+        calibrated = fitted.apply(sd, sampled_node_fraction=float(local_density))
+        standardized = _standardized_errors(error, calibrated, floor=0.0)
+        with np.errstate(over="ignore"):
+            score = float(np.mean(np.log(calibrated) + 0.5 * standardized * standardized))
+        if not np.isfinite(score):
+            raise ValueError("calibration NLL overflowed")
+        nll.append(score)
+        for level, z_value in INTERVAL_LEVELS.items():
+            coverage[level].append(float(np.mean(np.abs(standardized) <= z_value)))
+        edge_count += standardized.size
+    with np.errstate(over="ignore"):
+        mean_nll = float(np.mean(nll))
+    if not np.isfinite(mean_nll):
+        raise ValueError("graph-balanced calibration NLL overflowed")
+    result: dict[str, float | int] = {
+        "graphs": len(nll),
+        "edges": edge_count,
+        "graph_balanced_nll": mean_nll,
+    }
+    result.update(
+        {
+            f"graph_balanced_coverage_{level}": float(np.mean(values))
+            for level, values in coverage.items()
+        }
+    )
+    return result

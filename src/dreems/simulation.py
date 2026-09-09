@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from typing import Any
 
 import numpy as np
+from beartype import beartype
 
 from dreems import island_sim
 from dreems.coalescent import simulate_msprime_genotypes
@@ -28,6 +29,11 @@ from dreems.simulation_config import (
 )
 
 
+class _InsufficientSampling(ValueError):
+    """A random sampling draw cannot supply a pair of observed demes."""
+
+
+@beartype
 def simulate_case_genotypes(
     rng: np.random.Generator,
     sim: Mapping[str, Any],
@@ -35,6 +41,7 @@ def simulate_case_genotypes(
     *,
     num_snps: int,
 ) -> str:
+    """Attach genotype dosages or covariance to a pre-drawn graph and surface."""
     graph = case["graph"]
     positions = np.asarray(case["active_positions"])
     edges = np.asarray(graph["edges"], dtype=np.int32)
@@ -69,6 +76,8 @@ def simulate_case_genotypes(
         )
     elif simulator == "island_coalescent":
         if bool(sim["island_require_rust"]):
+            if not bool(sim["island_use_rust"]):
+                raise ValueError("island_require_rust requires island_use_rust")
             island_sim.require_rust_backend()
         island_kwargs = {
             "sample_nodes": sample_nodes,
@@ -92,22 +101,12 @@ def simulate_case_genotypes(
         if bool(sim["island_emit_covariance"]):
             covariance_result = island_sim.simulate_island_covariance(**island_kwargs)
             case["island_covariance_estimator"] = "finite"
-            if bool(sim["island_require_rust"]) and not covariance_result.used_rust:
-                raise RuntimeError(
-                    "simulation.island_require_rust is true, but dreems._island_sim "
-                    "is not installed"
-                )
             sample_covariance = covariance_result.sample_covariance.astype(np.float64)
             effective_snps = int(covariance_result.effective_snps)
             case["island_attempts"] = int(covariance_result.attempts)
             case["island_used_rust"] = bool(covariance_result.used_rust)
         else:
             result = island_sim.simulate_island_model(**island_kwargs)
-            if bool(sim["island_require_rust"]) and not result.used_rust:
-                raise RuntimeError(
-                    "simulation.island_require_rust is true, but dreems._island_sim "
-                    "is not installed"
-                )
             genotypes = result.genotypes.astype(np.float64)
             case["island_attempts"] = int(result.attempts)
             case["island_used_rust"] = bool(result.used_rust)
@@ -126,6 +125,7 @@ def simulate_case_genotypes(
     return simulator
 
 
+@beartype
 def simulate_raw_example(
     rng: np.random.Generator,
     *,
@@ -134,6 +134,11 @@ def simulate_raw_example(
     shard: int,
     index: int,
 ) -> dict[str, Any]:
+    """Draw geometry, migration, q, sampling, and then the genetic observations.
+
+    Keep this draw order stable: changing it changes every downstream random draw
+    for a given seed, even when the marginal simulation recipe is unchanged.
+    """
     local = choose_sample_regime(rng, sim, local_simulation_parameters(rng, sim))
     num_snps = draw_num_snps(rng, sim)
     surface_kinds = string_list(sim.get("surface_kinds"), default=["smooth", "barrier", "gp"])
@@ -171,6 +176,10 @@ def simulate_raw_example(
             mode=str(sampling_mode),
         )
 
+    if not pairwise_conditionable_example(case):
+        # Check before simulation: an empty draw fails inside the simulator,
+        # before the seeded worker would otherwise get a chance to retry it.
+        raise _InsufficientSampling("fewer than two graph nodes were sampled")
     simulator = simulate_case_genotypes(rng, sim, case, num_snps=num_snps)
     case.update(
         {
@@ -185,12 +194,14 @@ def simulate_raw_example(
     return case
 
 
+@beartype
 def counterfactual_sampling_assignment(
     sim: Mapping[str, Any],
     example_id: int,
     *,
     split: str,
 ) -> tuple[int, str | None]:
+    """Give related sampling views a shared graph seed and different masks."""
     modes = string_list(sim.get("sampling_counterfactual_modes"))
     if not modes:
         return int(example_id), None
@@ -203,25 +214,32 @@ def counterfactual_sampling_assignment(
 SPLIT_SEED_OFFSETS = {"train": 0, "test": 10_000_000}
 
 
+@beartype
 def raw_example_seed(*, base_seed: int, split: str, shard: int, index: int) -> int:
+    """Retain the historical seed formula for reproducing existing raw packs."""
     if split not in SPLIT_SEED_OFFSETS:
         raise ValueError(f"unknown raw generation split {split!r}")
     return int(base_seed + SPLIT_SEED_OFFSETS[split] + 1009 * shard + 104_729 * index)
 
 
+@beartype
 def simulate_raw_example_from_seed(
     payload: tuple[int, dict[str, Any], str, int, int],
 ) -> dict[str, Any]:
+    """Retry an example only when fewer than two graph nodes were sampled."""
     seed, sim, split, shard, index = payload
     max_attempts = int(sim.get("max_conditionable_attempts", 32))
     for attempt in range(max(max_attempts, 1)):
-        example = simulate_raw_example(
-            np.random.default_rng(seed + 1_000_003 * attempt),
-            sim=sim,
-            split=split,
-            shard=shard,
-            index=index,
-        )
+        try:
+            example = simulate_raw_example(
+                np.random.default_rng(seed + 1_000_003 * attempt),
+                sim=sim,
+                split=split,
+                shard=shard,
+                index=index,
+            )
+        except _InsufficientSampling:
+            continue
         if pairwise_conditionable_example(example):
             if attempt:
                 example["conditionable_retry_attempt"] = int(attempt)
@@ -232,6 +250,8 @@ def simulate_raw_example_from_seed(
     )
 
 
+@beartype
 def pairwise_conditionable_example(example: Mapping[str, Any]) -> bool:
+    """A resistance conditioner needs at least one pair of observed demes."""
     sample_nodes = np.asarray(example.get("sample_nodes", []), dtype=np.int32)
     return bool(np.unique(sample_nodes).shape[0] >= 2)

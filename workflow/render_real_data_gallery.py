@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """Render DREEMS real-data maps beside published FEEMS/EEMS figures."""
 
+# Shape annotations below are jaxtyping expressions, not Python expressions.
+# ruff: noqa: F722
+
 from __future__ import annotations
 
 import argparse
-import csv
-import hashlib
 import html
+import io
 import json
 import math
-import os
 import shutil
-import threading
 import warnings
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -22,12 +22,20 @@ import cartopy.crs as ccrs
 import matplotlib
 import numpy as np
 import requests
-import yaml
+from beartype import beartype
+from jaxtyping import Float, Int, Real, jaxtyped
 from matplotlib import colors as mcolors
 from matplotlib import tri as mtri
 from matplotlib.collections import LineCollection
 from PIL import Image
 from scipy.spatial import cKDTree
+
+from dreems.validation import _integer_array, _real_array, validate_graph_arrays
+from dreems.workflow_io import _atomic_output, load_config
+from dreems.workflow_io import json_finite as json_ready  # noqa: F401 -- public utility
+from dreems.workflow_io import sha256 as sha256
+from dreems.workflow_io import write_csv as write_csv
+from dreems.workflow_io import write_json_finite as atomic_write_json
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
@@ -52,12 +60,16 @@ GEOGRAPHIC_CRS = ccrs.PlateCarree()
 
 @dataclass(frozen=True)
 class TopoBasemap:
+    """A tile mosaic in Web Mercator, or the explicit stock-image fallback."""
+
     image: np.ndarray | None
     image_extent: tuple[float, float, float, float] | None
     source: str
 
 
+@beartype
 def parse_args() -> argparse.Namespace:
+    """Separate rendering one dataset from assembling the completed gallery."""
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -89,7 +101,9 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+@beartype
 def centered(values: np.ndarray) -> np.ndarray:
+    """Center finite values while preserving the missing-value mask."""
     values = np.asarray(values, dtype=np.float64)
     finite = np.isfinite(values)
     result = np.full(values.shape, np.nan, dtype=np.float64)
@@ -98,17 +112,30 @@ def centered(values: np.ndarray) -> np.ndarray:
     return result
 
 
-def edge_midpoints(positions: np.ndarray, edges: np.ndarray) -> np.ndarray:
+@jaxtyped(typechecker=beartype)
+def edge_midpoints(
+    positions: Real[np.ndarray, "nodes 2"], edges: Int[np.ndarray, "edges 2"]
+) -> Float[np.ndarray, "edges 2"]:
+    """Locate each edge in the same coordinate system as the graph."""
     return 0.5 * (positions[edges[:, 0]] + positions[edges[:, 1]])
 
 
+@beartype
 def median_edge_length(positions: np.ndarray, edges: np.ndarray) -> float:
+    """Set the interpolation length scale from nonzero geographic edge lengths."""
     lengths = np.linalg.norm(positions[edges[:, 0]] - positions[edges[:, 1]], axis=1)
     lengths = lengths[np.isfinite(lengths) & (lengths > 0.0)]
     return float(np.median(lengths)) if lengths.size else 1.0
 
 
+@beartype
 def graph_triangles(node_count: int, edges: np.ndarray) -> np.ndarray:
+    """List each three-edge cycle once, in the graph's existing node order."""
+    edges = _integer_array(np.asarray(edges), name="edges", dtype=np.int32)
+    if node_count < 1 or edges.ndim != 2 or edges.shape[1] != 2:
+        raise ValueError("triangle search requires nodes and a two-column edge array")
+    if np.any(edges < 0) or np.any(edges >= node_count):
+        raise ValueError("triangle edges must refer to graph nodes")
     adjacency = [set() for _ in range(node_count)]
     for source, target in np.asarray(edges, dtype=np.int64):
         source = int(source)
@@ -127,7 +154,9 @@ def graph_triangles(node_count: int, edges: np.ndarray) -> np.ndarray:
     return np.asarray(triangles, dtype=np.int32).reshape((-1, 3))
 
 
+@beartype
 def graph_face_triangles(positions: np.ndarray, edges: np.ndarray) -> np.ndarray:
+    """Exclude degenerate cycles and cycles enclosing another graph node."""
     triangles = graph_triangles(positions.shape[0], edges)
     faces: list[np.ndarray] = []
     for triangle in triangles:
@@ -154,11 +183,13 @@ def graph_face_triangles(positions: np.ndarray, edges: np.ndarray) -> np.ndarray
     return np.asarray(faces, dtype=np.int32).reshape((-1, 3))
 
 
+@beartype
 def triangle_union_support_mask(
     positions: np.ndarray,
     triangles: np.ndarray,
     query_points: np.ndarray,
 ) -> np.ndarray:
+    """Find points inside any graph triangle when Matplotlib cannot index the mesh."""
     support = np.zeros(query_points.shape[0], dtype=bool)
     query_tree = cKDTree(query_points)
     for triangle in triangles:
@@ -188,11 +219,13 @@ def triangle_union_support_mask(
     return support
 
 
+@beartype
 def graph_support_mask(
     positions: np.ndarray,
     edges: np.ndarray,
     query_points: np.ndarray,
 ) -> np.ndarray:
+    """Restrict a smoothed map to graph faces, or near edges if there are no faces."""
     triangles = graph_face_triangles(positions, edges)
     if triangles.size:
         triangulation = mtri.Triangulation(
@@ -221,6 +254,7 @@ def graph_support_mask(
     return distances <= 0.75 * median_edge_length(positions, edges)
 
 
+@beartype
 def interpolate_edges(
     positions: np.ndarray,
     edges: np.ndarray,
@@ -231,6 +265,14 @@ def interpolate_edges(
     neighbors: int = 32,
     mask_radius_edges: float = 4.0,
 ) -> tuple[np.ndarray, tuple[float, float, float, float]]:
+    """Smooth edge values for display without inferring migration outside the graph."""
+    if isinstance(grid_side, bool) or grid_side < 2:
+        raise ValueError("grid_side must be at least 2")
+    if isinstance(neighbors, bool) or neighbors < 1:
+        raise ValueError("neighbors must be positive")
+    scales = np.asarray([kernel_bandwidth_edges, mask_radius_edges])
+    if not np.all(np.isfinite(scales)) or np.any(scales <= 0):
+        raise ValueError("interpolation length scales must be positive and finite")
     values = np.asarray(values, dtype=np.float64)
     midpoints = edge_midpoints(positions, edges)
     finite = np.isfinite(values)
@@ -268,10 +310,12 @@ def interpolate_edges(
     return interpolated.reshape(xx.shape), (xmin, xmax, ymin, ymax)
 
 
+@beartype
 def map_extent(
     sample_lonlat: np.ndarray,
     node_lonlat: np.ndarray,
 ) -> tuple[float, float, float, float]:
+    """Pad the sample and graph bounds within the supported latitude range."""
     coordinates = np.vstack((sample_lonlat, node_lonlat))
     lon_min, lat_min = np.nanmin(coordinates, axis=0)
     lon_max, lat_max = np.nanmax(coordinates, axis=0)
@@ -287,9 +331,11 @@ def map_extent(
     )
 
 
+@beartype
 def projected_extent(
     positions: np.ndarray,
 ) -> tuple[float, float, float, float]:
+    """Pad a graph already expressed in projected coordinates."""
     xmin, ymin = np.nanmin(positions, axis=0)
     xmax, ymax = np.nanmax(positions, axis=0)
     width = max(float(xmax - xmin), 1.0)
@@ -302,7 +348,11 @@ def projected_extent(
     )
 
 
+@beartype
 def lonlat_to_tile(lon: float, lat: float, zoom: int) -> tuple[int, int]:
+    """Map longitude and latitude to a Web Mercator tile, clipping polar latitudes."""
+    if isinstance(zoom, bool) or zoom < 0 or not np.all(np.isfinite([lon, lat])):
+        raise ValueError("tile coordinates must be finite and zoom nonnegative")
     lat = float(np.clip(lat, -85.05112878, 85.05112878))
     tile_count = 2 ** int(zoom)
     x = int((lon + 180.0) / 360.0 * tile_count)
@@ -316,6 +366,7 @@ def lonlat_to_tile(lon: float, lat: float, zoom: int) -> tuple[int, int]:
     )
 
 
+@beartype
 def tile_mercator_extent(
     x_min: int,
     x_max: int,
@@ -323,6 +374,7 @@ def tile_mercator_extent(
     y_max: int,
     zoom: int,
 ) -> tuple[float, float, float, float]:
+    """Return the outer bounds of an inclusive tile rectangle, in meters."""
     tile_size = 2.0 * WEB_MERCATOR_LIMIT / (2 ** int(zoom))
     xmin = -WEB_MERCATOR_LIMIT + x_min * tile_size
     xmax = -WEB_MERCATOR_LIMIT + (x_max + 1) * tile_size
@@ -331,10 +383,12 @@ def tile_mercator_extent(
     return xmin, xmax, ymin, ymax
 
 
+@beartype
 def topo_tile_bounds(
     extent: tuple[float, float, float, float],
     zoom: int,
 ) -> tuple[int, int, int, int]:
+    """Find the inclusive tile rectangle covering a geographic extent."""
     lon_min, lon_max, lat_min, lat_max = extent
     x0, y0 = lonlat_to_tile(lon_min, lat_max, zoom)
     x1, y1 = lonlat_to_tile(lon_max, lat_min, zoom)
@@ -343,20 +397,24 @@ def topo_tile_bounds(
     return x_min, x_max, y_min, y_max
 
 
+@beartype
 def topo_tile_count(
     extent: tuple[float, float, float, float],
     zoom: int,
 ) -> int:
+    """Count tiles before allocating or downloading a mosaic."""
     x_min, x_max, y_min, y_max = topo_tile_bounds(extent, zoom)
     return (x_max - x_min + 1) * (y_max - y_min + 1)
 
 
+@beartype
 def select_topo_zoom(
     extent: tuple[float, float, float, float],
     *,
     maximum_zoom: int,
     maximum_tiles: int,
 ) -> int:
+    """Choose the finest requested zoom that fits the tile budget."""
     if maximum_zoom < 0:
         raise ValueError("maximum_zoom must be nonnegative")
     if maximum_tiles < 1:
@@ -367,6 +425,7 @@ def select_topo_zoom(
     raise ValueError("extent cannot be represented within the tile limit")
 
 
+@beartype
 def fetch_esri_topo_tile(
     *,
     cache_dir: Path,
@@ -375,6 +434,7 @@ def fetch_esri_topo_tile(
     tile_y: int,
     headers: dict[str, str],
 ) -> Path:
+    """Reuse a cached tile or atomically save a verified image over HTTPS."""
     cached = cache_dir / f"z{zoom}" / str(tile_x) / f"{tile_y}.jpg"
     cached.parent.mkdir(parents=True, exist_ok=True)
     if cached.exists() and cached.stat().st_size > 0:
@@ -383,22 +443,22 @@ def fetch_esri_topo_tile(
         "https://services.arcgisonline.com/ArcGIS/rest/services/"
         f"World_Topo_Map/MapServer/tile/{zoom}/{tile_y}/{tile_x}"
     )
-    response = requests.get(url, timeout=20, verify=False, headers=headers)
+    response = requests.get(url, timeout=20, headers=headers)
     response.raise_for_status()
-    temporary = cached.with_name(f".{cached.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-    try:
-        temporary.write_bytes(response.content)
-        os.replace(temporary, cached)
-    finally:
-        temporary.unlink(missing_ok=True)
+    with Image.open(io.BytesIO(response.content)) as tile:
+        tile.verify()
+    with _atomic_output(cached) as stream:
+        stream.write(response.content)
     return cached
 
 
+@beartype
 def limit_topo_mosaic_size(
     mosaic: Image.Image,
     *,
     maximum_pixels: int,
 ) -> Image.Image:
+    """Bound the longest image side while retaining aspect ratio and fine detail."""
     if maximum_pixels < 256:
         raise ValueError("maximum_pixels must be at least one tile width")
     width, height = mosaic.size
@@ -413,6 +473,7 @@ def limit_topo_mosaic_size(
     return mosaic.resize(size, resample=Image.Resampling.LANCZOS)
 
 
+@beartype
 def fetch_esri_topo_mosaic(
     extent: tuple[float, float, float, float],
     *,
@@ -421,6 +482,9 @@ def fetch_esri_topo_mosaic(
     maximum_pixels: int,
     cache_dir: Path,
 ) -> tuple[np.ndarray, tuple[float, float, float, float], int]:
+    """Fetch tiles concurrently, then assemble them in deterministic geographic order."""
+    if maximum_pixels < 256:
+        raise ValueError("maximum_pixels must be at least one tile width")
     zoom = select_topo_zoom(
         extent,
         maximum_zoom=maximum_zoom,
@@ -450,10 +514,8 @@ def fetch_esri_topo_mosaic(
             headers=headers,
         )
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        with ThreadPoolExecutor(max_workers=min(8, tile_count)) as executor:
-            cached_tiles = list(executor.map(load_tile, tile_coordinates))
+    with ThreadPoolExecutor(max_workers=min(8, tile_count)) as executor:
+        cached_tiles = list(executor.map(load_tile, tile_coordinates))
     for (tile_x, tile_y), cached in zip(
         tile_coordinates,
         cached_tiles,
@@ -481,6 +543,7 @@ def fetch_esri_topo_mosaic(
     )
 
 
+@beartype
 def load_topo_basemap(
     extent: tuple[float, float, float, float],
     *,
@@ -490,6 +553,7 @@ def load_topo_basemap(
     maximum_pixels: int,
     fetch_topo: bool,
 ) -> TopoBasemap:
+    """Use stock imagery when tiles are unavailable, with a visible warning."""
     if not fetch_topo:
         return TopoBasemap(
             image=None,
@@ -509,7 +573,8 @@ def load_topo_basemap(
             image_extent=image_extent,
             source=f"Esri World Topographic Map tiles, z={zoom}",
         )
-    except Exception:  # noqa: BLE001
+    except (requests.RequestException, OSError) as error:
+        warnings.warn(f"Topographic tiles unavailable; using stock imagery: {error}", stacklevel=2)
         return TopoBasemap(
             image=None,
             image_extent=None,
@@ -517,6 +582,7 @@ def load_topo_basemap(
         )
 
 
+@beartype
 def add_topo_basemap(
     ax: plt.Axes,
     extent: tuple[float, float, float, float],
@@ -525,6 +591,7 @@ def add_topo_basemap(
     data_crs: ccrs.CRS,
     fetch_topo: bool,
 ) -> None:
+    """Draw the chosen background and graticule in the graph's coordinate system."""
     if fetch_topo:
         ax.set_extent(extent, crs=data_crs)
         if basemap.image is not None and basemap.image_extent is not None:
@@ -552,10 +619,21 @@ def add_topo_basemap(
     )
 
 
+@beartype
 def sample_counts(sample_nodes: np.ndarray, node_count: int) -> np.ndarray:
+    """Count samples assigned to each node without changing graph order."""
+    sample_nodes = _integer_array(np.asarray(sample_nodes), name="sample_nodes", dtype=np.int32)
+    if (
+        sample_nodes.ndim != 1
+        or node_count < 1
+        or np.any(sample_nodes < 0)
+        or np.any(sample_nodes >= node_count)
+    ):
+        raise ValueError("sample_nodes must refer to graph nodes")
     return np.bincount(sample_nodes, minlength=node_count).astype(np.float64)
 
 
+@beartype
 def add_samples(
     ax: plt.Axes,
     *,
@@ -565,6 +643,7 @@ def add_samples(
     graph_alpha: float,
     data_crs: ccrs.CRS,
 ) -> None:
+    """Overlay the graph and sample counts; marker sizes use a compressed scale."""
     ax.add_collection(
         LineCollection(
             node_positions[edges],
@@ -594,12 +673,15 @@ def add_samples(
     )
 
 
+@beartype
 def robust_limit(values: np.ndarray, percentile: float = 96.0) -> float:
+    """Set a nonzero color limit from the finite absolute values."""
     finite = np.asarray(values, dtype=np.float64)
     finite = finite[np.isfinite(finite)]
     return max(float(np.percentile(np.abs(finite), percentile)), 1.0e-6) if finite.size else 1.0
 
 
+@beartype
 def plot_raw_edges(
     ax: plt.Axes,
     *,
@@ -613,6 +695,7 @@ def plot_raw_edges(
     data_crs: ccrs.CRS,
     fetch_topo: bool,
 ) -> str:
+    """Draw MAP edge estimates with the same color scale as the contour panel."""
     add_topo_basemap(
         ax,
         extent,
@@ -644,6 +727,7 @@ def plot_raw_edges(
     return basemap.source
 
 
+@beartype
 def plot_interpolated(
     ax: plt.Axes,
     *,
@@ -662,6 +746,7 @@ def plot_interpolated(
     data_crs: ccrs.CRS,
     fetch_topo: bool,
 ) -> str:
+    """Draw a heatmap or contours; interpolation is only a display operation."""
     add_topo_basemap(
         ax,
         extent,
@@ -731,44 +816,40 @@ def plot_interpolated(
     return basemap.source
 
 
-def json_ready(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {str(key): json_ready(item) for key, item in value.items()}
-    if isinstance(value, list | tuple):
-        return [json_ready(item) for item in value]
-    if isinstance(value, np.ndarray):
-        return value.tolist()
-    if isinstance(value, np.integer):
-        return int(value)
-    if isinstance(value, np.floating):
-        value = float(value)
-    if isinstance(value, float):
-        return value if math.isfinite(value) else None
-    return value
-
-
-def atomic_write_json(path: Path, payload: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(json_ready(payload), indent=2, sort_keys=True) + "\n")
-    os.replace(temporary, path)
-
-
+@beartype
 def render_case(args: argparse.Namespace) -> None:
+    """Render matched inputs and estimates without refitting either method."""
     metadata = json.loads(args.prepared_json.read_text())
     dreems_metadata = json.loads(args.dreems_json.read_text())
+    if metadata["dataset_id"] != dreems_metadata["dataset_id"]:
+        raise ValueError("DREEMS results and prepared input describe different datasets")
+    for field, path in (
+        ("prepared_npz_sha256", args.prepared_npz),
+        ("prepared_json_sha256", args.prepared_json),
+    ):
+        if field in dreems_metadata and dreems_metadata[field] != sha256(path):
+            raise ValueError(f"DREEMS results do not match {path}")
     with np.load(args.prepared_npz, allow_pickle=False) as data:
-        sample_lonlat = np.asarray(data["sample_lonlat"], dtype=np.float64)
-        node_lonlat = np.asarray(data["node_lonlat"], dtype=np.float64)
-        node_xy = np.asarray(data["node_xy"], dtype=np.float64)
-        edges = np.asarray(data["edges"], dtype=np.int32)
-        sample_nodes = np.asarray(data["sample_nodes"], dtype=np.int32)
+        sample_lonlat = _real_array(data["sample_lonlat"], name="sample_lonlat")
+        node_lonlat = _real_array(data["node_lonlat"], name="node_lonlat")
+        node_xy = _real_array(data["node_xy"], name="node_xy")
+        edges = _integer_array(data["edges"], name="edges", dtype=np.int32)
+        sample_nodes = _integer_array(data["sample_nodes"], name="sample_nodes", dtype=np.int32)
+    validate_graph_arrays(positions=node_xy, edges=edges)
+    if node_lonlat.shape != node_xy.shape or sample_lonlat.shape != (sample_nodes.size, 2):
+        raise ValueError("geographic coordinates must align with nodes and samples")
+    sample_counts(sample_nodes, node_xy.shape[0])
     with np.load(args.dreems_npz, allow_pickle=False) as data:
-        prior_edge_log = centered(np.asarray(data["prior_edge_log"], dtype=np.float64))
-        refined_edge_log = centered(np.asarray(data["edge_log"], dtype=np.float64))
-        edge_log_sd = np.asarray(data["edge_log_sd"], dtype=np.float64)
-    if refined_edge_log.shape != (edges.shape[0],):
+        prior_edge_log = centered(_real_array(data["prior_edge_log"], name="prior_edge_log"))
+        refined_edge_log = centered(_real_array(data["edge_log"], name="edge_log"))
+        edge_log_sd = _real_array(data["edge_log_sd"], name="edge_log_sd")
+    if any(
+        values.shape != (edges.shape[0],)
+        for values in (prior_edge_log, refined_edge_log, edge_log_sd)
+    ):
         raise ValueError("DREEMS edge output does not align with the prepared graph")
+    if np.any(edge_log_sd < 0):
+        raise ValueError("posterior SD must be nonnegative")
 
     is_global_mollweide = str(metadata.get("graph_builder", "")).startswith(
         "reconstructed_global_mollweide"
@@ -909,8 +990,10 @@ def render_case(args: argparse.Namespace) -> None:
         y=0.96,
     )
     args.output_png.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(args.output_png, dpi=int(args.dpi))
-    fig.savefig(args.output_pdf)
+    with _atomic_output(args.output_png) as stream:
+        fig.savefig(stream, format="png", dpi=int(args.dpi))
+    with _atomic_output(args.output_pdf) as stream:
+        fig.savefig(stream, format="pdf")
     plt.close(fig)
 
     row = {
@@ -931,18 +1014,12 @@ def render_case(args: argparse.Namespace) -> None:
     atomic_write_json(args.output_json, row)
 
 
-def sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
+@beartype
 def stage_published_figures(
     output_dir: Path,
     datasets: dict[str, Any],
 ) -> dict[str, list[dict[str, str]]]:
+    """Copy the selected original study figures and record their source hashes."""
     staged: dict[str, list[dict[str, str]]] = {}
     published_dir = output_dir / "published"
     published_dir.mkdir(parents=True, exist_ok=True)
@@ -968,22 +1045,9 @@ def stage_published_figures(
     return staged
 
 
-def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
-    fieldnames: list[str] = []
-    seen: set[str] = set()
-    for row in rows:
-        for key in row:
-            if key not in seen:
-                seen.add(key)
-                fieldnames.append(key)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(rows)
-
-
+@beartype
 def write_contact_sheet(output_dir: Path, rows: list[dict[str, Any]], output: Path) -> None:
+    """Build the overview from rendered panels, retaining their aspect ratios."""
     width = 1300
     gap = 24
     columns = 2
@@ -1016,8 +1080,10 @@ def write_contact_sheet(output_dir: Path, rows: list[dict[str, Any]], output: Pa
     canvas.save(output, quality=94)
 
 
+@beartype
 def assemble_index(args: argparse.Namespace) -> None:
-    config = yaml.safe_load(args.config.read_text())
+    """Join finished panels, study figures, and provenance into the static gallery."""
+    config = load_config(args.config)
     dataset_config = dict(config["datasets"])
     rows = [json.loads(path.read_text()) for path in args.row_json]
     args.output_literature_report.parent.mkdir(parents=True, exist_ok=True)
@@ -1155,10 +1221,13 @@ use separate centered color scales, shown beneath each panel.</p>
 </html>
 """
     args.output_index.parent.mkdir(parents=True, exist_ok=True)
-    args.output_index.write_text(html_text)
+    with _atomic_output(args.output_index) as stream:
+        stream.write(html_text.encode("utf-8"))
 
 
+@beartype
 def main() -> None:
+    """Dispatch a single-panel render or gallery assembly."""
     args = parse_args()
     if args.command == "case":
         render_case(args)

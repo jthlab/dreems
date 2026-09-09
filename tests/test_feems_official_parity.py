@@ -5,36 +5,30 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from dreems import feems
+from dreems import feems, geography, island_sim
 
 
 def _small_feems_case() -> dict[str, object]:
-    positions = np.asarray(
-        [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]],
-        dtype=np.float64,
-    )
-    edges = np.asarray(
-        [[0, 1], [0, 2], [0, 3], [1, 3], [2, 3]],
-        dtype=np.int32,
-    )
-    # Two diploid samples per observed node and no monomorphic columns.
-    genotypes = np.asarray(
-        [
-            [0, 0, 0, 1, 1, 0, 2, 1],
-            [0, 1, 0, 0, 1, 1, 2, 0],
-            [0, 1, 1, 1, 2, 0, 1, 1],
-            [1, 1, 0, 2, 1, 1, 1, 2],
-            [1, 0, 2, 1, 0, 2, 1, 1],
-            [1, 1, 1, 0, 0, 1, 0, 2],
-            [2, 2, 1, 1, 1, 2, 0, 1],
-            [2, 1, 2, 2, 1, 1, 0, 0],
-        ],
-        dtype=np.float64,
+    """Give variance interpolation enough observed demes to return usable scores."""
+    graph, positions = geography.feems_triangular_lattice_graph(3, 3)
+    sample_nodes = np.repeat(np.arange(len(positions), dtype=np.int32), 4)
+    simulated = island_sim.simulate_island_model(
+        sample_nodes=sample_nodes,
+        num_demes=len(positions),
+        q=np.ones(len(positions)),
+        migration_edges=graph["edges"],
+        migration_rates=np.full(len(graph["edges"]), 0.4),
+        num_snps=512,
+        mutation_rate=0.01,
+        min_allele_frequency=0.05,
+        max_allele_frequency=0.95,
+        seed=17017,
+        use_rust=False,
     )
     return {
-        "genotypes": genotypes,
-        "sample_nodes": np.repeat(np.arange(4, dtype=np.int32), 2),
-        "graph": {"edges": edges},
+        "genotypes": simulated.genotypes,
+        "sample_nodes": sample_nodes,
+        "graph": graph,
         "active_positions": positions,
     }
 
@@ -88,4 +82,6 @@ def test_fold_parallel_joint_cv_matches_official_feems_serial_cv(tmp_path: Path)
         **inputs,  # type: ignore[arg-type]
     )
 
-    np.testing.assert_allclose(fold_parallel, serial, rtol=1e-10, atol=1e-12, equal_nan=True)
+    assert np.all(np.isfinite(serial)), "matching all-NaN CV results would not establish parity"
+    assert np.all(np.isfinite(fold_parallel))
+    np.testing.assert_allclose(fold_parallel, serial, rtol=1e-10, atol=1e-12)

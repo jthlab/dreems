@@ -7,18 +7,25 @@ import argparse
 import dataclasses
 import hashlib
 import json
-import os
 import time
 import zipfile
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+from beartype import beartype
 
 from dreems import DREEMSInput, DREEMSMapRefinementConfig, load_model
+from dreems.checkpoints import _read_checkpoint_archive
+from dreems.workflow_io import json_finite as json_ready
+from dreems.workflow_io import sha256 as sha256
+from dreems.workflow_io import write_json_finite as write_json_atomic
+from dreems.workflow_io import write_npz
 
 
+@beartype
 def parse_args() -> argparse.Namespace:
+    """Expose prediction and checkpoint provenance as separate workflow tasks."""
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -35,51 +42,26 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
-def json_ready(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {str(key): json_ready(item) for key, item in value.items()}
-    if isinstance(value, list | tuple):
-        return [json_ready(item) for item in value]
-    if isinstance(value, np.ndarray):
-        return value.tolist()
-    if isinstance(value, np.integer):
-        return int(value)
-    if isinstance(value, np.floating):
-        value = float(value)
-    if isinstance(value, float):
-        return value if np.isfinite(value) else None
-    return value
-
-
-def write_json_atomic(path: Path, payload: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(json_ready(payload), indent=2, sort_keys=True) + "\n")
-    os.replace(temporary, path)
-
-
+@beartype
 def checkpoint_metadata(path: Path) -> dict[str, Any]:
-    with zipfile.ZipFile(path) as archive:
-        metadata = json.loads(archive.read("metadata.json"))
+    """Record the architecture and weights without running feature construction."""
+    digest = sha256(path)
+    members, metadata = _read_checkpoint_archive(path)
+    if sha256(path) != digest:
+        raise ValueError("checkpoint changed while reading its metadata")
     return {
         "checkpoint": str(path.resolve()),
-        "checkpoint_sha256": sha256(path),
-        "params_sha256": sha256_member(path, "params.eqx"),
+        "checkpoint_sha256": digest,
+        "params_sha256": hashlib.sha256(members["params.eqx"]).hexdigest(),
         "model": metadata["model"],
         "edge_sd_calibration": metadata.get("edge_sd_calibration"),
         "training_provenance": metadata.get("provenance"),
     }
 
 
+@beartype
 def sha256_member(path: Path, member: str) -> str:
+    """Hash one ZIP member without loading it into memory."""
     digest = hashlib.sha256()
     with zipfile.ZipFile(path) as archive, archive.open(member) as handle:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
@@ -87,13 +69,23 @@ def sha256_member(path: Path, member: str) -> str:
     return digest.hexdigest()
 
 
+@beartype
 def run_prediction(args: argparse.Namespace) -> None:
+    """Infer the prior and MAP surfaces on the archived, already-QC'd covariance."""
+    inputs = (args.prepared_npz, args.prepared_json, args.checkpoint)
+    input_hashes = {path: sha256(path) for path in inputs}
     metadata = json.loads(args.prepared_json.read_text())
     with np.load(args.prepared_npz, allow_pickle=False) as data:
-        sample_covariance = np.asarray(data["sample_covariance"], dtype=np.float64)
-        sample_xy = np.asarray(data["sample_xy"], dtype=np.float64)
-        node_xy = np.asarray(data["node_xy"], dtype=np.float64)
-        edges = np.asarray(data["edges"], dtype=np.int32)
+        # Validate original values before converting dtypes or loading the model.
+        example = DREEMSInput(
+            sample_covariance=data["sample_covariance"],
+            sample_coordinates=data["sample_xy"],
+            node_coordinates=data["node_xy"],
+            edges=data["edges"],
+            effective_snps=metadata["effective_snps"],
+            name=str(metadata["dataset_id"]),
+            metadata=metadata,
+        )
 
     started = time.perf_counter()
     print(
@@ -101,9 +93,9 @@ def run_prediction(args: argparse.Namespace) -> None:
             {
                 "event": "dreems_start",
                 "dataset_id": metadata["dataset_id"],
-                "samples": int(sample_xy.shape[0]),
-                "nodes": int(node_xy.shape[0]),
-                "edges": int(edges.shape[0]),
+                "samples": example.sample_coordinates.shape[0],
+                "nodes": example.node_coordinates.shape[0],
+                "edges": example.edges.shape[0],
             },
             sort_keys=True,
         ),
@@ -112,34 +104,13 @@ def run_prediction(args: argparse.Namespace) -> None:
     predictor = load_model(args.checkpoint)
     refinement = DREEMSMapRefinementConfig()
     result = predictor.predict(
-        DREEMSInput(
-            sample_covariance=sample_covariance,
-            sample_coordinates=sample_xy,
-            node_coordinates=node_xy,
-            edges=edges,
-            effective_snps=int(metadata["effective_snps"]),
-            name=str(metadata["dataset_id"]),
-            metadata=metadata,
-        ),
+        example,
         refinement_config=refinement,
     )
     elapsed = float(time.perf_counter() - started)
     refined = result.centered_refined_edge_log_mean
     if refined is None:
         raise RuntimeError("MAP refinement did not return an edge estimate")
-
-    args.output_npz.parent.mkdir(parents=True, exist_ok=True)
-    temporary_npz = args.output_npz.with_suffix(args.output_npz.suffix + ".tmp")
-    with temporary_npz.open("wb") as handle:
-        np.savez_compressed(
-            handle,
-            prior_edge_log=result.centered_edge_log_mean,
-            edge_log=refined,
-            edge_log_sd=np.asarray(result.edge_log_sd, dtype=np.float64),
-            raw_edge_log_sd=np.asarray(result.raw_edge_log_sd, dtype=np.float64),
-            surface_weight=np.asarray(result.surface_weight, dtype=np.float64),
-        )
-    os.replace(temporary_npz, args.output_npz)
 
     output_metadata = {
         "dataset_id": metadata["dataset_id"],
@@ -151,12 +122,26 @@ def run_prediction(args: argparse.Namespace) -> None:
         "surface_weight": float(result.surface_weight),
         "prediction_seconds": elapsed,
         "diagnostics": result.refinement_diagnostics or {},
+        "prepared_npz_sha256": input_hashes[args.prepared_npz],
+        "prepared_json_sha256": input_hashes[args.prepared_json],
     }
+    if any(sha256(path) != digest for path, digest in input_hashes.items()):
+        raise ValueError("prediction input changed during inference")
+    write_npz(
+        args.output_npz,
+        prior_edge_log=result.centered_edge_log_mean,
+        edge_log=refined,
+        edge_log_sd=np.asarray(result.edge_log_sd, dtype=np.float64),
+        raw_edge_log_sd=np.asarray(result.raw_edge_log_sd, dtype=np.float64),
+        surface_weight=np.asarray(result.surface_weight, dtype=np.float64),
+    )
     write_json_atomic(args.output_json, output_metadata)
     print(json.dumps(json_ready({"event": "dreems_done", **output_metadata}), sort_keys=True))
 
 
+@beartype
 def main() -> None:
+    """Dispatch the same operations used by the real-data Snakefile."""
     args = parse_args()
     if args.command == "predict":
         run_prediction(args)

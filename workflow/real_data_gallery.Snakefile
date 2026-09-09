@@ -5,7 +5,7 @@ from pathlib import Path
 import yaml
 
 
-PROJECT = Path(workflow.basedir).parent.resolve()
+PROJECT = Path(workflow.current_basedir).parent.resolve()
 OUTDIR = Path(str(config["outdir"])).expanduser().resolve()
 PUBLISH_DIR = Path(str(config["publish_dir"])).expanduser().resolve()
 PREPARED_DIR = Path(str(config["prepared_dir"])).expanduser().resolve()
@@ -30,7 +30,13 @@ PUBLISHED_SOURCES = [
         "published_figures", []
     )
 ]
-PACKAGE_SOURCES = sorted(str(path) for path in (PROJECT / "src/dreems").glob("*.py"))
+INFERENCE_CODE = [str(PROJECT / "src/dreems" / name) for name in (
+    "inference.py", "checkpoints.py", "model.py", "features.py", "linearized.py",
+    "refinement.py", "calibration.py", "validation.py", "metrics.py", "workflow_io.py",
+)]
+RENDER_CODE = [str(PROJECT / "src/dreems" / name) for name in ("validation.py", "workflow_io.py")]
+PROVENANCE_CODE = [str(PROJECT / "src/dreems" / name) for name in ("checkpoints.py", "workflow_io.py")]
+ENVIRONMENT = [str(PROJECT / "pyproject.toml"), str(PROJECT / "uv.lock")]
 
 
 def prepared_path(dataset, suffix):
@@ -75,7 +81,8 @@ rule run_dreems:
         metadata=lambda wildcards: prepared_path(wildcards.dataset, "json"),
         checkpoint=str(CHECKPOINT),
         runner=str(RUNNER),
-        package=PACKAGE_SOURCES,
+        package=INFERENCE_CODE,
+        environment=ENVIRONMENT,
     output:
         prediction=str(FITS / "{dataset}.npz"),
         metadata=str(FITS / "{dataset}.json"),
@@ -84,6 +91,8 @@ rule run_dreems:
     benchmark:
         str(PUBLISH_DIR / "benchmarks/inference/{dataset}.tsv")
     threads: int(config.get("inference_threads", 4))
+    params:
+        project=str(PROJECT),
     resources:
         mem_mb=int(config.get("inference_mem_mb", 16000)),
         runtime=str(config.get("inference_runtime", "120m")),
@@ -100,7 +109,7 @@ rule run_dreems:
         export OPENBLAS_NUM_THREADS={threads}
         export MKL_NUM_THREADS={threads}
         export NUMEXPR_NUM_THREADS={threads}
-        uv run --frozen --no-sync python {input.runner:q} predict \
+        uv --project {params.project:q} run --frozen --no-sync python {input.runner:q} predict \
             --prepared-npz {input.prepared:q} \
             --prepared-json {input.metadata:q} \
             --checkpoint {input.checkpoint:q} \
@@ -117,6 +126,8 @@ rule render_case:
         dreems=str(FITS / "{dataset}.npz"),
         dreems_json=str(FITS / "{dataset}.json"),
         renderer=str(RENDERER),
+        code=RENDER_CODE,
+        environment=ENVIRONMENT,
     output:
         png=str(GALLERY / "{dataset}.png"),
         pdf=str(GALLERY / "{dataset}.pdf"),
@@ -126,8 +137,13 @@ rule render_case:
     benchmark:
         str(PUBLISH_DIR / "benchmarks/render/{dataset}.tsv")
     params:
+        project=str(PROJECT),
         grid_side=grid_side,
         topo_zoom=topo_zoom,
+        topo_max_tiles=RENDER_SETTINGS["topo_max_tiles"],
+        topo_max_pixels=RENDER_SETTINGS["topo_max_pixels"],
+        dpi=RENDER_SETTINGS["dpi"],
+        topo_cache=str(TOPO_CACHE),
     threads: 1
     resources:
         mem_mb=int(config.get("render_mem_mb", 12000)),
@@ -142,17 +158,17 @@ rule render_case:
         export OPENBLAS_NUM_THREADS=1
         export MKL_NUM_THREADS=1
         export NUMEXPR_NUM_THREADS=1
-        uv run --frozen --no-sync python {input.renderer:q} case \
+        uv --project {params.project:q} run --frozen --no-sync python {input.renderer:q} case \
             --prepared-npz {input.prepared:q} \
             --prepared-json {input.prepared_json:q} \
             --dreems-npz {input.dreems:q} \
             --dreems-json {input.dreems_json:q} \
-            --topo-cache {TOPO_CACHE:q} \
+            --topo-cache {params.topo_cache:q} \
             --grid-side {params.grid_side} \
             --topo-zoom {params.topo_zoom} \
-            --topo-max-tiles {RENDER_SETTINGS[topo_max_tiles]} \
-            --topo-max-pixels {RENDER_SETTINGS[topo_max_pixels]} \
-            --dpi {RENDER_SETTINGS[dpi]} \
+            --topo-max-tiles {params.topo_max_tiles} \
+            --topo-max-pixels {params.topo_max_pixels} \
+            --dpi {params.dpi} \
             --output-png {output.png:q} \
             --output-pdf {output.pdf:q} \
             --output-json {output.row:q} \
@@ -166,8 +182,10 @@ rule assemble_gallery:
         figures=expand(str(GALLERY / "{dataset}.png"), dataset=DATASETS),
         published=PUBLISHED_SOURCES,
         renderer=str(RENDERER),
+        code=RENDER_CODE,
         render_config=str(RENDER_CONFIG),
         literature_report=str(LITERATURE_REPORT),
+        environment=ENVIRONMENT,
     output:
         index=str(GALLERY / "index.html"),
         manifest_csv=str(GALLERY / "manifest.csv"),
@@ -180,6 +198,9 @@ rule assemble_gallery:
     benchmark:
         str(PUBLISH_DIR / "benchmarks/assemble.tsv")
     threads: 1
+    params:
+        project=str(PROJECT),
+        gallery=str(GALLERY),
     resources:
         mem_mb=int(config.get("assemble_mem_mb", 8000)),
         runtime=str(config.get("assemble_runtime", "60m")),
@@ -192,10 +213,10 @@ rule assemble_gallery:
         export OPENBLAS_NUM_THREADS=1
         export MKL_NUM_THREADS=1
         export NUMEXPR_NUM_THREADS=1
-        uv run --frozen --no-sync python {input.renderer:q} index \
+        uv --project {params.project:q} run --frozen --no-sync python {input.renderer:q} index \
             --config {input.render_config:q} \
             --row-json {input.rows:q} \
-            --output-dir {GALLERY:q} \
+            --output-dir {params.gallery:q} \
             --output-index {output.index:q} \
             --output-manifest-csv {output.manifest_csv:q} \
             --output-manifest-json {output.manifest_json:q} \
@@ -210,11 +231,15 @@ rule checkpoint_provenance:
     input:
         checkpoint=str(CHECKPOINT),
         runner=str(RUNNER),
+        code=PROVENANCE_CODE,
+        environment=ENVIRONMENT,
     output:
         str(GALLERY / "checkpoint_provenance.json")
+    params:
+        project=str(PROJECT),
     shell:
         """
-        uv run --frozen --no-sync python {input.runner:q} provenance \
+        uv --project {params.project:q} run --frozen --no-sync python {input.runner:q} provenance \
             --checkpoint {input.checkpoint:q} \
             --output {output:q}
         """
@@ -235,9 +260,11 @@ rule stage_workflow_provenance:
         render_config=str(PROVENANCE / "render_config.yaml"),
         pyproject=str(PROVENANCE / "pyproject.toml"),
         lock=str(PROVENANCE / "uv.lock"),
+    params:
+        directory=str(PROVENANCE),
     shell:
         """
-        mkdir -p {PROVENANCE:q}
+        mkdir -p {params.directory:q}
         cp {input.snakefile:q} {output.snakefile:q}
         cp {input.runner:q} {output.runner:q}
         cp {input.renderer:q} {output.renderer:q}

@@ -1,0 +1,15 @@
+{
+  "archive_input_identity": "legacy_unverified",
+  "cached_cases": 512,
+  "checkpoint_sha256": "454cb50f4c7ef1213e001d700d1bf9e9f6a353b5c8be5619aae06e9d7a22cc15",
+  "csv_byte_identical": true,
+  "feems_fits": 0,
+  "identical_restored_files": 1024,
+  "inference_runs": 0,
+  "legacy_geometry_truth_sampling_checks": "passed",
+  "numeric_summary_exact": true,
+  "original_archive_sha256": "257610a188c7ee0e318ae73314db764a5467389249b026fd14ac5a79beb2482c",
+  "paired_comparisons_exact": true,
+  "public_parameter_names_defaults_preserved": true,
+  "repacked_members_byte_identical": true
+}

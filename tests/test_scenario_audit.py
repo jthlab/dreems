@@ -8,6 +8,28 @@ import pytest
 from dreems import benchmark_gallery, scenario_audit
 
 
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("replicates", 1.5),
+        ("seed", -1),
+        ("rows", 4.5),
+        ("columns", True),
+        ("num_snps", 3.5),
+        ("ploidy", 2.5),
+        ("diploids_per_sampled_node", 0),
+        ("random_sample_fraction", 0.0),
+        ("random_sample_fraction", 1.2),
+        ("barrier_rate", -1.0),
+        ("anisotropy_scaler", float("nan")),
+    ],
+)
+def test_scenario_settings_reject_silent_conversions(scenario_config, key, value):
+    scenario_config["scenario_audit"][key] = value
+    with pytest.raises(ValueError):
+        scenario_audit.scenario_components(scenario_config, 0)
+
+
 @pytest.fixture
 def scenario_config() -> dict[str, object]:
     return {

@@ -4,7 +4,10 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 
+from dreems import surface_gate_comparison as comparison
+from dreems import workflow_io
 from dreems.surface_gate_comparison import (
     build_scenario_bundle,
     edge_metrics,
@@ -26,7 +29,8 @@ def test_edge_metrics_and_projection_use_centered_surfaces() -> None:
     assert np.isclose(projected_alpha(truth, estimate), 0.5)
 
 
-def test_build_scenario_bundle_matches_core_gate_and_feems(tmp_path: Path) -> None:
+@pytest.fixture
+def scenario_inputs(tmp_path: Path) -> dict:
     examples = 12
     positions = np.broadcast_to(
         np.asarray([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]]),
@@ -84,7 +88,7 @@ def test_build_scenario_bundle_matches_core_gate_and_feems(tmp_path: Path) -> No
     output = tmp_path / "comparison.npz"
     rows = tmp_path / "rows.csv"
     report = tmp_path / "report.json"
-    build_scenario_bundle(
+    return dict(
         core_bundle_path=core_bundle,
         gated_pattern=str(tmp_path / "gate_{example}.npz"),
         gated_checkpoint=checkpoint,
@@ -93,14 +97,97 @@ def test_build_scenario_bundle_matches_core_gate_and_feems(tmp_path: Path) -> No
         report_output=report,
     )
 
-    bundle = load_npz(output)
-    payload = json.loads(report.read_text())
+
+def test_build_scenario_bundle_matches_core_gate_and_feems(scenario_inputs: dict) -> None:
+    build_scenario_bundle(**scenario_inputs)
+    bundle = load_npz(scenario_inputs["output"])
+    payload = json.loads(scenario_inputs["report_output"].read_text())
     assert bundle["index"].shape == (12,)
     assert np.allclose(bundle["gate_alpha_neural"][:8], 1.0)
     assert np.allclose(bundle["gate_alpha_neural"][8:], 0.1)
-    assert bundle["gated_checkpoint_sha256"].item() == sha256(checkpoint)
+    assert bundle["gated_checkpoint_sha256"].item() == sha256(scenario_inputs["gated_checkpoint"])
     assert payload["by_truth"]["homogeneous"]["gated_vs_core"]["mean_mse_advantage"] > 0.0
-    assert rows.exists()
+    assert scenario_inputs["rows_output"].exists()
+
+
+@pytest.mark.parametrize(
+    "field", ["index", "edges", "num_snps", "truth", "edge_sd", "positions", "truth_name"]
+)
+def test_scenario_bundle_rejects_invalid_core_arrays(scenario_inputs, field):
+    path = scenario_inputs["core_bundle_path"]
+    arrays = load_npz(path)
+    if field in {"index", "edges", "num_snps"}:
+        arrays[field] = arrays[field].astype(float) + 0.25
+    elif field == "truth":
+        arrays[field] = arrays[field].astype(complex) + 1j
+    elif field == "edge_sd":
+        arrays[field] *= -1
+    elif field == "positions":
+        arrays[field] = np.asarray(1.0)
+    else:
+        arrays[field] = arrays[field][::-1]
+    workflow_io.write_npz(path, **arrays)
+    scenario_inputs["output"].write_bytes(b"previous bundle")
+    with pytest.raises(ValueError):
+        build_scenario_bundle(**scenario_inputs)
+    assert scenario_inputs["output"].read_bytes() == b"previous bundle"
+
+
+@pytest.mark.parametrize("change", ["shape", "negative_sd", "checkpoint"])
+def test_scenario_bundle_rejects_invalid_gated_prediction(scenario_inputs, change):
+    path = Path(scenario_inputs["gated_pattern"].format(example=0))
+    arrays = load_npz(path)
+    if change == "shape":
+        arrays["dreems"] = np.zeros(3)
+    elif change == "negative_sd":
+        arrays["edge_sd"] *= -1
+    else:
+        arrays["checkpoint_sha256"] = np.asarray("another checkpoint")
+    workflow_io.write_npz(path, **arrays)
+    with pytest.raises(ValueError):
+        build_scenario_bundle(**scenario_inputs)
+    assert not scenario_inputs["output"].exists()
+
+
+def test_writers_use_the_shared_atomic_implementation(tmp_path):
+    assert comparison._atomic_npz is workflow_io.write_npz
+    assert comparison.sha256 is workflow_io.sha256
+    path = tmp_path / "report.json"
+    path.write_bytes(b"old report")
+    with pytest.raises(TypeError):
+        comparison.write_json(path, {"invalid": object()})
+    assert path.read_bytes() == b"old report"
+
+
+@pytest.mark.parametrize("value", ["1.5", "NaN", "inf", -1, True, None])
+def test_row_ids_must_be_exact_nonnegative_integers(value):
+    with pytest.raises(ValueError):
+        comparison._as_int({"example": value})
+
+
+def test_large_csv_id_does_not_round_through_float():
+    assert comparison._as_int({"example": "9007199254740993"}) == 9007199254740993
+    assert comparison._as_int({"example": "12.0"}) == 12
+
+
+def test_duplicate_case_ids_are_rejected():
+    with pytest.raises(ValueError, match="duplicate"):
+        select_broad_examples([{"example": 0}, {"example": 0}], count=1)
+
+
+def test_homogeneous_perfect_fits_can_be_plotted():
+    row = {key: 0.0 for key in ("baseline_map_mse", "gated_map_mse", "feems_mse")}
+    row.update({key: np.nan for key in ("baseline_map_corr", "gated_map_corr", "feems_corr")})
+    row.update(alpha=0.0, sampled_node_fraction=0.1)
+    figure = comparison.broad_aggregate_figure([row])
+    try:
+        figure.canvas.draw()
+        assert figure.axes[1].get_xscale() == "linear"
+        assert "1 structured cases" in figure.axes[0].get_title()
+    finally:
+        import matplotlib.pyplot as plt
+
+        plt.close(figure)
 
 
 def test_broad_selection_is_deterministic() -> None:

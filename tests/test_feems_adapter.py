@@ -508,3 +508,130 @@ def test_node_cv_rejects_unknown_mode_before_import(
             config=feems.FEEMSConfig(mode="invalid"),  # type: ignore[arg-type]
             **fit_inputs,
         )
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("cv_mode", "typo"),
+        ("cv_folds", 1),
+        ("cv_folds", 2.5),
+        ("cv_jobs", 0),
+        ("cv_jobs", 1.5),
+        ("cv_jobs", 2.0),
+        ("cv_jobs", True),
+        ("maxiter", 0),
+        ("maxiter", 10.0),
+        ("maxiter", [10]),
+        ("random_state", -1),
+        ("random_state", 2**32),
+        ("factr", np.nan),
+        ("factr", -1.0),
+        ("lb", 0.0),
+        ("ub", np.inf),
+        ("ub", 1e-7),
+        ("lambdas", ()),
+        ("lambdas", (1.0, -0.1)),
+        ("lambdas", ((1.0, 2.0),)),
+        ("lambdas_q", (np.nan,)),
+        ("lambdas_q", (1.0j,)),
+    ],
+)
+def test_config_rejects_invalid_protocol_settings(field, value) -> None:
+    with pytest.raises(ValueError):
+        feems.FEEMSConfig(**{field: value})
+
+
+def test_nonpositive_fold_sentinel_and_zero_penalties_remain_supported() -> None:
+    config = feems.FEEMSConfig(cv_folds=-1, lambdas=(0.0, 1.0), lambdas_q=(0.0,))
+    assert config.sklearn_cv_folds is None
+    assert config.lambdas == (0.0, 1.0)
+
+
+@pytest.mark.parametrize("field", ["sample_nodes", "edges"])
+@pytest.mark.parametrize("value", [0.2, -1.0, 2.0**32])
+def test_graph_ids_fail_before_feems_import(fit_inputs, monkeypatch, field, value) -> None:
+    target = fit_inputs["graph"] if field == "edges" else fit_inputs
+    target[field] = target[field].astype(np.float64)
+    target[field].flat[0] = value
+    monkeypatch.setattr(feems, "_import_feems", lambda: pytest.fail("must validate first"))
+    with pytest.raises(ValueError):
+        feems.make_spatial_graph(**fit_inputs)
+
+
+@pytest.mark.parametrize("field", ["genotypes", "active_positions"])
+def test_feems_rejects_complex_inputs(fit_inputs, monkeypatch, field) -> None:
+    fit_inputs[field] = fit_inputs[field].astype(complex) + 0.01j
+    monkeypatch.setattr(feems, "_import_feems", lambda: pytest.fail("must validate first"))
+    with pytest.raises(ValueError, match="real numbers"):
+        feems.fit_feems(**fit_inputs)
+
+
+@pytest.mark.parametrize("invalid", ["duplicate_positions", "one_observed", "row_count"])
+def test_feems_cannot_silently_reassign_samples(fit_inputs, fake_api, invalid) -> None:
+    if invalid == "duplicate_positions":
+        fit_inputs["active_positions"][1] = fit_inputs["active_positions"][0]
+    elif invalid == "one_observed":
+        fit_inputs["sample_nodes"][:] = 0
+    else:
+        fit_inputs["sample_nodes"] = fit_inputs["sample_nodes"][:-1]
+    with pytest.raises(ValueError):
+        feems.make_spatial_graph(**fit_inputs)
+    assert FakeSpatialGraph.instances == []
+
+
+def test_more_folds_than_observed_nodes_fails_before_cv(fake_api, fit_inputs) -> None:
+    with pytest.raises(ValueError, match="number of observed demes"):
+        feems.fit_feems(config=feems.FEEMSConfig(cv_folds=4), **fit_inputs)
+    assert not fake_api.joint_cv_calls
+
+
+def test_named_helpers_report_the_cv_they_actually_run(fake_api, fit_inputs) -> None:
+    config = feems.FEEMSConfig(lambdas=(100.0, 10.0), lambdas_q=(20.0, 2.0))
+    holdout = feems.fit_feems_free_q_replicate_holdout(
+        config=config, validation_genotypes=fit_inputs["genotypes"], **fit_inputs
+    )
+    assert holdout.cv_mode == "replicate_holdout"
+    assert holdout.cv_folds == 1
+    assert config.cv_mode == "node_cv"
+
+    loo_config = feems.FEEMSConfig(
+        cv_mode="replicate_holdout", lambdas=config.lambdas, lambdas_q=config.lambdas_q
+    )
+    loo = feems.fit_feems_free_q(config=loo_config, **fit_inputs)
+    assert loo.cv_mode == "leave_one_out"
+    assert loo.cv_folds == 3
+    assert loo_config.cv_mode == "replicate_holdout"
+
+
+@pytest.mark.parametrize("field", ["fold", "errors", "checkpoint_key"])
+def test_fold_reader_treats_invalid_files_as_misses(tmp_path, field) -> None:
+    path = tmp_path / "fold.npz"
+    values = {"fold": np.asarray(0), "errors": np.ones((2, 2)), "checkpoint_key": "key"}
+    values[field] = {"fold": 0.9, "errors": np.ones((2, 2)) + 1j, "checkpoint_key": "wrong"}[field]
+    np.savez(path, **values)
+    assert (
+        feems._load_cv_fold_checkpoint(path, fold=0, checkpoint_key="key", expected_shape=(2, 2))
+        is None
+    )
+
+
+def test_fold_writer_is_atomic_and_keeps_nan_failures(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "fold.npz"
+    errors = np.asarray([[1.0, np.nan]])
+    feems.write_cv_fold_checkpoint(path, fold=0, checkpoint_key="key", errors=errors)
+    old = path.read_bytes()
+    np.testing.assert_array_equal(
+        feems._load_cv_fold_checkpoint(path, fold=0, checkpoint_key="key", expected_shape=(1, 2)),
+        errors,
+    )
+
+    def fail(stream, **arrays):
+        stream.write(b"partial")
+        raise OSError("interrupted")
+
+    monkeypatch.setattr(np, "savez", fail)
+    with pytest.raises(OSError, match="interrupted"):
+        feems.write_cv_fold_checkpoint(path, fold=0, checkpoint_key="key", errors=errors)
+    assert path.read_bytes() == old
+    assert list(tmp_path.iterdir()) == [path]

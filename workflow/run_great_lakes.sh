@@ -12,9 +12,9 @@ set -euo pipefail
 
 SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROJECT_ROOT="${DREEMS_REPO:-${SLURM_SUBMIT_DIR:-$SCRIPT_ROOT}}"
-CONFIG="${DREEMS_CONFIG:-workflow/config.production.yaml}"
+CONFIG="${DREEMS_CONFIG:-workflow/config.release.yaml}"
 CONFIG_FILES_RAW="${DREEMS_CONFIG_FILES:-}"
-SNAKEFILE="${DREEMS_SNAKEFILE:-workflow/Snakefile}"
+SNAKEFILE="${DREEMS_SNAKEFILE:-workflow/release.Snakefile}"
 
 cd "$PROJECT_ROOT"
 mkdir -p logs/slurm
@@ -39,8 +39,17 @@ except ModuleNotFoundError as exc:
 PY
 
 extra_config=()
+arguments=("$@")
 if [[ -n "${DREEMS_RUN_ROOT:-}" ]]; then
     extra_config=(--config "outdir=${DREEMS_RUN_ROOT}")
+    # Keep the run root and any CLI overrides in one --config block.
+    for index in "${!arguments[@]}"; do
+        if [[ "${arguments[$index]}" == "--config" || "${arguments[$index]}" == "-C" ]]; then
+            arguments=("${arguments[@]:0:index+1}" "outdir=${DREEMS_RUN_ROOT}" "${arguments[@]:index+1}")
+            extra_config=()
+            break
+        fi
+    done
 fi
 
 config_files=("$CONFIG")
@@ -54,4 +63,4 @@ exec uv run --frozen --no-sync snakemake \
     --profile workflow/profiles/slurm \
     "${extra_config[@]}" \
     --rerun-incomplete \
-    "$@"
+    "${arguments[@]}"

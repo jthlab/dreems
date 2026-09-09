@@ -1,9 +1,17 @@
+"""Graph-balanced comparisons use these centered edge-log surface metrics.
+
+Nonfinite pairs are excluded, and a constant truth has no defined correlation.
+This module does not apply uncertainty weights or change the prediction scale.
+"""
+
 from __future__ import annotations
 
 import math
 from dataclasses import asdict, dataclass
 
 import numpy as np
+from beartype import beartype
+from jaxtyping import Float, jaxtyped
 
 
 @dataclass(frozen=True)
@@ -16,20 +24,18 @@ class EdgeLogMetrics:
     scale_ratio: float
     slope: float
 
+    @beartype
     def to_prefixed_dict(self, prefix: str = "edge_log") -> dict[str, float]:
-        values = asdict(self)
-        return {
-            f"{prefix}_corr": values["corr"],
-            f"{prefix}_rmse": values["rmse"],
-            f"{prefix}_mse": values["mse"],
-            f"{prefix}_scale_ratio": values["scale_ratio"],
-            f"{prefix}_slope": values["slope"],
-        }
+        """Prefix the saved field names without maintaining a second field list."""
+        return {f"{prefix}_{name}": value for name, value in asdict(self).items()}
 
 
-def centered(values: np.ndarray) -> np.ndarray:
+@jaxtyped(typechecker=beartype)
+def centered(values: np.ndarray) -> Float[np.ndarray, "*shape"]:  # noqa: F722
     """Return finite entries centered by their finite mean, preserving NaNs."""
 
+    if values.dtype.kind not in "biuf":
+        raise ValueError("edge values must contain real numbers")
     values = np.asarray(values, dtype=np.float64)
     out = np.full(values.shape, np.nan, dtype=np.float64)
     finite = np.isfinite(values)
@@ -38,15 +44,19 @@ def centered(values: np.ndarray) -> np.ndarray:
     return out
 
 
+@beartype
 def edge_log_metrics(truth: np.ndarray, estimate: np.ndarray) -> EdgeLogMetrics:
     """Compare two edge-log surfaces after removing their arbitrary global scale.
 
     FEEMS/EEMS-style migration surfaces are interpreted up to an additive
     constant on the log scale, so all metrics are computed after centering.
-    Non-finite pairs are dropped. If there is no finite variation in either
-    surface, correlation, scale ratio, and slope are reported as NaN.
+    Nonfinite pairs are dropped. Correlation is NaN when either surface is
+    constant. Scale ratio and slope are NaN only when the truth is constant;
+    a constant estimate against a varying truth has ratio and slope zero.
     """
 
+    if truth.dtype.kind not in "biuf" or estimate.dtype.kind not in "biuf":
+        raise ValueError("truth and estimate must contain real numbers")
     truth = np.asarray(truth, dtype=np.float64)
     estimate = np.asarray(estimate, dtype=np.float64)
     if truth.shape != estimate.shape:

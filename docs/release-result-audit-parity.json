@@ -1,0 +1,14 @@
+{
+  "checkpoint_sha256": "454cb50f4c7ef1213e001d700d1bf9e9f6a353b5c8be5619aae06e9d7a22cc15",
+  "comparisons": "exact",
+  "exported_examples": 512,
+  "feems_cli_byte_identical_tables": 2,
+  "feems_runs": 0,
+  "mask_arrays": 100,
+  "production_inference_runs": 0,
+  "refinement_observations": 12,
+  "result_arrays": 6144,
+  "selection_runs": 12,
+  "signatures_unchanged": true,
+  "subset_arrays": 1600
+}

@@ -3,23 +3,30 @@
 from __future__ import annotations
 
 import argparse
-import csv
-import hashlib
 import json
-import os
-import pickle
 import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+from beartype import beartype
 from scipy.stats import binomtest
 
-from dreems import features, feems, metrics
+from dreems import features, feems, feems_benchmark, metrics
+from dreems.benchmark_data import (
+    _base_row,
+    _centered_rms,
+    _example_arrays,
+    _load_example,
+    _metric_fields,
+)
+from dreems.feems_benchmark import FEEMS_PINNED_COMMIT
+from dreems.feems_benchmark import run_feems_case as run_feems_case
+from dreems.feems_benchmark import run_feems_fold as run_feems_fold
 from dreems.inference import InferenceExample, load_model
 from dreems.refinement import DREEMSMapRefinementConfig
-from dreems.workflow_io import json_ready
+from dreems.workflow_io import json_ready, sha256, write_csv, write_json, write_npz
 
 FEEMS_CV_NOTEBOOK = (
     "https://github.com/NovembreLab/feems/blob/main/docsrc/notebooks/cross-validation.ipynb"
@@ -28,225 +35,11 @@ FEEMS_CV_SOURCE = (
     "https://github.com/NovembreLab/feems/blob/"
     "aa890b0e8ef583dd657a6a696af591b732d1d8be/feems/cross_validation.py"
 )
-FEEMS_PINNED_COMMIT = "aa890b0e8ef583dd657a6a696af591b732d1d8be"
-
-CASE_METADATA_KEYS = (
-    "simulator",
-    "surface_kind",
-    "sample_design",
-    "sample_regime",
-    "graph_source",
-    "mask_kind",
-    "num_snps",
-    "effective_snps",
-    "island_marker_model",
-    "sampling_association_mode",
-    "sampling_association_strength",
-    "sampling_count_migration_correlation",
-    "sampling_inclusion_migration_correlation",
-    "scenario_truth",
-    "scenario_mask",
-    "scenario_replicate",
-    "scenario_seed",
-    "scenario_source_notebook_sha256",
-    "scenario_raw_snps",
-    "scenario_biallelic_snps",
-    "scenario_random_sample_fraction",
-)
 
 
-def _atomic_json(path: Path, payload: Mapping[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(json_ready(payload), indent=2, sort_keys=True) + "\n")
-    os.replace(temporary, path)
-
-
-def _atomic_npz(path: Path, **arrays: np.ndarray) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    with temporary.open("wb") as stream:
-        np.savez_compressed(stream, **arrays)
-    os.replace(temporary, path)
-
-
-def _load_example(path: Path) -> dict[str, Any]:
-    with path.open("rb") as stream:
-        payload = pickle.load(stream)
-    if isinstance(payload, list):
-        if len(payload) != 1:
-            raise ValueError(f"expected one example in {path}, found {len(payload)}")
-        payload = payload[0]
-    if not isinstance(payload, dict):
-        raise TypeError(f"expected an example dictionary in {path}")
-    return payload
-
-
-def _example_arrays(
-    payload: Mapping[str, Any],
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    graph = payload.get("graph")
-    if not isinstance(graph, Mapping):
-        raise TypeError("H2H example must contain a graph mapping")
-    positions = np.asarray(payload["active_positions"], dtype=np.float64)
-    edges = np.asarray(graph["edges"], dtype=np.int32)
-    sample_nodes = np.asarray(payload["sample_nodes"], dtype=np.int32)
-    genotypes = np.asarray(payload["genotypes"], dtype=np.float64)
-    truth = np.asarray(payload.get("edge_log_rates", payload.get("truth")), dtype=np.float64)
-    if positions.ndim != 2 or positions.shape[1] != 2:
-        raise ValueError("active_positions must have shape (nodes, 2)")
-    if edges.ndim != 2 or edges.shape[1] != 2:
-        raise ValueError("graph edges must have shape (edges, 2)")
-    if truth.shape != (edges.shape[0],):
-        raise ValueError("truth must contain one log migration value per edge")
-    if genotypes.ndim != 2 or genotypes.shape[0] != sample_nodes.shape[0]:
-        raise ValueError("genotypes and sample_nodes disagree on sample count")
-    return positions, edges, sample_nodes, genotypes, truth
-
-
-def _case_metadata(payload: Mapping[str, Any]) -> dict[str, Any]:
-    return {key: payload[key] for key in CASE_METADATA_KEYS if key in payload}
-
-
-def _base_row(
-    *,
-    index: int,
-    payload: Mapping[str, Any],
-    positions: np.ndarray,
-    edges: np.ndarray,
-    sample_nodes: np.ndarray,
-) -> dict[str, Any]:
-    observed = np.unique(sample_nodes)
-    return {
-        "index": int(index),
-        "num_nodes": int(positions.shape[0]),
-        "num_edges": int(edges.shape[0]),
-        "num_samples": int(sample_nodes.shape[0]),
-        "num_sampled_nodes": int(observed.size),
-        "sampled_node_fraction": float(observed.size / positions.shape[0]),
-        **_case_metadata(payload),
-    }
-
-
-def _metric_fields(prefix: str, truth: np.ndarray, estimate: np.ndarray) -> dict[str, float]:
-    return metrics.edge_log_metrics(truth, estimate).to_prefixed_dict(prefix)
-
-
-def _centered_rms(values: np.ndarray) -> float:
-    centered = metrics.centered(np.asarray(values, dtype=np.float64))
-    finite = centered[np.isfinite(centered)]
-    return float(np.sqrt(np.mean(finite * finite))) if finite.size else float("nan")
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
-def _feems_cv_checkpoint_key(input_path: Path) -> str:
-    return f"{FEEMS_PINNED_COMMIT}:{feems.FEEMS_RECOMMENDED_LOO_PROTOCOL}:{_sha256(input_path)}"
-
-
-def run_feems_fold(args: argparse.Namespace) -> None:
-    payload = _load_example(args.input)
-    positions, _edges, sample_nodes, genotypes, _truth = _example_arrays(payload)
-    started = time.perf_counter()
-    errors = feems.recommended_loo_fold_errors(
-        genotypes=genotypes,
-        sample_nodes=sample_nodes,
-        graph=dict(payload["graph"]),
-        active_positions=positions,
-        fold=int(args.fold),
-    )
-    elapsed = time.perf_counter() - started
-    feems.write_cv_fold_checkpoint(
-        args.output_npz,
-        fold=int(args.fold),
-        checkpoint_key=_feems_cv_checkpoint_key(args.input),
-        errors=errors,
-    )
-    print(
-        json.dumps(
-            {
-                "stage": "feems_h2h_fold",
-                "fold": int(args.fold),
-                "elapsed_seconds": float(elapsed),
-            },
-            sort_keys=True,
-        ),
-        flush=True,
-    )
-
-
-def run_feems_case(args: argparse.Namespace) -> None:
-    payload = _load_example(args.input)
-    positions, edges, sample_nodes, genotypes, truth = _example_arrays(payload)
-    config = feems.recommended_loo_config(cv_jobs=int(args.cv_jobs))
-    feems.require_recommended_loo(config)
-    observed_nodes = np.unique(sample_nodes)
-    started = time.perf_counter()
-    result = feems.fit_feems_recommended_loo(
-        genotypes=genotypes,
-        sample_nodes=sample_nodes,
-        graph=dict(payload["graph"]),
-        active_positions=positions,
-        cv_jobs=config.parallel_cv_jobs,
-        cv_checkpoint_dir=args.cv_checkpoint_dir,
-        cv_checkpoint_key=_feems_cv_checkpoint_key(args.input),
-    )
-    elapsed = time.perf_counter() - started
-    estimate = np.asarray(result.edge_log_rates, dtype=np.float64)
-    if result.cv_mode != "leave_one_out" or result.cv_folds != observed_nodes.size:
-        raise RuntimeError(
-            "FEEMS did not execute one held-out fold per observed deme: "
-            f"mode={result.cv_mode!r}, folds={result.cv_folds}, "
-            f"observed_demes={observed_nodes.size}"
-        )
-    if result.protocol != "v2_joint_lambda_lambda_q":
-        raise RuntimeError(f"unexpected FEEMS fit protocol: {result.protocol!r}")
-    if estimate.shape != truth.shape or not np.all(np.isfinite(estimate)):
-        raise RuntimeError("FEEMS returned an invalid edge estimate")
-
-    row = {
-        **_base_row(
-            index=args.index,
-            payload=payload,
-            positions=positions,
-            edges=edges,
-            sample_nodes=sample_nodes,
-        ),
-        "method": "feems",
-        "protocol": feems.FEEMS_RECOMMENDED_LOO_PROTOCOL,
-        "elapsed_seconds": float(elapsed),
-        "cv_jobs": int(config.parallel_cv_jobs),
-        "best_lambda": float(result.best_lambda),
-        "best_lambda_q": float(result.best_lambda_q),
-        "cv_folds": int(result.cv_folds),
-        "cv_mode": result.cv_mode,
-        "n_snps_after_filter": int(result.n_snps_after_filter),
-        "train_loss": float(result.train_loss),
-        "truth_edge_log_rms": _centered_rms(truth),
-        "feems_edge_log_rms": _centered_rms(estimate),
-        **_metric_fields("feems_edge_log", truth, estimate),
-    }
-    sample_count = np.bincount(sample_nodes, minlength=positions.shape[0]).astype(np.int32)
-    _atomic_json(args.output_json, row)
-    _atomic_npz(
-        args.output_npz,
-        positions=positions,
-        edges=edges,
-        truth=metrics.centered(truth),
-        feems=metrics.centered(estimate),
-        sample_count=sample_count,
-        mean_cv_error=np.asarray(result.mean_cv_error, dtype=np.float64),
-    )
-    print(json.dumps(json_ready({"stage": "feems_h2h_case", **row}), sort_keys=True), flush=True)
-
-
+@beartype
 def _coverage(truth: np.ndarray, mean: np.ndarray, sd: np.ndarray, z: float) -> float:
+    """Score pointwise neural intervals against the centered generating surface."""
     centered_truth = metrics.centered(truth)
     centered_mean = metrics.centered(mean)
     sd = np.asarray(sd, dtype=np.float64)
@@ -256,7 +49,11 @@ def _coverage(truth: np.ndarray, mean: np.ndarray, sd: np.ndarray, z: float) -> 
     return float(np.mean(np.abs(centered_truth[finite] - centered_mean[finite]) <= z * sd[finite]))
 
 
+@beartype
 def run_dreems_case(args: argparse.Namespace) -> None:
+    """Save neural and MAP estimates from the same simulated observation."""
+    input_digest = sha256(args.input)
+    checkpoint_digest = sha256(args.checkpoint)
     payload = _load_example(args.input)
     positions, edges, sample_nodes, genotypes, truth = _example_arrays(payload)
     example = InferenceExample(
@@ -294,7 +91,9 @@ def run_dreems_case(args: argparse.Namespace) -> None:
             sample_nodes=sample_nodes,
         ),
         "method": "dreems",
+        "input_sha256": input_digest,
         "checkpoint": str(args.checkpoint.resolve()),
+        "checkpoint_sha256": checkpoint_digest,
         "checkpoint_load_seconds": float(loaded_seconds),
         "conditioner_seconds": float(conditioner_seconds),
         "conditioner_observed_nodes": int(conditioner_info.get("n_observed_nodes", 0)),
@@ -320,6 +119,12 @@ def run_dreems_case(args: argparse.Namespace) -> None:
         **_metric_fields("dreems_edge_log", truth, neural),
         **_metric_fields("dreems_map_edge_log", truth, refined),
     }
+    if sha256(args.input) != input_digest:
+        raise RuntimeError("DREEMS input changed during inference; refusing to publish the result")
+    if sha256(args.checkpoint) != checkpoint_digest:
+        raise RuntimeError(
+            "DREEMS checkpoint changed during inference; refusing to publish the result"
+        )
     diagnostics = result.refinement_diagnostics or {}
     for fit_name in ("initial_fit", "refined_fit"):
         fit = diagnostics.get(fit_name, {})
@@ -329,8 +134,8 @@ def run_dreems_case(args: argparse.Namespace) -> None:
                     row[f"covariance_{fit_name.removesuffix('_fit')}_{key}"] = float(fit[key])
 
     sample_count = np.bincount(sample_nodes, minlength=positions.shape[0]).astype(np.int32)
-    _atomic_json(args.output_json, row)
-    _atomic_npz(
+    write_json(args.output_json, row)
+    write_npz(
         args.output_npz,
         positions=positions,
         edges=edges,
@@ -340,29 +145,43 @@ def run_dreems_case(args: argparse.Namespace) -> None:
         dreems_map=refined,
         edge_sd=edge_sd,
         sample_count=sample_count,
+        checkpoint_sha256=np.asarray(checkpoint_digest),
     )
     print(json.dumps(json_ready({"stage": "dreems_h2h_case", **row}), sort_keys=True), flush=True)
 
 
+@beartype
 def _read_rows(paths: Sequence[Path], expected_method: str) -> dict[int, dict[str, Any]]:
+    """Index reports without coercing case IDs or accepting malformed input hashes."""
     rows: dict[int, dict[str, Any]] = {}
     for path in paths:
         row = json.loads(path.read_text())
-        if row.get("method") != expected_method:
+        if not isinstance(row, dict) or row.get("method") != expected_method:
             raise ValueError(f"{path} is not a {expected_method} result")
-        index = int(row["index"])
+        index = row.get("index")
+        if type(index) is not int or index < 0:
+            raise ValueError(f"{path} needs a nonnegative integer case ID")
+        digest = row.get("input_sha256")
+        if digest is not None and (
+            not isinstance(digest, str)
+            or len(digest) != 64
+            or any(char not in "0123456789abcdef" for char in digest)
+        ):
+            raise ValueError(f"{path} has an invalid input SHA-256 digest")
         if index in rows:
             raise ValueError(f"duplicate {expected_method} result for example {index}")
         rows[index] = row
     return rows
 
 
+@beartype
 def _paired_bootstrap(
     values: np.ndarray,
     *,
     rng: np.random.Generator,
     replicates: int,
 ) -> tuple[float, float]:
+    """Resample cases, not edges, to obtain an interval for the mean advantage."""
     finite = values[np.isfinite(values)]
     if finite.size == 0:
         return float("nan"), float("nan")
@@ -372,6 +191,7 @@ def _paired_bootstrap(
     return float(low), float(high)
 
 
+@beartype
 def _paired_comparison(
     rows: Sequence[Mapping[str, Any]],
     *,
@@ -381,6 +201,7 @@ def _paired_comparison(
     rng: np.random.Generator,
     bootstrap_replicates: int,
 ) -> dict[str, Any]:
+    """Summarize paired advantages using the metric's direction of improvement."""
     candidate_values = np.asarray([row[candidate] for row in rows], dtype=np.float64)
     baseline_values = np.asarray([row[baseline] for row in rows], dtype=np.float64)
     finite = np.isfinite(candidate_values) & np.isfinite(baseline_values)
@@ -413,7 +234,9 @@ def _paired_comparison(
     }
 
 
+@beartype
 def _numeric_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, float | int]]:
+    """Report finite case counts and summary statistics for numeric columns."""
     keys = sorted({key for row in rows for key in row})
     summary: dict[str, dict[str, float | int]] = {}
     for key in keys:
@@ -433,19 +256,13 @@ def _numeric_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, f
     return summary
 
 
+@beartype
 def _write_csv(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames: list[str] = []
-    for row in rows:
-        fieldnames.extend(key for key in row if key not in fieldnames)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    with temporary.open("w", newline="") as stream:
-        writer = csv.DictWriter(stream, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
-    os.replace(temporary, path)
+    """Replace a complete CSV report, preserving first-seen column order."""
+    write_csv(path, rows)
 
 
+@beartype
 def protocol_manifest(
     *,
     cv_execution: str,
@@ -455,6 +272,7 @@ def protocol_manifest(
     metadata_pattern: str,
     feems_result_source: str = "computed",
 ) -> dict[str, Any]:
+    """Record the checkpoint and the precise FEEMS cross-validation protocol."""
     config = feems.recommended_loo_config()
     feems.require_recommended_loo(config)
     return {
@@ -485,7 +303,7 @@ def protocol_manifest(
         },
         "dreems": {
             "checkpoint": str(checkpoint.resolve()),
-            "checkpoint_sha256": _sha256(checkpoint),
+            "checkpoint_sha256": sha256(checkpoint),
             "neural_estimate": True,
             "map_estimate": {
                 "enabled": True,
@@ -495,16 +313,31 @@ def protocol_manifest(
     }
 
 
+@beartype
 def aggregate(args: argparse.Namespace) -> None:
+    """Join matching case reports and retain the documented FEEMS tuning protocol."""
     feems_rows = _read_rows(args.feems_json, "feems")
     dreems_rows = _read_rows(args.dreems_json, "dreems")
     if feems_rows.keys() != dreems_rows.keys():
         raise ValueError("FEEMS and DREEMS result sets contain different examples")
+    if any("checkpoint_sha256" in row for row in dreems_rows.values()):
+        checkpoint_digest = sha256(args.checkpoint)
+        for index, row in dreems_rows.items():
+            if row.get("checkpoint_sha256") != checkpoint_digest:
+                raise ValueError(
+                    f"example {index} is not verified against the requested checkpoint"
+                )
 
     rows: list[dict[str, Any]] = []
     for index in sorted(feems_rows):
         feems_row = feems_rows[index]
         dreems_row = dreems_rows[index]
+        if (
+            feems_row.get("input_sha256") is not None
+            and dreems_row.get("input_sha256") is not None
+            and feems_row["input_sha256"] != dreems_row["input_sha256"]
+        ):
+            raise ValueError(f"example {index} uses different input files for FEEMS and DREEMS")
         for key in ("num_nodes", "num_edges", "num_samples", "num_sampled_nodes"):
             if feems_row[key] != dreems_row[key]:
                 raise ValueError(f"example {index} disagrees on {key}")
@@ -575,6 +408,43 @@ def aggregate(args: argparse.Namespace) -> None:
         metadata_pattern=args.metadata_pattern,
         feems_result_source=getattr(args, "feems_result_source", "computed"),
     )
+    manifest["paired_input_identity"] = (
+        "sha256"
+        if all(
+            feems_rows[index].get("input_sha256") is not None
+            and dreems_rows[index].get("input_sha256") is not None
+            for index in feems_rows
+        )
+        else "not_recorded_for_all_cases"
+    )
+    manifest["dreems"]["prediction_checkpoint_identity"] = (
+        "sha256"
+        if all(row.get("checkpoint_sha256") is not None for row in dreems_rows.values())
+        else "not_recorded_for_all_cases"
+    )
+    verification_path = getattr(args, "feems_archive_verification", None)
+    if (
+        getattr(args, "feems_result_source", "computed") in {"verified_archive", "legacy_archive"}
+        and verification_path is None
+    ):
+        raise ValueError("archive reuse requires its verification report")
+    if verification_path is not None:
+        verification = json.loads(verification_path.read_text())
+        if (
+            getattr(args, "feems_result_source", "computed") == "verified_archive"
+            and verification["input_identity"] != "sha256"
+        ):
+            raise ValueError("legacy archive input identity cannot be reported as verified")
+        cases = verification["cases"]
+        if len(cases) != len(rows) or {case["index"] for case in cases} != set(feems_rows):
+            raise ValueError("archive verification covers different examples")
+        for case in cases:
+            digest = dreems_rows[case["index"]].get("input_sha256")
+            if digest is not None and digest != case["current_input_sha256"]:
+                raise ValueError("archive verification and DREEMS used different inputs")
+        manifest["feems"]["archive_verification"] = {
+            key: verification[key] for key in ("archive_sha256", "examples", "input_identity")
+        }
     summary = {
         "examples": len(rows),
         "protocol": manifest,
@@ -582,8 +452,8 @@ def aggregate(args: argparse.Namespace) -> None:
         "paired_comparisons": comparisons,
     }
     _write_csv(args.output_csv, rows)
-    _atomic_json(args.output_json, summary)
-    _atomic_json(args.output_protocol, manifest)
+    write_json(args.output_json, summary)
+    write_json(args.output_protocol, manifest)
     print(
         json.dumps(
             {
@@ -597,24 +467,13 @@ def aggregate(args: argparse.Namespace) -> None:
     )
 
 
+@beartype
 def build_parser() -> argparse.ArgumentParser:
+    """Expose separate fitting and aggregation commands with stable arguments."""
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    feems_fold = subparsers.add_parser("feems-fold")
-    feems_fold.add_argument("--input", type=Path, required=True)
-    feems_fold.add_argument("--fold", type=int, required=True)
-    feems_fold.add_argument("--output-npz", type=Path, required=True)
-    feems_fold.set_defaults(handler=run_feems_fold)
-
-    feems_case = subparsers.add_parser("feems-case")
-    feems_case.add_argument("--input", type=Path, required=True)
-    feems_case.add_argument("--index", type=int, required=True)
-    feems_case.add_argument("--cv-jobs", type=int, required=True)
-    feems_case.add_argument("--cv-checkpoint-dir", type=Path)
-    feems_case.add_argument("--output-json", type=Path, required=True)
-    feems_case.add_argument("--output-npz", type=Path, required=True)
-    feems_case.set_defaults(handler=run_feems_case)
+    feems_benchmark.add_commands(subparsers)
 
     dreems_case = subparsers.add_parser("dreems-case")
     dreems_case.add_argument("--input", type=Path, required=True)
@@ -631,9 +490,10 @@ def build_parser() -> argparse.ArgumentParser:
     aggregate_parser.add_argument("--cv-execution", required=True)
     aggregate_parser.add_argument(
         "--feems-result-source",
-        choices=("computed", "verified_archive"),
+        choices=("computed", "verified_archive", "legacy_archive"),
         default="computed",
     )
+    aggregate_parser.add_argument("--feems-archive-verification", type=Path)
     aggregate_parser.add_argument("--source-commit", required=True)
     aggregate_parser.add_argument("--input-pattern", required=True)
     aggregate_parser.add_argument("--metadata-pattern", required=True)
@@ -646,7 +506,9 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+@beartype
 def main() -> None:
+    """Dispatch one benchmark task selected on the command line."""
     args = build_parser().parse_args()
     args.handler(args)
 

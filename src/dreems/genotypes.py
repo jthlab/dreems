@@ -1,12 +1,17 @@
 """Construction of DREEMS datasets from sgkit-compatible genotypes."""
 
+# ruff: noqa: F722,F821,UP037
+
 from __future__ import annotations
 
 from collections.abc import Mapping
+from numbers import Real
 from typing import Any
 
 import numpy as np
 import xarray as xr
+from beartype import beartype
+from jaxtyping import Float, Int, jaxtyped
 from scipy.spatial import cKDTree
 
 from dreems.datasets import (
@@ -15,15 +20,17 @@ from dreems.datasets import (
     OBSERVED_NODE_DIM,
     create_dataset,
 )
+from dreems.validation import _effective_snp_count, _real_array
 
 SAMPLE_ID = "sample_id"
 SAMPLE_LATITUDE = "sample_latitude"
 SAMPLE_LONGITUDE = "sample_longitude"
 
 
+@beartype
 def attach_sample_coordinates(
     dataset: xr.Dataset,
-    coordinates: Mapping[str, tuple[float, float]],
+    coordinates: Mapping[str, tuple[Real, Real]],
     *,
     sample_id: str = SAMPLE_ID,
 ) -> xr.Dataset:
@@ -69,25 +76,29 @@ def attach_sample_coordinates(
     )
 
 
+@beartype
 def from_genotype_dataset(
     dataset: xr.Dataset,
     *,
     node_latitude: np.ndarray,
     node_longitude: np.ndarray,
     edges: np.ndarray,
-    sample_coordinates: Mapping[str, tuple[float, float]] | None = None,
+    sample_coordinates: Mapping[str, tuple[Real, Real]] | None = None,
     sample_id: str = SAMPLE_ID,
-    min_maf: float = 0.05,
-    min_variant_call_rate: float = 0.8,
-    effective_snps: int | None = None,
+    min_maf: Real = 0.05,
+    min_variant_call_rate: Real = 0.8,
+    effective_snps: Real | None = None,
     call_genotype: str = "call_genotype",
     attrs: Mapping[str, Any] | None = None,
 ) -> xr.Dataset:
-    """Build a DREEMS dataset from an sgkit-compatible genotype dataset.
+    """Build a DREEMS dataset from sgkit-compatible calls, including opened VCF-Zarr.
 
-    Input genotypes must have a fixed positive ploidy and dimensions
-    ``(variants, samples, ploidy)``. Missing genotypes are mean-imputed after
-    biallelic, call-rate, and MAF filtering. ``effective_snps`` can be supplied
+    Input genotypes must be signed integer allele codes, with fixed positive
+    ploidy and dimensions ``(variants, samples, ploidy)``. A -1 allele or a true
+    entry in ``{call_genotype}_mask`` makes the whole sample call missing. Mixed
+    ploidy (-2 padding) is not supported. Missing calls are mean-imputed after
+    biallelic, call-rate, and MAF filtering. This does not prune linked SNPs or
+    apply read-depth or genotype-quality thresholds. ``effective_snps`` can be supplied
     when linkage makes the retained SNP count overstate independent information.
     Supply ``sample_coordinates`` as ``sample_id -> (latitude, longitude)`` or
     attach ``sample_latitude`` and ``sample_longitude`` beforehand.
@@ -119,26 +130,40 @@ def from_genotype_dataset(
     if set(calls.dims) != set(required_dims):
         raise ValueError(f"{call_genotype} must have dimensions {required_dims}")
     calls = calls.transpose(*required_dims)
+    if calls.dtype.kind != "i":
+        raise ValueError(f"{call_genotype} must contain signed integer allele codes")
+    if calls.attrs.get("mixed_ploidy", False):
+        raise ValueError("mixed ploidy is not supported; select samples with a common ploidy")
     ploidy = int(calls.sizes["ploidy"])
     if ploidy < 1:
         raise ValueError("genotypes must have positive ploidy")
     if calls.sizes["samples"] < 2:
         raise ValueError("at least two samples are required")
 
+    mask_name = f"{call_genotype}_mask"
+    if mask_name in dataset:
+        mask = dataset[mask_name]
+        if set(mask.dims) != set(required_dims) or mask.dtype.kind != "b":
+            raise ValueError(f"{mask_name} must be boolean with dimensions {required_dims}")
+        # Preserve fill values so the uniform-ploidy check can still reject them.
+        calls = calls.where(~mask | (calls < -1), other=-1)
+
+    sample_latitude = _real_array(dataset[SAMPLE_LATITUDE].values, name="sample latitude")
+    sample_longitude = _real_array(dataset[SAMPLE_LONGITUDE].values, name="sample longitude")
+    if np.any(np.abs(sample_latitude) > 90.0):
+        raise ValueError("sample latitude must be between -90 and 90 degrees")
+    node_latitude = _real_array(node_latitude, name="node latitude")
+    node_longitude = _real_array(node_longitude, name="node longitude")
+    _validate_node_geography(node_latitude, node_longitude)
+
     standardized, retained_snps = _standardized_genotypes(
         calls,
         min_maf=float(min_maf),
         min_variant_call_rate=float(min_variant_call_rate),
     )
-    precision_snps = retained_snps if effective_snps is None else int(effective_snps)
-    if precision_snps < 2:
-        raise ValueError("effective_snps must be at least 2")
-
-    sample_latitude = np.asarray(dataset[SAMPLE_LATITUDE].values, dtype=np.float64)
-    sample_longitude = np.asarray(dataset[SAMPLE_LONGITUDE].values, dtype=np.float64)
-    node_latitude = np.asarray(node_latitude, dtype=np.float64)
-    node_longitude = np.asarray(node_longitude, dtype=np.float64)
-    _validate_node_geography(node_latitude, node_longitude)
+    precision_snps = _effective_snp_count(
+        retained_snps if effective_snps is None else effective_snps
+    )
 
     node_positions, sample_positions, projection_attrs = _project_local_azimuthal_equidistant(
         node_latitude=node_latitude,
@@ -199,43 +224,22 @@ def from_genotype_dataset(
     )
 
 
-def from_vcf_zarr(
-    dataset: xr.Dataset,
-    *,
-    node_latitude: np.ndarray,
-    node_longitude: np.ndarray,
-    edges: np.ndarray,
-    sample_coordinates: Mapping[str, tuple[float, float]] | None = None,
-    sample_id: str = SAMPLE_ID,
-    min_maf: float = 0.05,
-    min_variant_call_rate: float = 0.8,
-    effective_snps: int | None = None,
-    call_genotype: str = "call_genotype",
-    attrs: Mapping[str, Any] | None = None,
-) -> xr.Dataset:
-    """Build a DREEMS dataset from an opened VCF-Zarr xarray dataset."""
-
-    return from_genotype_dataset(
-        dataset,
-        node_latitude=node_latitude,
-        node_longitude=node_longitude,
-        edges=edges,
-        sample_coordinates=sample_coordinates,
-        sample_id=sample_id,
-        min_maf=min_maf,
-        min_variant_call_rate=min_variant_call_rate,
-        effective_snps=effective_snps,
-        call_genotype=call_genotype,
-        attrs=attrs,
-    )
+# VCF-Zarr follows the same schema; both public names use one implementation.
+from_vcf_zarr = from_genotype_dataset
 
 
+@beartype
 def _standardized_genotypes(
     calls: xr.DataArray,
     *,
     min_maf: float,
     min_variant_call_rate: float,
 ) -> tuple[xr.DataArray, int]:
+    """Filter calls, impute variant means, and scale dosages to sample variance one.
+
+    Reductions stay in xarray, so a chunked input does not require loading the
+    full genotype tensor. Small QC summaries are computed before indexing.
+    """
     sample_called = (calls >= 0).all(dim="ploidy")
     dosage = calls.where(sample_called).sum(dim="ploidy", skipna=True).where(sample_called)
     called_count = sample_called.sum(dim="samples")
@@ -251,7 +255,10 @@ def _standardized_genotypes(
         & (maf >= min_maf)
         & (max_called_allele <= 1)
     )
-    retained_index = np.flatnonzero(np.asarray(keep.compute().values, dtype=bool))
+    qc = xr.Dataset({"keep": keep, "has_fill": (calls < -1).any()}).compute()
+    if bool(qc["has_fill"]):
+        raise ValueError("mixed-ploidy fill values are not supported; use fixed ploidy calls")
+    retained_index = np.flatnonzero(np.asarray(qc["keep"].values, dtype=bool))
     if retained_index.size == 0:
         raise ValueError("no variants remain after biallelic, call-rate, and MAF filtering")
 
@@ -260,26 +267,40 @@ def _standardized_genotypes(
     imputed = filtered.fillna(variant_mean)
     centered = imputed - imputed.mean(dim="samples")
     standard_deviation = centered.std(dim="samples", ddof=1)
-    usable = np.asarray(
-        ((standard_deviation > 1.0e-8) & np.isfinite(standard_deviation)).compute().values,
-        dtype=bool,
-    )
+    variable = (standard_deviation > 1.0e-8) & np.isfinite(standard_deviation)
+    qc = xr.Dataset(
+        {
+            "usable": variable,
+            "sample_has_calls": (sample_called.isel(variants=retained_index) & variable).any(
+                "variants"
+            ),
+        }
+    ).compute()
+    usable = np.asarray(qc["usable"].values, dtype=bool)
     usable_index = np.flatnonzero(usable)
     if usable_index.size == 0:
         raise ValueError("no variable SNPs remain after genotype imputation")
+    missing_samples = np.flatnonzero(~np.asarray(qc["sample_has_calls"].values, dtype=bool))
+    if missing_samples.size:
+        raise ValueError(
+            "samples have no called genotypes among retained variants; remove them before "
+            f"building covariance (sample indices: {missing_samples[:10].tolist()})"
+        )
     standardized = centered.isel(variants=usable_index) / standard_deviation.isel(
         variants=usable_index
     )
     return standardized, int(usable_index.size)
 
 
+@jaxtyped(typechecker=beartype)
 def _node_covariance(
     standardized: xr.DataArray,
     *,
-    sample_nodes: np.ndarray,
-    node_sample_count: np.ndarray,
-    observed_nodes: np.ndarray,
-) -> np.ndarray:
+    sample_nodes: Int[np.ndarray, "samples"],
+    node_sample_count: Int[np.ndarray, "nodes"],
+    observed_nodes: Int[np.ndarray, "observed"],
+) -> Float[np.ndarray, "observed observed"]:
+    """Average standardized samples by deme before forming their covariance."""
     weights = np.zeros((observed_nodes.size, sample_nodes.size), dtype=np.float64)
     observed_lookup = np.full(node_sample_count.shape[0], -1, dtype=np.int32)
     observed_lookup[observed_nodes] = np.arange(observed_nodes.size, dtype=np.int32)
@@ -301,10 +322,12 @@ def _node_covariance(
     return 0.5 * (covariance + covariance.T)
 
 
+@jaxtyped(typechecker=beartype)
 def _validate_node_geography(
-    node_latitude: np.ndarray,
-    node_longitude: np.ndarray,
+    node_latitude: Float[np.ndarray, "nodes"],
+    node_longitude: Float[np.ndarray, "nodes"],
 ) -> None:
+    """Validate graph coordinates before genotype reductions or projection."""
     if node_latitude.ndim != 1 or node_longitude.shape != node_latitude.shape:
         raise ValueError("node_latitude and node_longitude must be matching vectors")
     if node_latitude.shape[0] < 2:
@@ -315,13 +338,15 @@ def _validate_node_geography(
         raise ValueError("node latitude and longitude must be finite")
 
 
+@jaxtyped(typechecker=beartype)
 def _project_local_azimuthal_equidistant(
     *,
-    node_latitude: np.ndarray,
-    node_longitude: np.ndarray,
-    sample_latitude: np.ndarray,
-    sample_longitude: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    node_latitude: Float[np.ndarray, "nodes"],
+    node_longitude: Float[np.ndarray, "nodes"],
+    sample_latitude: Float[np.ndarray, "samples"],
+    sample_longitude: Float[np.ndarray, "samples"],
+) -> tuple[Float[np.ndarray, "nodes 2"], Float[np.ndarray, "samples 2"], dict[str, Any]]:
+    """Project the shared geographic extent to kilometers, including dateline crossings."""
     latitude = np.concatenate((node_latitude, sample_latitude))
     longitude = np.concatenate((node_longitude, sample_longitude))
     latitude_radians = np.deg2rad(latitude)
@@ -382,7 +407,9 @@ def _project_local_azimuthal_equidistant(
     )
 
 
+@beartype
 def _sample_id_text(value: object) -> str:
+    """Decode byte IDs from stores without turning them into strings like b'ID'."""
     if isinstance(value, bytes | np.bytes_):
         return bytes(value).decode()
     return str(value)

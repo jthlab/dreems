@@ -12,6 +12,9 @@ example_ids: null
 
 feems_archive: /home/jonth/turbo/dreems/released_graph_balanced_loo_h2h_20260822/feems_results.tar.gz
 feems_archive_checksum: /home/jonth/turbo/dreems/released_graph_balanced_loo_h2h_20260822/feems_results.tar.gz.sha256
+# Historical fits lack genotype-file hashes. Reuse checks geometry/truth/counts
+# and labels genotype identity as unverified; it does not invent provenance.
+allow_legacy_feems_archive: true
 feems_final_mem_mb: 2000
 feems_final_runtime: 15m
 feems_partition: standard

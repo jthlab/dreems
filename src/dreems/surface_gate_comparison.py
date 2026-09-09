@@ -6,11 +6,12 @@ graph, and sampling mask. It deliberately consumes cached FEEMS fits because
 the gate does not change FEEMS inputs or tuning.
 """
 
+# ruff: noqa: F722,F821,UP037
+
 from __future__ import annotations
 
 import argparse
 import csv
-import hashlib
 import html
 import json
 from collections.abc import Mapping, Sequence
@@ -19,8 +20,14 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from beartype import beartype
+from jaxtyping import Int, Real, jaxtyped
 
-from .workflow_io import json_ready
+from .validation import _integer_array, _real_array, validate_graph_arrays
+from .workflow_io import _atomic_output, json_ready, parse_nonnegative_integer, write_csv
+from .workflow_io import sha256 as sha256
+from .workflow_io import write_json as write_json
+from .workflow_io import write_npz as _atomic_npz
 
 SCENARIO_TRUTHS = ("barrier", "anisotropy", "homogeneous")
 SCENARIO_MASKS = ("full", "random_10pct", "outer_slabs", "left_missing")
@@ -41,15 +48,17 @@ class EdgeMetrics:
     rms: float
 
 
+@beartype
 def centered(values: np.ndarray) -> np.ndarray:
     """Return a finite one-dimensional array with its mean removed."""
 
-    array = np.asarray(values, dtype=np.float64)
-    if array.ndim != 1 or array.size == 0 or not np.all(np.isfinite(array)):
+    array = _real_array(values, name="edge values")
+    if array.ndim != 1 or array.size == 0:
         raise ValueError("edge values must be a nonempty finite vector")
     return array - float(array.mean())
 
 
+@beartype
 def edge_metrics(truth: np.ndarray, estimate: np.ndarray) -> EdgeMetrics:
     """Measure centered pattern correlation and squared error."""
 
@@ -72,72 +81,51 @@ def edge_metrics(truth: np.ndarray, estimate: np.ndarray) -> EdgeMetrics:
     )
 
 
+@beartype
 def projected_alpha(core: np.ndarray, gated: np.ndarray) -> float:
-    """Project a gated surface onto its core surface."""
+    """Project a gated surface onto its core; MAP may also change the pattern."""
 
     anchor = centered(core)
     candidate = centered(gated)
+    if anchor.shape != candidate.shape:
+        raise ValueError("core and gated surfaces must have the same shape")
     denominator = float(np.dot(anchor, anchor))
     if denominator <= np.finfo(np.float64).eps:
         return float("nan")
     return float(np.dot(anchor, candidate) / denominator)
 
 
-def sha256(path: Path) -> str:
-    """Hash one artifact without loading it into memory."""
-
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
+@beartype
 def load_npz(path: Path) -> dict[str, np.ndarray]:
     """Load an NPZ archive without permitting pickled arrays."""
 
     with np.load(path, allow_pickle=False) as archive:
-        return {name: np.asarray(archive[name]) for name in archive.files}
+        return {name: archive[name] for name in archive.files}
 
 
-def _atomic_npz(path: Path, **arrays: np.ndarray) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    with temporary.open("wb") as stream:
-        np.savez_compressed(stream, **arrays)
-    temporary.replace(path)
-
-
-def write_json(path: Path, payload: Mapping[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(json_ready(dict(payload)), indent=2, sort_keys=True) + "\n")
-
-
+@beartype
 def write_rows(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames: list[str] = []
-    for row in rows:
-        for name in row:
-            if name not in fieldnames:
-                fieldnames.append(name)
-    with path.open("w", newline="") as stream:
-        writer = csv.DictWriter(stream, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(json_ready(list(rows)))
+    """Write rows in their existing order, converting NumPy scalars for CSV."""
+    write_csv(path, json_ready(rows))
 
 
+@beartype
 def read_rows(path: Path) -> list[dict[str, Any]]:
+    """Read CSV values as text; callers parse numeric columns explicitly."""
     with path.open(newline="") as stream:
         return list(csv.DictReader(stream))
 
 
+@beartype
 def _scalar_text(array: np.ndarray) -> str:
+    """Read one archive metadata value without accepting an entire vector."""
     value = np.asarray(array)
     if value.size != 1:
         raise ValueError("expected one scalar string")
     return str(value.reshape(()).item())
 
 
+@beartype
 def _validate_equal(
     expected: np.ndarray,
     observed: np.ndarray,
@@ -145,10 +133,12 @@ def _validate_equal(
     name: str,
     example: int,
 ) -> None:
+    """Require exact graph and sampling alignment between cached methods."""
     if expected.shape != observed.shape or not np.array_equal(expected, observed):
         raise ValueError(f"scenario {example} has mismatched {name}")
 
 
+@beartype
 def build_scenario_bundle(
     *,
     core_bundle_path: Path,
@@ -160,16 +150,46 @@ def build_scenario_bundle(
 ) -> None:
     """Merge the 12 exact notebook cases into one matched comparison."""
 
+    core_hash = sha256(core_bundle_path)
+    gate_checkpoint_hash = sha256(gated_checkpoint)
     core = load_npz(core_bundle_path)
-    indices = np.asarray(core["index"], dtype=np.int64)
+    indices = _integer_array(core["index"], name="index", dtype=np.int64)
     if not np.array_equal(indices, np.arange(12, dtype=np.int64)):
         raise ValueError("the core scenario bundle must contain examples 0 through 11")
+
+    # Check the fixed notebook design before assigning figures to named sections.
+    if not np.array_equal(core["truth_name"], np.repeat(SCENARIO_TRUTHS, 4)) or not np.array_equal(
+        core["mask_name"], np.tile(SCENARIO_MASKS, 3)
+    ):
+        raise ValueError("scenario names must follow the notebook's truth and mask order")
+    core["edges"] = _integer_array(core["edges"], name="edges", dtype=np.int32)
+    core["num_snps"] = _integer_array(core["num_snps"], name="num_snps", dtype=np.int64)
+    if core["num_snps"].shape != (12,) or np.any(core["num_snps"] < 1):
+        raise ValueError("num_snps must contain a positive count for each scenario")
+    for name in ("positions", "truth", "dreems", "dreems_map", "edge_sd", "sample_count", "feems"):
+        core[name] = _real_array(core[name], name=name)
+        if core[name].ndim == 0 or core[name].shape[0] != 12:
+            raise ValueError(f"{name} must contain all 12 scenarios")
+    if np.any(core["edge_sd"] < 0) or np.any(core["sample_count"] < 0):
+        raise ValueError("posterior SDs and sample counts must be nonnegative")
 
     gated_neural = []
     gated_map = []
     gated_sd = []
     for example in indices.tolist():
+        validate_graph_arrays(positions=core["positions"][example], edges=core["edges"][example])
+        edge_shape = (core["edges"].shape[1],)
+        if core["sample_count"][example].shape != (core["positions"].shape[1],):
+            raise ValueError("sample counts must align with graph nodes")
+        for name in ("truth", "dreems", "dreems_map", "edge_sd", "feems"):
+            if core[name][example].shape != edge_shape:
+                raise ValueError(f"{name} must align with graph edges")
         gated = load_npz(Path(gated_pattern.format(example=example)))
+        if (
+            "checkpoint_sha256" in gated
+            and _scalar_text(gated["checkpoint_sha256"]) != gate_checkpoint_hash
+        ):
+            raise ValueError(f"scenario {example} was predicted by a different gated checkpoint")
         for name in ("positions", "edges", "truth", "sample_count"):
             _validate_equal(
                 np.asarray(core[name][example]),
@@ -177,9 +197,15 @@ def build_scenario_bundle(
                 name=name,
                 example=example,
             )
-        gated_neural.append(np.asarray(gated["dreems"], dtype=np.float64))
-        gated_map.append(np.asarray(gated["dreems_map"], dtype=np.float64))
-        gated_sd.append(np.asarray(gated["edge_sd"], dtype=np.float64))
+        for name in ("dreems", "dreems_map", "edge_sd"):
+            gated[name] = _real_array(gated[name], name=name)
+            if gated[name].shape != edge_shape:
+                raise ValueError(f"gated {name} must align with graph edges")
+        if np.any(gated["edge_sd"] < 0):
+            raise ValueError("gated posterior SD must be nonnegative")
+        gated_neural.append(gated["dreems"])
+        gated_map.append(gated["dreems_map"])
+        gated_sd.append(gated["edge_sd"])
 
     core_neural = np.asarray(core["dreems"], dtype=np.float64)
     core_map = np.asarray(core["dreems_map"], dtype=np.float64)
@@ -237,7 +263,6 @@ def build_scenario_bundle(
         )
 
     core_checkpoint_hash = _scalar_text(core["checkpoint_sha256"])
-    gate_checkpoint_hash = sha256(gated_checkpoint)
     bundle_arrays = {
         "index": indices,
         "truth_name": np.asarray(core["truth_name"]),
@@ -263,12 +288,14 @@ def build_scenario_bundle(
         "feems_protocol": np.asarray(_scalar_text(core["feems_protocol"])),
         **metric_arrays,
     }
+    if sha256(core_bundle_path) != core_hash or sha256(gated_checkpoint) != gate_checkpoint_hash:
+        raise ValueError("comparison input changed while building the scenario bundle")
     _atomic_npz(output, **bundle_arrays)
     write_rows(rows_output, rows)
     report = scenario_report(rows)
     report["provenance"] = {
         "core_bundle": str(core_bundle_path.resolve()),
-        "core_bundle_sha256": sha256(core_bundle_path),
+        "core_bundle_sha256": core_hash,
         "core_checkpoint_sha256": core_checkpoint_hash,
         "gated_checkpoint": str(gated_checkpoint.resolve()),
         "gated_checkpoint_sha256": gate_checkpoint_hash,
@@ -278,13 +305,17 @@ def build_scenario_bundle(
     write_json(report_output, report)
 
 
+@beartype
 def _finite_mean(values: Sequence[float]) -> float:
+    """Exclude undefined correlations without turning homogeneous cases into zeroes."""
     array = np.asarray(values, dtype=np.float64)
     array = array[np.isfinite(array)]
     return float(array.mean()) if array.size else float("nan")
 
 
+@beartype
 def _group_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Give each case equal weight and report paired MSE differences."""
     result: dict[str, Any] = {"examples": len(rows)}
     for method in METHODS:
         result[method] = {
@@ -306,6 +337,7 @@ def _group_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     return result
 
 
+@beartype
 def scenario_report(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """Summarize the exact notebook comparison by generating surface."""
 
@@ -314,7 +346,7 @@ def scenario_report(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "overall": _group_summary(rows),
         "by_truth": {},
         "interpretation": (
-            "All methods use the same 12 msprime simulations and sampling masks. "
+            "All methods use the same 12 notebook cases; each surface simulation is reused across four sampling masks. "
             "Positive MSE advantage means that gated DREEMS has lower edge MSE."
         ),
     }
@@ -324,7 +356,9 @@ def scenario_report(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     return report
 
 
+@beartype
 def _plot_imports() -> tuple[Any, Any, Any, Any]:
+    """Keep optional plotting imports out of workers that only assemble arrays."""
     import matplotlib
 
     matplotlib.use("Agg")
@@ -335,16 +369,21 @@ def _plot_imports() -> tuple[Any, Any, Any, Any]:
     return plt, LineCollection, TwoSlopeNorm, matplotlib
 
 
+@jaxtyped(typechecker=beartype)
 def _draw_edges(
     axis: Any,
-    positions: np.ndarray,
-    edges: np.ndarray,
-    values: np.ndarray,
-    sample_count: np.ndarray,
+    positions: Real[np.ndarray, "nodes 2"],
+    edges: Int[np.ndarray, "edges 2"],
+    values: Real[np.ndarray, "edges"],
+    sample_count: Real[np.ndarray, "nodes"],
     *,
     limit: float,
     title: str,
 ) -> Any:
+    """Draw the supplied graph without interpolating or changing its edge order."""
+    validate_graph_arrays(positions=positions, edges=edges)
+    if np.any(_real_array(sample_count, name="sample_count") < 0):
+        raise ValueError("sample counts must be nonnegative")
     _plt, LineCollection, TwoSlopeNorm, _matplotlib = _plot_imports()
     local = centered(values)
     norm = TwoSlopeNorm(vmin=-limit, vcenter=0.0, vmax=limit)
@@ -382,13 +421,20 @@ def _draw_edges(
     return lines
 
 
+@beartype
 def _save_figure(figure: Any, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    figure.savefig(path, dpi=210, bbox_inches="tight", facecolor="white")
-    figure.savefig(path.with_suffix(".pdf"), bbox_inches="tight", facecolor="white")
+    """Replace the display figure and its PDF only after each file is complete."""
+    with _atomic_output(path) as stream:
+        figure.savefig(
+            stream, format=path.suffix.lstrip("."), dpi=210, bbox_inches="tight", facecolor="white"
+        )
+    with _atomic_output(path.with_suffix(".pdf")) as stream:
+        figure.savefig(stream, format="pdf", bbox_inches="tight", facecolor="white")
 
 
+@beartype
 def _metric_text(bundle: Mapping[str, np.ndarray], method: str, index: int) -> str:
+    """Show output amplitude when a homogeneous truth has no defined correlation."""
     mse = float(bundle[f"{method}_mse"][index])
     correlation = float(bundle[f"{method}_corr"][index])
     if np.isfinite(correlation):
@@ -396,6 +442,7 @@ def _metric_text(bundle: Mapping[str, np.ndarray], method: str, index: int) -> s
     return f"RMS={float(bundle[f'{method}_rms'][index]):.3f} | MSE={mse:.3f}"
 
 
+@beartype
 def scenario_family_figure(bundle: Mapping[str, np.ndarray], truth_name: str) -> Any:
     """Draw raw edges for core, gated, and FEEMS estimates."""
 
@@ -463,7 +510,9 @@ def scenario_family_figure(bundle: Mapping[str, np.ndarray], truth_name: str) ->
     return figure
 
 
+@beartype
 def _scenario_summary_rows(bundle: Mapping[str, np.ndarray]) -> list[dict[str, Any]]:
+    """Summarize each named truth without weighting by graph size."""
     rows = []
     truth_names = np.asarray(bundle["truth_name"]).astype(str)
     for truth in SCENARIO_TRUTHS:
@@ -478,6 +527,7 @@ def _scenario_summary_rows(bundle: Mapping[str, np.ndarray]) -> list[dict[str, A
     return rows
 
 
+@beartype
 def scenario_aggregate_figure(bundle: Mapping[str, np.ndarray]) -> Any:
     """Plot method performance across sampling masks for each truth."""
 
@@ -521,7 +571,9 @@ def scenario_aggregate_figure(bundle: Mapping[str, np.ndarray]) -> Any:
     return figure
 
 
+@beartype
 def _html_table(rows: Sequence[Mapping[str, Any]], columns: Sequence[str]) -> str:
+    """Escape cell text and display undefined numeric summaries as NA."""
     header = "".join(f"<th>{html.escape(column)}</th>" for column in columns)
     body = []
     for row in rows:
@@ -537,7 +589,9 @@ def _html_table(rows: Sequence[Mapping[str, Any]], columns: Sequence[str]) -> st
     return f"<table><thead><tr>{header}</tr></thead><tbody>{''.join(body)}</tbody></table>"
 
 
+@beartype
 def _gallery_html(title: str, intro: str, body: str) -> str:
+    """Wrap generated figures and tables in the comparison's static page layout."""
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{html.escape(title)}</title>
@@ -551,6 +605,7 @@ code {{ background: #f1f1f1; padding: 0.1rem 0.25rem; }}
 </style></head><body><h1>{html.escape(title)}</h1><p>{html.escape(intro)}</p>{body}</body></html>"""
 
 
+@beartype
 def render_scenario_gallery(*, bundle_path: Path, report_path: Path, output_dir: Path) -> None:
     """Render the 12-case raw-edge comparison and aggregate table."""
 
@@ -590,28 +645,38 @@ def render_scenario_gallery(*, bundle_path: Path, report_path: Path, output_dir:
         "Colors show centered edge-log relative migration on raw graph edges, with one "
         "shared scale per row."
     )
-    (output_dir / "index.html").write_text(
-        _gallery_html("Surface-gate comparison on FEEMS scenarios", intro, body)
-    )
+    with _atomic_output(output_dir / "index.html") as stream:
+        stream.write(
+            _gallery_html("Surface-gate comparison on FEEMS scenarios", intro, body).encode("utf-8")
+        )
 
 
+@beartype
 def _as_float(row: Mapping[str, Any], key: str) -> float:
+    """Parse a CSV metric; NaN remains meaningful for undefined correlation."""
     return float(row[key])
 
 
+@beartype
 def _as_int(row: Mapping[str, Any], key: str = "example") -> int:
-    return int(float(row[key]))
+    """Accept integral CSV values without truncation or float rounding of IDs."""
+    return parse_nonnegative_integer(row[key], name=key)
 
 
+@beartype
 def select_broad_examples(
     rows: Sequence[Mapping[str, Any]], count: int = 6
 ) -> dict[str, list[int]]:
     """Select deterministic random, strongest, best, and worst gate cases."""
 
+    if isinstance(count, bool) or count < 1:
+        raise ValueError("count must be positive")
     if len(rows) < count:
         raise ValueError("not enough broad rows for gallery selection")
     rng = np.random.default_rng(20260831)
     identifiers = np.asarray([_as_int(row) for row in rows], dtype=np.int64)
+    if len(set(identifiers.tolist())) != len(rows):
+        raise ValueError("broad rows contain duplicate example IDs")
     random_ids = rng.choice(identifiers, size=count, replace=False).tolist()
     strongest = sorted(rows, key=lambda row: _as_float(row, "alpha"))[:count]
     helps = sorted(
@@ -632,6 +697,7 @@ def select_broad_examples(
     }
 
 
+@beartype
 def _broad_case_arrays(
     example: int,
     *,
@@ -639,6 +705,7 @@ def _broad_case_arrays(
     gated_pattern: str,
     feems_pattern: str,
 ) -> dict[str, np.ndarray]:
+    """Load matching cached graphs; never use one method's geometry for another."""
     core = load_npz(Path(core_pattern.format(example=example)))
     gated = load_npz(Path(gated_pattern.format(example=example)))
     feems = load_npz(Path(feems_pattern.format(example=example)))
@@ -646,16 +713,17 @@ def _broad_case_arrays(
         _validate_equal(core[name], gated[name], name=name, example=example)
         _validate_equal(core[name], feems[name], name=name, example=example)
     return {
-        "positions": np.asarray(core["positions"], dtype=np.float64),
-        "edges": np.asarray(core["edges"], dtype=np.int32),
-        "truth": np.asarray(core["truth"], dtype=np.float64),
-        "core": np.asarray(core["dreems_map"], dtype=np.float64),
-        "gated": np.asarray(gated["dreems_map"], dtype=np.float64),
-        "feems": np.asarray(feems["feems"], dtype=np.float64),
-        "sample_count": np.asarray(core["sample_count"], dtype=np.float64),
+        "positions": _real_array(core["positions"], name="positions"),
+        "edges": _integer_array(core["edges"], name="edges", dtype=np.int32),
+        "truth": _real_array(core["truth"], name="truth"),
+        "core": _real_array(core["dreems_map"], name="core estimate"),
+        "gated": _real_array(gated["dreems_map"], name="gated estimate"),
+        "feems": _real_array(feems["feems"], name="FEEMS estimate"),
+        "sample_count": _real_array(core["sample_count"], name="sample_count"),
     }
 
 
+@beartype
 def _broad_examples_figure(
     rows_by_id: Mapping[int, Mapping[str, Any]],
     examples: Sequence[int],
@@ -664,6 +732,7 @@ def _broad_examples_figure(
     gated_pattern: str,
     feems_pattern: str,
 ) -> Any:
+    """Render selected cases with one shared color scale per row."""
     plt, _LineCollection, _TwoSlopeNorm, _matplotlib = _plot_imports()
     figure, axes = plt.subplots(
         len(examples),
@@ -722,9 +791,12 @@ def _broad_examples_figure(
     return figure
 
 
+@beartype
 def broad_aggregate_figure(rows: Sequence[Mapping[str, Any]]) -> Any:
     """Plot gate activity and paired broad H2H performance."""
 
+    if not rows:
+        raise ValueError("broad comparison requires at least one row")
     plt, _LineCollection, _TwoSlopeNorm, _matplotlib = _plot_imports()
     alpha = np.asarray([_as_float(row, "alpha") for row in rows])
     core_mse = np.asarray([_as_float(row, "baseline_map_mse") for row in rows])
@@ -740,13 +812,14 @@ def broad_aggregate_figure(rows: Sequence[Mapping[str, Any]]) -> Any:
     axes[0, 0].hist(np.log10(shrinkage), bins=35, color="#278a67", alpha=0.85)
     axes[0, 0].set_xlabel("log10(1 - gate alpha)")
     axes[0, 0].set_ylabel("Cases")
-    axes[0, 0].set_title("Gate activity on 512 structured cases")
+    axes[0, 0].set_title(f"Gate activity on {len(rows)} structured cases")
 
     scatter = axes[0, 1].scatter(core_mse, gated_mse, c=alpha, cmap="viridis", s=14, alpha=0.7)
     positive = np.concatenate([core_mse[core_mse > 0], gated_mse[gated_mse > 0]])
-    lower, upper = float(positive.min()), float(positive.max())
+    lower, upper = (float(positive.min()), float(positive.max())) if positive.size else (0.0, 1.0)
     axes[0, 1].plot([lower, upper], [lower, upper], color="#222222", linewidth=1)
-    axes[0, 1].set(xscale="log", yscale="log", xlabel="Core DREEMS MSE", ylabel="Gated DREEMS MSE")
+    scale = "log" if positive.size else "linear"
+    axes[0, 1].set(xscale=scale, yscale=scale, xlabel="Core DREEMS MSE", ylabel="Gated DREEMS MSE")
     axes[0, 1].set_aspect("equal", adjustable="box")
     figure.colorbar(scatter, ax=axes[0, 1], label="Gate alpha")
 
@@ -763,7 +836,9 @@ def broad_aggregate_figure(rows: Sequence[Mapping[str, Any]]) -> Any:
         marker="x",
         label="Gated",
     )
-    low = float(np.nanmin([feems_corr.min(), core_corr.min(), gated_corr.min()]))
+    correlations = np.concatenate((feems_corr, core_corr, gated_corr))
+    finite_corr = correlations[np.isfinite(correlations)]
+    low = float(finite_corr.min()) if finite_corr.size else -1.0
     axes[1, 0].plot([low, 1.0], [low, 1.0], color="#222222", linewidth=1)
     axes[1, 0].set(xlabel="FEEMS LOO correlation", ylabel="DREEMS correlation")
     axes[1, 0].set_aspect("equal", adjustable="box")
@@ -778,14 +853,16 @@ def broad_aggregate_figure(rows: Sequence[Mapping[str, Any]]) -> Any:
     positive = np.concatenate(
         [feems_mse[feems_mse > 0], core_mse[core_mse > 0], gated_mse[gated_mse > 0]]
     )
-    lower, upper = float(positive.min()), float(positive.max())
+    lower, upper = (float(positive.min()), float(positive.max())) if positive.size else (0.0, 1.0)
     axes[1, 1].plot([lower, upper], [lower, upper], color="#222222", linewidth=1)
-    axes[1, 1].set(xscale="log", yscale="log", xlabel="FEEMS LOO MSE", ylabel="DREEMS MSE")
+    scale = "log" if positive.size else "linear"
+    axes[1, 1].set(xscale=scale, yscale=scale, xlabel="FEEMS LOO MSE", ylabel="DREEMS MSE")
     axes[1, 1].set_aspect("equal", adjustable="box")
     axes[1, 1].legend(frameon=False)
     return figure
 
 
+@beartype
 def render_broad_gallery(
     *,
     rows_path: Path,
@@ -869,12 +946,17 @@ def render_broad_gallery(
         "gated DREEMS use the same fixed MAP refinement; FEEMS uses the cached documented "
         "leave-one-observed-deme-out fit. Raw edge panels share one color scale per row."
     )
-    (output_dir / "index.html").write_text(
-        _gallery_html("Surface-gate comparison on the 512-case H2H", intro, body)
-    )
+    with _atomic_output(output_dir / "index.html") as stream:
+        stream.write(
+            _gallery_html("Surface-gate comparison on the 512-case H2H", intro, body).encode(
+                "utf-8"
+            )
+        )
 
 
+@beartype
 def build_parser() -> argparse.ArgumentParser:
+    """Expose bundle assembly and the two cached-result galleries as separate tasks."""
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -903,7 +985,9 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+@beartype
 def main(argv: Sequence[str] | None = None) -> None:
+    """Dispatch comparison tasks without running simulation or inference."""
     args = build_parser().parse_args(argv)
     if args.command == "scenario-bundle":
         build_scenario_bundle(

@@ -1,0 +1,23 @@
+{
+  "broad_cases_exact": 512,
+  "comparisons": {
+    "arrays": 3734,
+    "scalars": 44314
+  },
+  "metric_comparisons_exact": 3072,
+  "notebook_cases_exact": 12,
+  "notebook_demographies_exact": 3,
+  "notes": [
+    "No simulations, model training, or FEEMS fits were regenerated.",
+    "Twelve sampling views were rederived from three retained msprime genotype matrices.",
+    "The reference worker uses the archived pre-QC genotype reader. The interim signed-only reader rejected its unsigned calls; the current worker converts them explicitly.",
+    "Scenario report prose now describes reused sampling views; numerical summaries are unchanged."
+  ],
+  "pixel_identical_figures": 6,
+  "public_parameter_names_defaults_and_saved_fields_preserved": true,
+  "scenario_bundle_arrays_exact": 31,
+  "scenario_csv_byte_identical": true,
+  "scenario_report_numerics_exact": true,
+  "seconds": 105.88107707491145,
+  "unchanged_packaged_checkpoint_sha256": "454cb50f4c7ef1213e001d700d1bf9e9f6a353b5c8be5619aae06e9d7a22cc15"
+}

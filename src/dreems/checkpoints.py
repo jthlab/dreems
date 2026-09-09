@@ -1,22 +1,26 @@
+"""Load Equinox weights and keep metadata edits separate from parameter bytes."""
+
 from __future__ import annotations
 
 import io
 import json
-import os
-import tempfile
 import zipfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from importlib import resources
+from numbers import Integral
 from pathlib import Path
 from typing import Any
 
 import equinox as eqx
 import jax
 import numpy as np
+from beartype import beartype
 
 from dreems import calibration, features
 from dreems import model as dreems_model
+from dreems.validation import _integer_array, _real_array
+from dreems.workflow_io import _atomic_output
 
 CHECKPOINT_METADATA = "metadata.json"
 CHECKPOINT_PARAMS = "params.eqx"
@@ -33,14 +37,18 @@ class DREEMSCheckpoint:
     payload: dict[str, Any]
 
     @property
+    @beartype
     def model(self) -> dict[str, Any]:
+        """Return the saved architecture, feature layout, and output settings."""
         model = self.payload.get("model")
         if not isinstance(model, dict):
             raise ValueError(f"checkpoint {self.path} has no model metadata")
         return model
 
     @property
+    @beartype
     def edge_sd_calibration(self) -> calibration.SDCalibration:
+        """Older checkpoints without calibration retain their raw posterior SDs."""
         payload = self.payload.get("edge_sd_calibration")
         if payload is None:
             return calibration.SDCalibration()
@@ -51,6 +59,8 @@ class DREEMSCheckpoint:
 
 @dataclass(frozen=True)
 class DREEMSPrediction:
+    """Unpadded outputs, in input order; calibration changes SDs, not means."""
+
     edge_mean: list[np.ndarray]
     edge_sd: list[np.ndarray]
     raw_edge_sd: list[np.ndarray]
@@ -60,14 +70,19 @@ class DREEMSPrediction:
     checkpoint: DREEMSCheckpoint
 
 
-def canonical_feature_metadata(model_features: dict[str, Any]) -> dict[str, object]:
+@beartype
+def canonical_feature_metadata(model_features: Mapping[str, Any]) -> dict[str, object]:
+    """Keep only fields that determine the feature layout of a saved model."""
+
     return {
         "kind": str(model_features["kind"]),
         "covariance_components": int(model_features["covariance_components"]),
     }
 
 
+@beartype
 def feature_spatial_encoding(model_features: dict[str, object]) -> features.SpatialEncoding:
+    """Select the feature representation recorded when these weights were trained."""
     kind = str(model_features["kind"])
     if kind == "diffusion_bands_v1":
         return "embedded"
@@ -78,6 +93,7 @@ def feature_spatial_encoding(model_features: dict[str, object]) -> features.Spat
     raise ValueError(f"unsupported checkpoint feature kind: {kind!r}")
 
 
+@beartype
 def load_checkpoint(path: Path | str | None = None) -> DREEMSCheckpoint:
     """Load a production DREEMS checkpoint."""
 
@@ -87,17 +103,15 @@ def load_checkpoint(path: Path | str | None = None) -> DREEMSCheckpoint:
             return load_checkpoint(checkpoint_path)
 
     checkpoint_path = Path(path)
-    with zipfile.ZipFile(checkpoint_path, "r") as archive:
-        payload = json.loads(archive.read(CHECKPOINT_METADATA).decode("utf-8"))
-        params_data = io.BytesIO(archive.read(CHECKPOINT_PARAMS))
-    if not isinstance(payload, dict):
-        raise ValueError(f"checkpoint {checkpoint_path} does not contain a payload dict")
+    members, payload = _read_checkpoint_archive(checkpoint_path)
     stats = payload.get("normalization")
     model = payload.get("model")
     if not isinstance(model, dict) or not isinstance(stats, dict):
         raise ValueError(f"checkpoint {checkpoint_path} is missing params or normalization")
     dreems_model.validate_production_model_metadata(model)
-    params = eqx.tree_deserialise_leaves(params_data, model_from_metadata(model))
+    params = eqx.tree_deserialise_leaves(
+        io.BytesIO(members[CHECKPOINT_PARAMS]), model_from_metadata(model)
+    )
     return DREEMSCheckpoint(
         path=checkpoint_path,
         params=params,
@@ -106,6 +120,7 @@ def load_checkpoint(path: Path | str | None = None) -> DREEMSCheckpoint:
     )
 
 
+@beartype
 def model_from_metadata(model: dict[str, Any]) -> dreems_model.DREEMS:
     """Construct the model structure used by Equinox deserialization."""
 
@@ -115,6 +130,19 @@ def model_from_metadata(model: dict[str, Any]) -> dreems_model.DREEMS:
     context_layers = architecture.get("context_layers")
     if context_layers is None:
         raise ValueError("checkpoint model metadata is missing context_layers")
+    for name, value in (
+        ("node_dim", model.get("node_dim")),
+        ("edge_dim", model.get("edge_dim")),
+        ("hidden_channels", architecture.get("hidden_channels")),
+        ("layers", architecture.get("layers")),
+        ("context_layers", context_layers),
+    ):
+        minimum = 0 if name in {"layers", "context_layers"} else 1
+        if isinstance(value, bool) or not isinstance(value, Integral) or value < minimum:
+            raise ValueError(f"checkpoint {name} must be an integer >= {minimum}")
+    for name in ("initializer_gate", "surface_gate"):
+        if name in architecture and not isinstance(architecture[name], bool):
+            raise ValueError(f"checkpoint {name} must be a boolean")
     return dreems_model.DREEMS(
         jax.random.PRNGKey(0),
         node_dim=int(model["node_dim"]),
@@ -135,6 +163,7 @@ def model_from_metadata(model: dict[str, Any]) -> dreems_model.DREEMS:
     )
 
 
+@beartype
 def predict_examples(
     checkpoint: DREEMSCheckpoint | Path | str,
     examples: list[dict[str, object]],
@@ -210,27 +239,37 @@ def predict_examples(
     )
 
 
+@beartype
 def _sampled_node_fraction(example: Mapping[str, object]) -> float:
+    """Count occupied nodes, not individuals, for density-dependent calibration."""
     if "active_positions" in example:
-        positions = np.asarray(example["active_positions"], dtype=np.float64)
+        positions = _real_array(example["active_positions"], name="graph node positions")
     elif "positions" in example:
-        positions = np.asarray(example["positions"], dtype=np.float64)
+        positions = _real_array(example["positions"], name="graph node positions")
     else:
         raise ValueError("example is missing graph node positions")
-    if positions.ndim != 2 or positions.shape[0] == 0:
+    if positions.ndim != 2 or positions.shape[1] != 2 or positions.shape[0] == 0:
         raise ValueError("graph node positions must contain at least one node")
 
     if "node_sample_count" in example:
-        counts = np.asarray(example["node_sample_count"], dtype=np.float64)
+        counts = _integer_array(
+            np.asarray(example["node_sample_count"]), name="node_sample_count", dtype=np.int64
+        )
         if counts.shape != (positions.shape[0],):
             raise ValueError("node_sample_count does not match graph nodes")
+        if np.any(counts < 0):
+            raise ValueError("node_sample_count must be nonnegative")
         sampled_nodes = int(np.count_nonzero(counts > 0.0))
     elif "sample_nodes" in example:
-        nodes = np.asarray(example["sample_nodes"], dtype=np.int64)
+        nodes = _integer_array(
+            np.asarray(example["sample_nodes"]), name="sample_nodes", dtype=np.int64
+        )
+        if nodes.ndim != 1 or np.any(nodes < 0) or np.any(nodes >= positions.shape[0]):
+            raise ValueError("sample_nodes must be a vector of graph node indices")
         sampled_nodes = int(np.unique(nodes).size)
     elif "sample_coordinates" in example:
         nodes = features.nearest_node_assignments(
-            np.asarray(example["sample_coordinates"], dtype=np.float64),
+            _real_array(example["sample_coordinates"], name="sample_coordinates"),
             positions,
         )
         sampled_nodes = int(np.unique(nodes).size)
@@ -239,8 +278,13 @@ def _sampled_node_fraction(example: Mapping[str, object]) -> float:
     return float(sampled_nodes / positions.shape[0])
 
 
+@beartype
 def _read_checkpoint_archive(path: Path) -> tuple[dict[str, bytes], dict[str, Any]]:
+    """Read the archive and validate the two members required by every checkpoint."""
+
     with zipfile.ZipFile(path, "r") as archive:
+        if len(set(archive.namelist())) != len(archive.namelist()):
+            raise ValueError(f"checkpoint {path} contains duplicate archive members")
         members = {item.filename: archive.read(item.filename) for item in archive.infolist()}
     if CHECKPOINT_METADATA not in members or CHECKPOINT_PARAMS not in members:
         raise ValueError(f"checkpoint {path} is missing metadata or parameters")
@@ -250,30 +294,30 @@ def _read_checkpoint_archive(path: Path) -> tuple[dict[str, bytes], dict[str, An
     return members, payload
 
 
+@beartype
 def _write_checkpoint_archive(
     path: Path,
     members: Mapping[str, bytes],
     payload: Mapping[str, Any],
 ) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    """Replace an archive atomically, retaining any supplied extra members.
+
+    Write beside the destination so the final rename stays on one filesystem.
+    A failed write leaves the previous checkpoint intact and removes the partial
+    archive. Calibration and training use the same writer.
+    """
+
     updated = dict(members)
     updated[CHECKPOINT_METADATA] = json.dumps(payload, sort_keys=True).encode("utf-8")
-    with tempfile.NamedTemporaryFile(
-        dir=path.parent,
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        delete=False,
-    ) as temporary:
-        temporary_path = Path(temporary.name)
-    try:
-        with zipfile.ZipFile(temporary_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-            for name, contents in updated.items():
-                archive.writestr(name, contents)
-        os.replace(temporary_path, path)
-    finally:
-        temporary_path.unlink(missing_ok=True)
+    with (
+        _atomic_output(path) as handle,
+        zipfile.ZipFile(handle, "w", compression=zipfile.ZIP_DEFLATED) as archive,
+    ):
+        for name, contents in updated.items():
+            archive.writestr(name, contents)
 
 
+@beartype
 def migrate_node_covariance_checkpoint(
     source: Path | str,
     destination: Path | str,
@@ -316,6 +360,7 @@ def migrate_node_covariance_checkpoint(
     _write_checkpoint_archive(destination_path, members, payload)
 
 
+@beartype
 def attach_edge_sd_calibration(
     source: Path | str,
     destination: Path | str,

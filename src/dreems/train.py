@@ -4,24 +4,32 @@ from __future__ import annotations
 
 import io
 import json
-import zipfile
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeAlias
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
+from beartype import beartype
 
 from dreems import checkpoints, features, losses
 from dreems import model as dreems_model
+from dreems.checkpoints import canonical_feature_metadata as canonical_feature_metadata
+
+CheckpointCallback: TypeAlias = Callable[
+    [int, dreems_model.DREEMS, list[float], dict[str, object]], None
+]
 
 
+@beartype
 @dataclass(frozen=True)
 class DREEMSArchitectureConfig:
+    """Network dimensions and optional gates; saved with every checkpoint."""
+
     hidden_channels: int = 64
     layers: int = 10
     context_layers: int = 3
@@ -43,8 +51,11 @@ class DREEMSArchitectureConfig:
             raise ValueError("surface_gate_initial_logit must be finite")
 
 
+@beartype
 @dataclass(frozen=True)
 class DREEMSFeatureConfig:
+    """Feature representation and the standard-deviation floor for normalization."""
+
     covariance_components: int = 20
     normalization_std_floor: float = 0.2
     spatial_encoding: str = "embedded"
@@ -52,14 +63,17 @@ class DREEMSFeatureConfig:
     def validate(self) -> None:
         if self.covariance_components < 0:
             raise ValueError("covariance_components must be nonnegative")
-        if self.normalization_std_floor <= 0.0:
-            raise ValueError("normalization_std_floor must be positive")
+        if not np.isfinite(self.normalization_std_floor) or self.normalization_std_floor <= 0.0:
+            raise ValueError("normalization_std_floor must be finite and positive")
         if self.spatial_encoding not in features.SPATIAL_ENCODINGS:
             raise ValueError(f"unsupported spatial_encoding: {self.spatial_encoding!r}")
 
 
+@beartype
 @dataclass(frozen=True)
 class LinearizedResistanceConfig:
+    """Numerical settings for the all-pair conductance initializer."""
+
     smoothness: float = 0.01
     ridge_scale: float = 0.001
     pair_weight_power: float = 0.0
@@ -68,16 +82,23 @@ class LinearizedResistanceConfig:
     batch_size: int = 256
 
     def validate(self) -> None:
-        if self.smoothness < 0.0:
-            raise ValueError("edge conditioner smoothness must be nonnegative")
-        if self.ridge_scale < 0.0:
-            raise ValueError("edge conditioner ridge_scale must be nonnegative")
+        for name in ("smoothness", "ridge_scale"):
+            value = getattr(self, name)
+            if not np.isfinite(value) or value < 0.0:
+                raise ValueError(f"edge conditioner {name} must be finite and nonnegative")
+        if not np.isfinite(self.pair_weight_power):
+            raise ValueError("edge conditioner pair_weight_power must be finite")
+        if self.output_sd is not None and (not np.isfinite(self.output_sd) or self.output_sd < 0.0):
+            raise ValueError("edge conditioner output_sd must be finite and nonnegative")
         if self.batch_size <= 0:
             raise ValueError("edge conditioner batch_size must be positive")
 
 
+@beartype
 @dataclass(frozen=True)
 class DREEMSLossConfig:
+    """Weights and thresholds for the supervised losses in :mod:`dreems.losses`."""
+
     min_logvar: float = -7.0
     max_logvar: float = 5.0
     context_weight: float = 0.5
@@ -98,6 +119,9 @@ class DREEMSLossConfig:
     surface_gate_target_floor: float = 0.05
 
     def validate(self) -> None:
+        for name, value in asdict(self).items():
+            if not np.isfinite(value):
+                raise ValueError(f"{name} must be finite")
         if self.min_logvar > self.max_logvar:
             raise ValueError("min_logvar cannot exceed max_logvar")
         for name in (
@@ -118,8 +142,17 @@ class DREEMSLossConfig:
             raise ValueError("surface_gate_target_floor must be nonnegative")
 
 
+@beartype
 @dataclass(frozen=True)
 class DREEMSOptimizerConfig:
+    """Step budget, Adam settings, and validation-based checkpoint selection.
+
+    Patience counts validation checks, not steps. All supported stopping metrics
+    are minimized. ``restore_best_validation`` controls which weights are
+    returned; the history still records every logged step. Nonfinite losses,
+    updates, or validation metrics abort the run instead of using patience.
+    """
+
     seed: int = 12001
     steps: int = 90_000
     batch_size: int = 16
@@ -138,16 +171,16 @@ class DREEMSOptimizerConfig:
             raise ValueError("batch_size must be positive")
         if self.steps <= 0:
             raise ValueError("steps must be positive")
-        if self.learning_rate <= 0.0:
-            raise ValueError("learning_rate must be positive")
-        if self.gradient_clip_norm <= 0.0:
-            raise ValueError("gradient_clip_norm must be positive")
+        if not np.isfinite(self.learning_rate) or self.learning_rate <= 0.0:
+            raise ValueError("learning_rate must be finite and positive")
+        if not np.isfinite(self.gradient_clip_norm) or self.gradient_clip_norm <= 0.0:
+            raise ValueError("gradient_clip_norm must be finite and positive")
         if self.log_every is not None and self.log_every <= 0:
             raise ValueError("log_every must be positive when set")
         if self.early_stopping_patience is not None and self.early_stopping_patience <= 0:
             raise ValueError("early_stopping_patience must be positive when set")
-        if self.early_stopping_min_delta < 0.0:
-            raise ValueError("early_stopping_min_delta must be nonnegative")
+        if not np.isfinite(self.early_stopping_min_delta) or self.early_stopping_min_delta < 0.0:
+            raise ValueError("early_stopping_min_delta must be finite and nonnegative")
         if self.early_stopping_warmup_steps < 0:
             raise ValueError("early_stopping_warmup_steps must be nonnegative")
         if not self.early_stopping_metric:
@@ -156,8 +189,11 @@ class DREEMSOptimizerConfig:
             raise ValueError("trainable_scope must be 'all', 'initializer_gate', or 'surface_gate'")
 
 
+@beartype
 @dataclass(frozen=True)
 class DREEMSTrainConfig:
+    """The five independently validated parts of a reproducible training run."""
+
     architecture: DREEMSArchitectureConfig = field(default_factory=DREEMSArchitectureConfig)
     features: DREEMSFeatureConfig = field(default_factory=DREEMSFeatureConfig)
     edge_conditioner: LinearizedResistanceConfig = field(default_factory=LinearizedResistanceConfig)
@@ -211,7 +247,9 @@ class TrainingRunResult:
         }
 
 
+@beartype
 def architecture_metadata(config: DREEMSArchitectureConfig) -> dict[str, object]:
+    """Describe the network fields needed to reconstruct Equinox weights."""
     if config.surface_gate:
         kind = "diffusion_band_surface_gate_v3"
     elif config.initializer_gate:
@@ -231,7 +269,9 @@ def architecture_metadata(config: DREEMSArchitectureConfig) -> dict[str, object]
     return metadata
 
 
+@beartype
 def feature_metadata(config: DREEMSFeatureConfig) -> dict[str, object]:
+    """Record the encoding name and number of covariance-score channels."""
     feature_kind = {
         "embedded": "diffusion_bands_v1",
         "topology": "topology_diffusion_bands_v1",
@@ -243,14 +283,9 @@ def feature_metadata(config: DREEMSFeatureConfig) -> dict[str, object]:
     }
 
 
-def canonical_feature_metadata(model_features: Mapping[str, Any]) -> dict[str, object]:
-    return {
-        "kind": str(model_features["kind"]),
-        "covariance_components": int(model_features["covariance_components"]),
-    }
-
-
+@beartype
 def edge_conditioner_metadata(config: LinearizedResistanceConfig) -> dict[str, object]:
+    """Keep initializer settings separate from the learned architecture."""
     return {
         "kind": "linearized_resistance",
         "method": "all_pair_diagonal_adjoint",
@@ -264,7 +299,9 @@ def edge_conditioner_metadata(config: LinearizedResistanceConfig) -> dict[str, o
     }
 
 
+@beartype
 def posterior_metadata(config: DREEMSLossConfig) -> dict[str, object]:
+    """Store variance bounds used by both training and inference."""
     return {
         "kind": "factorized_normal",
         "min_logvar": config.min_logvar,
@@ -272,6 +309,7 @@ def posterior_metadata(config: DREEMSLossConfig) -> dict[str, object]:
     }
 
 
+@beartype
 def training_config_metadata(config: DREEMSTrainConfig) -> dict[str, Any]:
     """Serialize configs without changing the released v1 metadata contract."""
 
@@ -307,7 +345,9 @@ def training_config_metadata(config: DREEMSTrainConfig) -> dict[str, Any]:
     return payload
 
 
+@beartype
 def model_metadata(config: DREEMSTrainConfig, arrays: dict[str, np.ndarray]) -> dict[str, Any]:
+    """Create inference metadata; optimizer and loss settings are stored separately."""
     config.validate()
     return {
         "schema_version": 2,
@@ -321,7 +361,9 @@ def model_metadata(config: DREEMSTrainConfig, arrays: dict[str, np.ndarray]) -> 
     }
 
 
+@beartype
 def canonical_architecture_metadata(model: Mapping[str, Any]) -> dict[str, object]:
+    """Make implicit gate defaults explicit when comparing checkpoint architectures."""
     return {
         "kind": str(model["kind"]),
         "hidden_channels": int(model["hidden_channels"]),
@@ -342,6 +384,7 @@ def canonical_architecture_metadata(model: Mapping[str, Any]) -> dict[str, objec
     }
 
 
+@beartype
 def core_architecture_metadata(model: Mapping[str, Any]) -> dict[str, object]:
     """Return architecture fields that must match when adding a new gate."""
 
@@ -349,6 +392,7 @@ def core_architecture_metadata(model: Mapping[str, Any]) -> dict[str, object]:
     return {key: canonical[key] for key in ("hidden_channels", "layers", "context_layers")}
 
 
+@beartype
 def append_training_edge_conditioner_features(
     prepared: list[dict[str, np.ndarray]],
     examples: list[dict[str, object]],
@@ -376,6 +420,7 @@ def append_training_edge_conditioner_features(
     )
 
 
+@beartype
 def save_checkpoint(
     path: Path | str,
     *,
@@ -387,8 +432,8 @@ def save_checkpoint(
     training_run: Mapping[str, Any] | None = None,
     edge_sd_calibration: Mapping[str, Any] | None = None,
 ) -> None:
-    checkpoint_path = Path(path)
-    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    """Save Equinox weights and their inference metadata in one atomic archive."""
+
     payload = {
         "format": "dreems-equinox-v1",
         "normalization": normalization,
@@ -402,14 +447,12 @@ def save_checkpoint(
         payload["edge_sd_calibration"] = dict(edge_sd_calibration)
     params_data = io.BytesIO()
     eqx.tree_serialise_leaves(params_data, params)
-    with zipfile.ZipFile(checkpoint_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr(
-            checkpoints.CHECKPOINT_METADATA,
-            json.dumps(payload, sort_keys=True).encode("utf-8"),
-        )
-        archive.writestr(checkpoints.CHECKPOINT_PARAMS, params_data.getvalue())
+    checkpoints._write_checkpoint_archive(
+        Path(path), {checkpoints.CHECKPOINT_PARAMS: params_data.getvalue()}, payload
+    )
 
 
+@beartype
 def batch_stream(
     arrays: dict[str, np.ndarray],
     *,
@@ -417,6 +460,8 @@ def batch_stream(
     steps: int,
     seed: int,
 ) -> Iterable[dict[str, np.ndarray]]:
+    """Sample batches with replacement; a training step is not a corpus pass."""
+
     rng = np.random.default_rng(seed)
     size = arrays["node_x"].shape[0]
     for _step in range(steps):
@@ -424,11 +469,20 @@ def batch_stream(
         yield {name: value[indices] for name, value in arrays.items()}
 
 
+@beartype
 def loss_terms(
     params: dreems_model.DREEMS,
     batch: dict[str, jax.Array],
     config: DREEMSTrainConfig,
 ) -> dict[str, jax.Array]:
+    """Compute supervised losses and gate diagnostics for a padded batch.
+
+    ``correlation`` is a loss (approximately ``1 - r`` on active graphs), not
+    Pearson r. The ``loss`` entry combines the configured terms; gate means are
+    diagnostics only. Targets are normalized log migration and log q, not node
+    resistance or observed covariance.
+    """
+
     pred, edge_logvar, context_pred, q_pred, q_logvar, neural_weight, surface_weight = (
         dreems_model.apply_batch_with_diagnostics(params, batch)
     )
@@ -532,10 +586,13 @@ def loss_terms(
     }
 
 
+@beartype
 def scalar_terms(terms: dict[str, jax.Array]) -> dict[str, float]:
+    """Transfer scalar metrics to the host for logging."""
     return {key: float(jax.device_get(value)) for key, value in terms.items()}
 
 
+@beartype
 def validation_metrics(
     params: dreems_model.DREEMS,
     arrays: dict[str, np.ndarray],
@@ -545,6 +602,7 @@ def validation_metrics(
     terms_fn: Callable[[dreems_model.DREEMS, dict[str, jax.Array]], dict[str, jax.Array]]
     | None = None,
 ) -> dict[str, float]:
+    """Average per-graph losses across all validation examples, including a short last batch."""
     num_examples = int(arrays["node_x"].shape[0])
     if num_examples <= 0:
         raise ValueError("validation arrays must contain at least one example")
@@ -574,6 +632,7 @@ def validation_metrics(
     return {f"validation_{key}": value / total_weight for key, value in totals.items()}
 
 
+@beartype
 def train_from_batches(
     *,
     config: DREEMSTrainConfig,
@@ -582,8 +641,16 @@ def train_from_batches(
     batches: Iterable[dict[str, np.ndarray]],
     init_params: dreems_model.DREEMS | None = None,
     validation_arrays: dict[str, np.ndarray] | None = None,
-    checkpoint_callback=None,
+    checkpoint_callback: CheckpointCallback | None = None,
 ) -> TrainingRunResult:
+    """Train on a supplied batch stream, optionally selecting weights on validation.
+
+    The callback runs at logging steps with the current weights, logged losses,
+    and metrics. It can persist a best checkpoint without retaining every model.
+    The validation arrays stay fixed throughout the run. Numerical failures raise
+    before invoking the callback, leaving earlier saved checkpoints intact.
+    """
+
     config.validate()
     architecture = config.architecture
     optimizer_config = config.optimizer
@@ -633,60 +700,54 @@ def train_from_batches(
         optax.clip_by_global_norm(optimizer_config.gradient_clip_norm),
         optax.adam(optimizer_config.learning_rate),
     )
-    if optimizer_config.trainable_scope in {"initializer_gate", "surface_gate"}:
+
+    def trainable_parameters(
+        candidate: dreems_model.DREEMS,
+    ) -> dreems_model.DREEMS | tuple[eqx.nn.Linear, eqx.nn.Linear]:
+        """Select the whole model or the two layers of the gate being trained."""
+
         if optimizer_config.trainable_scope == "initializer_gate":
-            if params.initializer_gate_hidden is None or params.initializer_gate_out is None:
+            if candidate.initializer_gate_hidden is None or candidate.initializer_gate_out is None:
                 raise ValueError("initializer_gate scope requires an enabled initializer gate")
-
-            def gate_selector(model: dreems_model.DREEMS):
-                return model.initializer_gate_hidden, model.initializer_gate_out
-
-        else:
-            if params.surface_gate_hidden is None or params.surface_gate_out is None:
+            return candidate.initializer_gate_hidden, candidate.initializer_gate_out
+        if optimizer_config.trainable_scope == "surface_gate":
+            if candidate.surface_gate_hidden is None or candidate.surface_gate_out is None:
                 raise ValueError("surface_gate scope requires an enabled surface gate")
+            return candidate.surface_gate_hidden, candidate.surface_gate_out
+        return candidate
 
-            def gate_selector(model: dreems_model.DREEMS):
-                return model.surface_gate_hidden, model.surface_gate_out
+    opt_state = optimizer.init(trainable_parameters(params))
 
-        gate_params = gate_selector(params)
-        opt_state = optimizer.init(gate_params)
+    @eqx.filter_jit
+    def train_step(
+        current_params: dreems_model.DREEMS,
+        current_state: optax.OptState,
+        batch: dict[str, jax.Array],
+    ) -> tuple[dreems_model.DREEMS, optax.OptState, jax.Array, jax.Array]:
+        current_trainable = trainable_parameters(current_params)
 
-        @jax.jit
-        def train_step(
-            current_params: dreems_model.DREEMS,
-            current_state: optax.OptState,
-            batch: dict[str, jax.Array],
-        ) -> tuple[dreems_model.DREEMS, optax.OptState, jax.Array]:
-            current_gate = gate_selector(current_params)
+        @eqx.filter_value_and_grad
+        def objective(
+            candidate: dreems_model.DREEMS | tuple[eqx.nn.Linear, eqx.nn.Linear],
+        ) -> jax.Array:
+            candidate_model = eqx.tree_at(trainable_parameters, current_params, candidate)
+            return loss_terms(candidate_model, batch, config)["loss"]
 
-            def objective(candidate_gate: tuple[eqx.nn.Linear, eqx.nn.Linear]) -> jax.Array:
-                candidate = eqx.tree_at(gate_selector, current_params, candidate_gate)
-                return loss_terms(candidate, batch, config)["loss"]
+        loss, grads = objective(current_trainable)
+        updates, next_state = optimizer.update(grads, current_state, current_trainable)
+        next_trainable = eqx.apply_updates(current_trainable, updates)
+        next_params = eqx.tree_at(trainable_parameters, current_params, next_trainable)
+        finite = jax.tree.reduce(
+            jnp.logical_and,
+            jax.tree.map(
+                lambda value: jnp.all(jnp.isfinite(value)),
+                eqx.filter((grads, next_state, next_trainable), eqx.is_array),
+            ),
+            initializer=jnp.asarray(True),
+        )
+        return next_params, next_state, loss, finite
 
-            loss, grads = jax.value_and_grad(objective)(current_gate)
-            updates, next_state = optimizer.update(grads, current_state, current_gate)
-            next_gate = optax.apply_updates(current_gate, updates)
-            next_params = eqx.tree_at(gate_selector, current_params, next_gate)
-            return next_params, next_state, loss
-
-    else:
-        opt_state = optimizer.init(params)
-
-        @jax.jit
-        def train_step(
-            current_params: dreems_model.DREEMS,
-            current_state: optax.OptState,
-            batch: dict[str, jax.Array],
-        ) -> tuple[dreems_model.DREEMS, optax.OptState, jax.Array]:
-            def objective(candidate_params: dreems_model.DREEMS) -> jax.Array:
-                return loss_terms(candidate_params, batch, config)["loss"]
-
-            loss, grads = jax.value_and_grad(objective)(current_params)
-            updates, next_state = optimizer.update(grads, current_state, current_params)
-            next_params = optax.apply_updates(current_params, updates)
-            return next_params, next_state, loss
-
-    @jax.jit
+    @eqx.filter_jit
     def validation_step(
         current_params: dreems_model.DREEMS,
         batch: dict[str, jax.Array],
@@ -709,8 +770,15 @@ def train_from_batches(
             break
         final_step = step
         batch = {name: jax.device_put(jnp.asarray(value)) for name, value in batch_arrays.items()}
-        params, opt_state, loss = train_step(params, opt_state, batch)
-        loss_value = float(jax.device_get(loss))
+        params, opt_state, loss, finite_update = train_step(params, opt_state, batch)
+        loss_value, finite_update = jax.device_get((loss, finite_update))
+        loss_value = float(loss_value)
+        if not np.isfinite(loss_value):
+            raise FloatingPointError(f"nonfinite training loss at step {step}")
+        if not finite_update:
+            raise FloatingPointError(
+                f"nonfinite gradient, optimizer state, or weights at step {step}"
+            )
         if step == 1 or step == optimizer_config.steps or step % log_every == 0:
             losses_out.append(loss_value)
             row: dict[str, object] = {"stage": "train", "step": step, "loss": loss_value}
@@ -724,6 +792,15 @@ def train_from_batches(
                         terms_fn=validation_step,
                     )
                 )
+                invalid = [
+                    name
+                    for name, value in row.items()
+                    if name.startswith("validation_") and not np.isfinite(value)
+                ]
+                if invalid:
+                    raise FloatingPointError(
+                        f"nonfinite validation metrics at step {step}: {invalid}"
+                    )
                 metric = row.get(optimizer_config.early_stopping_metric)
                 if metric is None:
                     raise ValueError(
@@ -731,41 +808,42 @@ def train_from_batches(
                         "was not computed"
                     )
                 metric_value = float(metric)
-                if np.isfinite(metric_value):
-                    improved = (
-                        best_validation_loss is None
-                        or metric_value
-                        < best_validation_loss - optimizer_config.early_stopping_min_delta
+                improved = (
+                    best_validation_loss is None
+                    or metric_value
+                    < best_validation_loss - optimizer_config.early_stopping_min_delta
+                )
+                if improved:
+                    best_validation_loss = metric_value
+                    best_validation_metrics = dict(row)
+                    best_step = step
+                    checks_since_best = 0
+                    if optimizer_config.restore_best_validation:
+                        best_params = params
+                else:
+                    checks_since_best += 1
+                row["validation_best"] = improved
+                row["validation_checks_since_best"] = checks_since_best
+                if (
+                    optimizer_config.early_stopping_patience is not None
+                    and step >= optimizer_config.early_stopping_warmup_steps
+                    and checks_since_best >= optimizer_config.early_stopping_patience
+                ):
+                    stopped_early = True
+                    stop_reason = (
+                        f"{optimizer_config.early_stopping_metric} did not improve by "
+                        f"{optimizer_config.early_stopping_min_delta} for "
+                        f"{checks_since_best} validation checks"
                     )
-                    if improved:
-                        best_validation_loss = metric_value
-                        best_validation_metrics = dict(row)
-                        best_step = step
-                        checks_since_best = 0
-                        if optimizer_config.restore_best_validation:
-                            best_params = params
-                    else:
-                        checks_since_best += 1
-                    row["validation_best"] = improved
-                    row["validation_checks_since_best"] = checks_since_best
-                    if (
-                        optimizer_config.early_stopping_patience is not None
-                        and step >= optimizer_config.early_stopping_warmup_steps
-                        and checks_since_best >= optimizer_config.early_stopping_patience
-                    ):
-                        stopped_early = True
-                        stop_reason = (
-                            f"{optimizer_config.early_stopping_metric} did not improve by "
-                            f"{optimizer_config.early_stopping_min_delta} for "
-                            f"{checks_since_best} validation checks"
-                        )
-                        row["stopped_early"] = True
+                    row["stopped_early"] = True
             print(json.dumps(row), flush=True)
             history.append(row)
             if checkpoint_callback is not None:
                 checkpoint_callback(step, params, list(losses_out), dict(row))
             if stopped_early:
                 break
+    if final_step == 0:
+        raise ValueError("training batch stream is empty")
     restored = (
         validation_arrays is not None
         and optimizer_config.restore_best_validation
@@ -787,14 +865,17 @@ def train_from_batches(
     )
 
 
+@beartype
 def train_from_arrays(
     arrays: dict[str, np.ndarray],
     *,
     config: DREEMSTrainConfig,
     init_params: dreems_model.DREEMS | None = None,
     validation_arrays: dict[str, np.ndarray] | None = None,
-    checkpoint_callback=None,
+    checkpoint_callback: CheckpointCallback | None = None,
 ) -> TrainingRunResult:
+    """Train from in-memory arrays using reproducible sampling with replacement."""
+
     return train_from_batches(
         config=config,
         node_dim=arrays["node_x"].shape[-1],
@@ -811,37 +892,28 @@ def train_from_arrays(
     )
 
 
+@beartype
 def prepare_training_arrays(
     train_examples: list[dict[str, object]],
     validation_examples: list[dict[str, object]] | None,
     *,
     config: DREEMSTrainConfig,
 ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray] | None, dict[str, object]]:
-    train_prepared = features.prepare_examples(
-        train_examples,
-        covariance_components=config.features.covariance_components,
-        spatial_encoding=config.features.spatial_encoding,
-    )
-    train_prepared = append_training_edge_conditioner_features(
-        train_prepared,
-        train_examples,
-        config,
-    )
-    validation_prepared = None
-    if validation_examples is not None:
-        validation_prepared = features.prepare_examples(
-            validation_examples,
+    """Prepare both splits alike, fitting normalization only on the training split."""
+    config.validate()
+    prepared = []
+    for examples in (train_examples, validation_examples):
+        if examples is None:
+            prepared.append(None)
+            continue
+        items = features.prepare_examples(
+            examples,
             covariance_components=config.features.covariance_components,
             spatial_encoding=config.features.spatial_encoding,
         )
-        validation_prepared = append_training_edge_conditioner_features(
-            validation_prepared,
-            validation_examples,
-            config,
-        )
+        prepared.append(append_training_edge_conditioner_features(items, examples, config))
     train_norm, validation_norm, stats = features.normalize_prepared(
-        train_prepared,
-        validation_prepared,
+        *prepared,
         std_floor=config.features.normalization_std_floor,
     )
     train_arrays = features.pad_examples(train_norm)

@@ -3,27 +3,24 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import hashlib
 import json
-import zipfile
+import shutil
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+from beartype import beartype
 
 from dreems import calibration, checkpoints, corpus, metrics
-from dreems.workflow_io import json_ready, read_pickle, write_json
-
-INTERVAL_LEVELS = {
-    "50": 0.6744897501960817,
-    "80": 1.2815515655446004,
-    "95": 1.959963984540054,
-}
+from dreems.validation import _real_array
+from dreems.workflow_io import _atomic_output, json_ready, read_pickle, write_csv, write_json
 
 
+@beartype
 def load_raw_example(path: Path, *, example_index: int = 0) -> dict[str, Any]:
+    """Select one trusted corpus example, with an explicit index for packed files."""
     payload = read_pickle(path)
     if isinstance(payload, list):
         if not 0 <= example_index < len(payload):
@@ -38,14 +35,18 @@ def load_raw_example(path: Path, *, example_index: int = 0) -> dict[str, Any]:
     return payload
 
 
+@beartype
 def truth_edge_logs(example: Mapping[str, Any]) -> np.ndarray:
+    """Read the simulator's edge log-conductances, including the older truth key."""
     value = example.get("edge_log_rates", example.get("truth"))
     if value is None:
         raise ValueError("calibration example has no edge-log truth")
-    return np.asarray(value, dtype=np.float64)
+    return _real_array(value, name="edge-log truth")
 
 
+@beartype
 def command_case(args: argparse.Namespace) -> None:
+    """Save centered edge residuals and uncalibrated SDs for one simulation."""
     example = load_raw_example(args.input, example_index=int(args.example_index))
     prediction = checkpoints.predict_examples(args.checkpoint, [example])
     truth = metrics.centered(truth_edge_logs(example))
@@ -56,17 +57,17 @@ def command_case(args: argparse.Namespace) -> None:
     metadata = corpus.example_metadata(example, int(args.index))
     density = float(metadata["sampled_node_fraction"])
 
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(
-        args.output,
-        error=truth - estimate,
-        raw_sd=raw_sd,
-        sampled_node_fraction=np.asarray(density, dtype=np.float64),
-        num_nodes=np.asarray(metadata["num_nodes"], dtype=np.int64),
-        num_edges=np.asarray(metadata["num_edges"], dtype=np.int64),
-        index=np.asarray(args.index, dtype=np.int64),
-        role=np.asarray(args.role),
-    )
+    with _atomic_output(args.output) as stream:
+        np.savez_compressed(
+            stream,
+            error=truth - estimate,
+            raw_sd=raw_sd,
+            sampled_node_fraction=np.asarray(density, dtype=np.float64),
+            num_nodes=np.asarray(metadata["num_nodes"], dtype=np.int64),
+            num_edges=np.asarray(metadata["num_edges"], dtype=np.int64),
+            index=np.asarray(args.index, dtype=np.int64),
+            role=np.asarray(args.role),
+        )
     print(
         json.dumps(
             {
@@ -81,9 +82,15 @@ def command_case(args: argparse.Namespace) -> None:
     )
 
 
+@beartype
 def command_canonicalize(args: argparse.Namespace) -> None:
-    with zipfile.ZipFile(args.checkpoint) as archive:
-        params_sha256 = hashlib.sha256(archive.read(checkpoints.CHECKPOINT_PARAMS)).hexdigest()
+    """Normalize checkpoint metadata while retaining its Equinox parameter bytes."""
+    members, metadata = checkpoints._read_checkpoint_archive(args.checkpoint)
+    params_sha256 = hashlib.sha256(members[checkpoints.CHECKPOINT_PARAMS]).hexdigest()
+    if metadata["model"]["features"]["kind"] == "topology_diffusion_bands_v2":
+        with args.checkpoint.open("rb") as source, _atomic_output(args.output) as destination:
+            shutil.copyfileobj(source, destination)
+        return
     checkpoints.migrate_node_covariance_checkpoint(
         args.checkpoint,
         args.output,
@@ -95,75 +102,30 @@ def command_canonicalize(args: argparse.Namespace) -> None:
     )
 
 
+@beartype
 def load_cases(paths: Sequence[Path]) -> tuple[list[np.ndarray], list[np.ndarray], np.ndarray]:
+    """Load per-graph calibration observations in manifest order."""
+    if len(paths) != len({path.resolve() for path in paths}):
+        raise ValueError("duplicate calibration case paths")
     errors: list[np.ndarray] = []
     raw_sd: list[np.ndarray] = []
     density: list[float] = []
     for path in paths:
         with np.load(path, allow_pickle=False) as payload:
-            errors.append(np.asarray(payload["error"], dtype=np.float64))
-            raw_sd.append(np.asarray(payload["raw_sd"], dtype=np.float64))
-            density.append(float(np.asarray(payload["sampled_node_fraction"]).item()))
+            errors.append(_real_array(payload["error"], name="calibration error"))
+            raw_sd.append(_real_array(payload["raw_sd"], name="raw_sd"))
+            fraction = _real_array(payload["sampled_node_fraction"], name="sampled_node_fraction")
+            if fraction.ndim != 0:
+                raise ValueError("sampled_node_fraction must be a scalar")
+            density.append(fraction.item())
     return errors, raw_sd, np.asarray(density, dtype=np.float64)
 
 
-def calibration_metrics(
-    errors: Sequence[np.ndarray],
-    raw_sd: Sequence[np.ndarray],
-    density: np.ndarray,
-    fitted: calibration.SDCalibration,
-) -> dict[str, float | int]:
-    nll: list[float] = []
-    coverage = {level: [] for level in INTERVAL_LEVELS}
-    edge_count = 0
-    for error, sd, local_density in zip(errors, raw_sd, density, strict=True):
-        calibrated_sd = fitted.apply(sd, sampled_node_fraction=float(local_density))
-        finite = np.isfinite(error) & np.isfinite(calibrated_sd) & (calibrated_sd > 0.0)
-        if not np.any(finite):
-            continue
-        local_error = np.asarray(error[finite], dtype=np.float64)
-        local_sd = np.asarray(calibrated_sd[finite], dtype=np.float64)
-        standardized = local_error / local_sd
-        nll.append(float(np.mean(np.log(local_sd) + 0.5 * standardized * standardized)))
-        for level, z_value in INTERVAL_LEVELS.items():
-            coverage[level].append(float(np.mean(np.abs(standardized) <= z_value)))
-        edge_count += int(local_error.size)
-    if not nll:
-        raise ValueError("no finite calibration cases")
-    result: dict[str, float | int] = {
-        "graphs": len(nll),
-        "edges": edge_count,
-        "graph_balanced_nll": float(np.mean(nll)),
-    }
-    for level, values in coverage.items():
-        result[f"graph_balanced_coverage_{level}"] = float(np.mean(values))
-    return result
-
-
-def calibration_candidates(
-    errors: Sequence[np.ndarray],
-    raw_sd: Sequence[np.ndarray],
-    density: np.ndarray,
-) -> dict[str, calibration.SDCalibration]:
-    density_fit = calibration.SDCalibration.from_graphs(
-        errors,
-        raw_sd,
-        density,
-        density_shrinkage=25.0,
-    )
-    return {
-        "raw": calibration.SDCalibration(),
-        "global": calibration.SDCalibration(
-            method="global",
-            global_scale=density_fit.global_scale,
-        ),
-        "density": density_fit,
-    }
-
-
+@beartype
 def command_fit(args: argparse.Namespace) -> None:
+    """Fit candidate scales without seeing the selection or verification cases."""
     errors, raw_sd, density = load_cases(args.inputs)
-    candidates = calibration_candidates(errors, raw_sd, density)
+    candidates = calibration.candidates(errors, raw_sd, density)
     write_json(
         args.output,
         {
@@ -172,7 +134,7 @@ def command_fit(args: argparse.Namespace) -> None:
             "candidates": {
                 name: {
                     "calibration": fitted.to_dict(),
-                    "fit_metrics": calibration_metrics(errors, raw_sd, density, fitted),
+                    "fit_metrics": calibration.summarize(errors, raw_sd, density, fitted),
                 }
                 for name, fitted in candidates.items()
             },
@@ -180,10 +142,12 @@ def command_fit(args: argparse.Namespace) -> None:
     )
 
 
+@beartype
 def load_candidates(path: Path) -> dict[str, calibration.SDCalibration]:
+    """Read the fitted scale options, retaining their order for deterministic ties."""
     payload = json.loads(path.read_text())
     candidates = payload.get("candidates")
-    if not isinstance(candidates, dict):
+    if not isinstance(candidates, dict) or not candidates:
         raise ValueError(f"{path} has no calibration candidates")
     return {
         str(name): calibration.SDCalibration.from_dict(value["calibration"])
@@ -191,11 +155,13 @@ def load_candidates(path: Path) -> dict[str, calibration.SDCalibration]:
     }
 
 
+@beartype
 def command_select(args: argparse.Namespace) -> None:
+    """Choose the fitted option with the lowest graph-balanced selection NLL."""
     errors, raw_sd, density = load_cases(args.inputs)
     candidates = load_candidates(args.fit)
     candidate_metrics = {
-        name: calibration_metrics(errors, raw_sd, density, fitted)
+        name: calibration.summarize(errors, raw_sd, density, fitted)
         for name, fitted in candidates.items()
     }
     selected_name = min(
@@ -215,7 +181,9 @@ def command_select(args: argparse.Namespace) -> None:
     )
 
 
+@beartype
 def density_label(value: float) -> str:
+    """Use the report's existing labels and closed upper bin boundaries."""
     if value <= 0.10:
         return "sparse <=10%"
     if value <= 0.25:
@@ -223,12 +191,14 @@ def density_label(value: float) -> str:
     return "dense >25%"
 
 
+@beartype
 def verification_rows(
     errors: Sequence[np.ndarray],
     raw_sd: Sequence[np.ndarray],
     density: np.ndarray,
     selected: calibration.SDCalibration,
 ) -> list[dict[str, Any]]:
+    """Report held-out coverage overall and in each nonempty sampling bin."""
     methods = {"raw": calibration.SDCalibration(), "selected": selected}
     rows: list[dict[str, Any]] = []
     labels = np.asarray([density_label(value) for value in density], dtype=object)
@@ -237,7 +207,7 @@ def verification_rows(
             {
                 "method": method,
                 "sampling": "all",
-                **calibration_metrics(errors, raw_sd, density, fitted),
+                **calibration.summarize(errors, raw_sd, density, fitted),
             }
         )
         for label in ("sparse <=10%", "medium 10-25%", "dense >25%"):
@@ -248,7 +218,7 @@ def verification_rows(
                 {
                     "method": method,
                     "sampling": label,
-                    **calibration_metrics(
+                    **calibration.summarize(
                         [errors[index] for index in selected_indices],
                         [raw_sd[index] for index in selected_indices],
                         density[selected_indices],
@@ -259,7 +229,9 @@ def verification_rows(
     return rows
 
 
+@beartype
 def command_verify(args: argparse.Namespace) -> None:
+    """Evaluate the selected calibration without refitting on verification data."""
     errors, raw_sd, density = load_cases(args.inputs)
     selection = json.loads(args.selection.read_text())
     selected = calibration.SDCalibration.from_dict(selection["calibration"])
@@ -279,14 +251,12 @@ def command_verify(args: argparse.Namespace) -> None:
             "rows": rows,
         },
     )
-    args.output_csv.parent.mkdir(parents=True, exist_ok=True)
-    with args.output_csv.open("w", newline="") as stream:
-        writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
-        writer.writeheader()
-        writer.writerows(json_ready(rows))
+    write_csv(args.output_csv, json_ready(rows))
 
 
+@beartype
 def command_attach(args: argparse.Namespace) -> None:
+    """Attach scale metadata to a separate checkpoint, leaving all weights intact."""
     selection = json.loads(args.selection.read_text())
     fitted = calibration.SDCalibration.from_dict(selection["calibration"])
     checkpoints.attach_edge_sd_calibration(
@@ -302,7 +272,9 @@ def command_attach(args: argparse.Namespace) -> None:
     )
 
 
+@beartype
 def build_parser() -> argparse.ArgumentParser:
+    """Expose each calibration stage as its own Snakemake worker command."""
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -348,6 +320,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+@beartype
 def main() -> None:
     args = build_parser().parse_args()
     args.func(args)

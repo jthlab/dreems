@@ -53,8 +53,9 @@ scenario_aggregate_figure(bundle)
 ## Raw edge estimates
 
 Each row uses one shared color scale. White circles mark sampled graph nodes.
-The gate's `alpha` is its retained centered-surface amplitude after MAP
-refinement; `alpha = 1` leaves the core estimate unchanged.
+The reported `alpha` projects the gated MAP estimate onto the core MAP estimate.
+It measures their relative amplitude along the core pattern; MAP can also change
+the pattern, so `alpha = 1` does not imply identical surfaces.
 
 ```{code-cell} ipython3
 for truth_name in SCENARIO_TRUTHS:

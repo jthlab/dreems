@@ -3,6 +3,7 @@
 from pathlib import Path
 
 
+QUALITY_DIR = Path(config.get("output_dir", "artifacts/quality"))
 QUALITY_INPUTS = [
     ".python-version",
     "README.md",
@@ -10,7 +11,10 @@ QUALITY_INPUTS = [
     "pyproject.toml",
     "uv.lock",
     ".github/workflows/ci.yml",
-    *sorted(str(path) for path in Path("workflow").rglob("*") if path.is_file()),
+    *sorted(
+        str(path) for path in Path("workflow").rglob("*")
+        if path.is_file() and "__pycache__" not in path.parts
+    ),
     *sorted(str(path) for path in Path("src").rglob("*.py")),
     *sorted(str(path) for path in Path("src/dreems/data").rglob("*.dreems.zip")),
     *sorted(str(path) for path in Path("tests").rglob("*.py")),
@@ -19,20 +23,20 @@ QUALITY_INPUTS = [
 
 rule all:
     input:
-        "artifacts/quality/ruff.ok",
-        "artifacts/quality/pytest.ok",
-        "artifacts/quality/workflow_dry_run.ok",
-        "artifacts/quality/dreems_quickstart.executed.ipynb",
-        "artifacts/quality/wheel_smoke.ok",
+        f"{QUALITY_DIR}/ruff.ok",
+        f"{QUALITY_DIR}/pytest.ok",
+        f"{QUALITY_DIR}/workflow_dry_run.ok",
+        f"{QUALITY_DIR}/dreems_quickstart.executed.ipynb",
+        f"{QUALITY_DIR}/wheel_smoke.ok",
 
 
 rule ruff:
     input:
         QUALITY_INPUTS
     output:
-        touch("artifacts/quality/ruff.ok")
+        touch(f"{QUALITY_DIR}/ruff.ok")
     benchmark:
-        "artifacts/quality/ruff.benchmark.tsv"
+        f"{QUALITY_DIR}/ruff.benchmark.tsv"
     threads: 1
     resources:
         slurm_account="jonth0",
@@ -48,9 +52,12 @@ rule pytest:
     input:
         QUALITY_INPUTS
     output:
-        touch("artifacts/quality/pytest.ok")
+        touch(f"{QUALITY_DIR}/pytest.ok")
     benchmark:
-        "artifacts/quality/pytest.benchmark.tsv"
+        f"{QUALITY_DIR}/pytest.benchmark.tsv"
+    params:
+        temporary=f"{QUALITY_DIR}/pytest-temp",
+        junit=f"{QUALITY_DIR}/pytest.xml",
     threads: 4
     resources:
         slurm_account="jonth0",
@@ -59,16 +66,18 @@ rule pytest:
         runtime="60m",
     shell:
         "PYTHONPATH=src JAX_PLATFORMS=cpu XLA_PYTHON_CLIENT_MEM_FRACTION=0.15 "
-        "uv run --frozen --no-sync pytest -q"
+        "uv run --frozen --no-sync pytest -q "
+        "--basetemp {params.temporary:q} "
+        "--junitxml {params.junit:q}"
 
 
 rule workflow_dry_run:
     input:
         QUALITY_INPUTS
     output:
-        touch("artifacts/quality/workflow_dry_run.ok")
+        touch(f"{QUALITY_DIR}/workflow_dry_run.ok")
     benchmark:
-        "artifacts/quality/workflow_dry_run.benchmark.tsv"
+        f"{QUALITY_DIR}/workflow_dry_run.benchmark.tsv"
     threads: 1
     resources:
         slurm_account="jonth0",
@@ -87,9 +96,9 @@ rule quickstart_notebook:
     input:
         QUALITY_INPUTS
     output:
-        "artifacts/quality/dreems_quickstart.executed.ipynb"
+        f"{QUALITY_DIR}/dreems_quickstart.executed.ipynb"
     benchmark:
-        "artifacts/quality/dreems_quickstart.benchmark.tsv"
+        f"{QUALITY_DIR}/dreems_quickstart.benchmark.tsv"
     threads: 4
     resources:
         slurm_account="jonth0",
@@ -107,9 +116,9 @@ rule wheel_smoke:
     input:
         QUALITY_INPUTS
     output:
-        touch("artifacts/quality/wheel_smoke.ok")
+        touch(f"{QUALITY_DIR}/wheel_smoke.ok")
     benchmark:
-        "artifacts/quality/wheel_smoke.benchmark.tsv"
+        f"{QUALITY_DIR}/wheel_smoke.benchmark.tsv"
     threads: 1
     resources:
         slurm_account="jonth0",

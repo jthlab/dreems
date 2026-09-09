@@ -1,6 +1,9 @@
+"""A fast all-pair resistance initializer, not a fitted FEEMS model."""
+
+# ruff: noqa: F722,F821,UP037
+
 from __future__ import annotations
 
-import math
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -8,13 +11,22 @@ from typing import Any
 import numpy as np
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
+from beartype import beartype
+from jaxtyping import Float, Int, Real, jaxtyped
 
 from dreems import features
+from dreems.features import geometry_conductance as _baseline_conductance
 
 
+@beartype
 @dataclass(frozen=True)
 class LinearizedConductanceEstimate:
-    """All-pair linearized resistance initializer for edge log-conductances."""
+    """An edge field and diagnostics from the linearized resistance calculation.
+
+    ``edge_information`` is the diagonal sensitivity sum, not posterior precision.
+    Pair arrays follow the upper triangle of sorted ``observed_nodes``. Field
+    order is kept stable for callers and previously saved objects.
+    """
 
     edge_log_conductance: np.ndarray
     edge_information: np.ndarray
@@ -25,46 +37,36 @@ class LinearizedConductanceEstimate:
     diagnostics: dict[str, Any]
 
 
+@beartype
 def _centered(values: np.ndarray) -> np.ndarray:
+    """Remove the mean without imputing missing values."""
     array = np.asarray(values, dtype=np.float64)
     if array.size == 0:
         return array
     return array - float(np.mean(array))
 
 
-def _safe_corr(left: np.ndarray, right: np.ndarray) -> float:
+@jaxtyped(typechecker=beartype)
+def _safe_corr(
+    left: Float[np.ndarray, "values"],
+    right: Float[np.ndarray, "values"],
+) -> float:
+    """Pearson correlation, reported as NaN for a constant field."""
     left = _centered(left)
     right = _centered(right)
-    denom = math.sqrt(float(np.dot(left, left) * np.dot(right, right)))
+    denom = np.sqrt(np.dot(left, left) * np.dot(right, right))
     if denom <= 0.0:
         return float("nan")
     return float(np.dot(left, right) / denom)
 
 
-def _baseline_conductance(
-    node_coordinates: np.ndarray,
-    edges: np.ndarray,
-    *,
-    length_weighted: bool,
-) -> np.ndarray:
-    if not length_weighted:
-        return np.ones(edges.shape[0], dtype=np.float64)
-    delta = node_coordinates[edges[:, 1]] - node_coordinates[edges[:, 0]]
-    length = np.linalg.norm(delta, axis=1)
-    positive = length[np.isfinite(length) & (length > 0.0)]
-    reference = float(np.median(positive)) if positive.size else 1.0
-    return np.clip(
-        reference / np.maximum(length, max(reference * 1e-6, 1e-12)),
-        0.25,
-        4.0,
-    ).astype(np.float64)
-
-
+@jaxtyped(typechecker=beartype)
 def _weighted_laplacian(
     num_nodes: int,
-    edges: np.ndarray,
-    conductance: np.ndarray,
+    edges: Int[np.ndarray, "edges 2"],
+    conductance: Float[np.ndarray, "edges"],
 ) -> sp.csr_matrix:
+    """Assemble B.T @ diag(conductance) @ B without a dense incidence matrix."""
     left = edges[:, 0].astype(np.int64)
     right = edges[:, 1].astype(np.int64)
     rows = np.concatenate([left, right, left, right])
@@ -73,62 +75,14 @@ def _weighted_laplacian(
     return sp.coo_matrix((data, (rows, cols)), shape=(num_nodes, num_nodes)).tocsr()
 
 
-def _grounded_source_potentials(
-    num_nodes: int,
-    laplacian: sp.csr_matrix,
-    source_nodes: np.ndarray,
-) -> np.ndarray:
-    if num_nodes < 2:
-        return np.zeros((num_nodes, source_nodes.shape[0]), dtype=np.float64)
-    ground = num_nodes - 1
-    reduced = laplacian[:ground, :ground].tocsc()
-    rhs = np.zeros((ground, source_nodes.shape[0]), dtype=np.float64)
-    for column, node in enumerate(source_nodes.astype(np.int64, copy=False)):
-        if int(node) != ground:
-            rhs[int(node), column] = 1.0
-    solved = np.asarray(spla.spsolve(reduced, rhs), dtype=np.float64)
-    if solved.ndim == 1:
-        solved = solved[:, None]
-    potentials = np.zeros((num_nodes, source_nodes.shape[0]), dtype=np.float64)
-    potentials[:ground, :] = solved
-    return potentials
-
-
-def _line_graph_laplacian(num_nodes: int, edges: np.ndarray) -> sp.csr_matrix:
-    num_edges = int(edges.shape[0])
-    incident: list[list[int]] = [[] for _node in range(num_nodes)]
-    for edge_index, (left, right) in enumerate(edges):
-        incident[int(left)].append(edge_index)
-        incident[int(right)].append(edge_index)
-
-    left_pairs: list[int] = []
-    right_pairs: list[int] = []
-    for edge_indices in incident:
-        for outer in range(len(edge_indices)):
-            for inner in range(outer + 1, len(edge_indices)):
-                left_pairs.append(edge_indices[outer])
-                right_pairs.append(edge_indices[inner])
-    if not left_pairs:
-        return sp.csr_matrix((num_edges, num_edges), dtype=np.float64)
-    left = np.asarray(left_pairs, dtype=np.int64)
-    right = np.asarray(right_pairs, dtype=np.int64)
-    adjacency = sp.coo_matrix(
-        (
-            np.ones(left.size * 2, dtype=np.float64),
-            (np.concatenate([left, right]), np.concatenate([right, left])),
-        ),
-        shape=(num_edges, num_edges),
-    ).tocsr()
-    degree = np.asarray(adjacency.sum(axis=1)).ravel()
-    return (sp.diags(degree) - adjacency).tocsr()
-
-
+@jaxtyped(typechecker=beartype)
 def _deme_pair_log_resistance(
-    sample_covariance: np.ndarray,
-    sample_nodes: np.ndarray,
+    sample_covariance: Float[np.ndarray, "samples samples"],
+    sample_nodes: Int[np.ndarray, "samples"],
     num_nodes: int,
     effective_snps: int | None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Form centered log dissimilarities between every pair of observed demes."""
     summaries = features.covariance_deme_summaries(
         sample_covariance,
         sample_nodes,
@@ -157,12 +111,13 @@ def _deme_pair_log_resistance(
     )
 
 
+@jaxtyped(typechecker=beartype)
 def all_pair_adjoint_conductance_initializer(
     *,
-    sample_covariance: np.ndarray,
-    sample_nodes: np.ndarray,
-    node_coordinates: np.ndarray,
-    edges: np.ndarray,
+    sample_covariance: Real[np.ndarray, "samples samples"],
+    sample_nodes: Int[np.ndarray, "samples"],
+    node_coordinates: Real[np.ndarray, "nodes 2"],
+    edges: Int[np.ndarray, "edges 2"],
     effective_snps: int | None = None,
     node_sample_count: np.ndarray | None = None,
     smoothness: float = 0.01,
@@ -178,9 +133,32 @@ def all_pair_adjoint_conductance_initializer(
     effective-resistance observations around a fixed baseline graph, accumulates
     the all-pair adjoint score on edges, and solves a smoothed diagonal-normal
     system on the line graph.
+
+    For baseline conductances w and pair potentials v, a sensitivity entry is
+    S[e,p] = -w[e] * (v[i,p]-v[j,p])**2 / R[p]. The right-hand side is S @ (W*r);
+    the diagonal is sum_p W[p]*S[e,p]**2. Cross-edge curvature is omitted.
+    ``batch_size`` limits temporary storage, not the number of observed pairs.
+    ``output_sd`` optionally fixes amplitude after centering; it is not an
+    uncertainty estimate. This calculation has no separately fitted q field.
     """
 
     started = time.perf_counter()
+    num_nodes = node_coordinates.shape[0]
+    if np.any(edges < 0) or np.any(edges >= num_nodes):
+        raise ValueError("edges contain an out-of-range node index")
+    if np.any(sample_nodes < 0) or np.any(sample_nodes >= num_nodes):
+        raise ValueError("sample_nodes contain an out-of-range node index")
+    if not np.all(np.isfinite(node_coordinates)):
+        raise ValueError("node_coordinates must be finite")
+    for name, value in (("smoothness", smoothness), ("ridge_scale", ridge_scale)):
+        if not np.isfinite(value) or value < 0.0:
+            raise ValueError(f"{name} must be finite and nonnegative")
+    if not np.isfinite(pair_weight_power):
+        raise ValueError("pair_weight_power must be finite")
+    if output_sd is not None and (not np.isfinite(output_sd) or output_sd < 0.0):
+        raise ValueError("output_sd must be finite and nonnegative")
+    if effective_snps is not None and effective_snps < 2:
+        raise ValueError("effective_snps must be at least two")
     node_coordinates = np.asarray(node_coordinates, dtype=np.float64)
     edges = np.asarray(edges, dtype=np.int32)
     sample_covariance = np.asarray(sample_covariance, dtype=np.float64)
@@ -219,19 +197,16 @@ def all_pair_adjoint_conductance_initializer(
         length_weighted=length_weighted_baseline,
     )
     laplacian = _weighted_laplacian(num_nodes, edges, conductance)
-    potentials = _grounded_source_potentials(num_nodes, laplacian, observed_nodes)
+    if sp.csgraph.connected_components(laplacian, directed=False, return_labels=False) != 1:
+        raise ValueError("the geographic graph must be connected")
+    potentials = features.grounded_source_potentials(num_nodes, laplacian, observed_nodes)
 
-    pair_resistance = np.zeros((pair_left.shape[0],), dtype=np.float64)
-    for start in range(0, pair_left.shape[0], batch_size):
-        stop = min(start + batch_size, pair_left.shape[0])
-        local_left = pair_left[start:stop]
-        local_right = pair_right[start:stop]
-        local_potential = potentials[:, local_left] - potentials[:, local_right]
-        local_columns = np.arange(stop - start)
-        pair_resistance[start:stop] = (
-            local_potential[observed_nodes[local_left], local_columns]
-            - local_potential[observed_nodes[local_right], local_columns]
-        )
+    # Only the two source rows are needed for each resistance. Preserve the
+    # subtraction order without constructing a node-by-pair temporary here.
+    left_nodes, right_nodes = observed_nodes[pair_left], observed_nodes[pair_right]
+    pair_resistance = (potentials[left_nodes, pair_left] - potentials[left_nodes, pair_right]) - (
+        potentials[right_nodes, pair_left] - potentials[right_nodes, pair_right]
+    )
     pair_resistance = np.maximum(pair_resistance, 1e-10)
     baseline_log = _centered(np.log(pair_resistance))
     residual = observed_log - baseline_log
@@ -265,9 +240,11 @@ def all_pair_adjoint_conductance_initializer(
     positive_info = information[information > 0.0]
     ridge = float(ridge_scale) * (float(np.median(positive_info)) if positive_info.size else 1.0)
     ridge = max(ridge, 1e-12)
-    line_laplacian = _line_graph_laplacian(num_nodes, edges)
+    line_laplacian = features.line_graph_laplacian(num_nodes, edges)
     system = sp.diags(information + ridge) + float(smoothness) * line_laplacian
     edge_log = np.asarray(spla.spsolve(system.tocsc(), score), dtype=np.float64)
+    if not np.all(np.isfinite(edge_log)):
+        raise ValueError("edge initializer solve returned non-finite conductances")
     edge_log = _centered(edge_log)
     if output_sd is not None:
         sd = float(np.std(edge_log))

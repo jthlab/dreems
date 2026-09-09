@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import zipfile
+from dataclasses import fields, replace
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
+from jaxtyping import TypeCheckError
 
 from dreems import checkpoints, model, train
 
@@ -56,6 +59,89 @@ def small_config(
             trainable_scope=trainable_scope,
         ),
     )
+
+
+@pytest.mark.parametrize("gate", ["initializer", "surface"])
+@pytest.mark.parametrize("other_gate", [False, True])
+def test_adding_gate_preserves_every_existing_field(gate: str, other_gate: bool) -> None:
+    dimensions = dict(node_dim=6, edge_dim=5, hidden_channels=8, layers=1, context_layers=1)
+    source = model.DREEMS(
+        jax.random.PRNGKey(121),
+        **dimensions,
+        initializer_gate=gate == "surface" and other_gate,
+        surface_gate=gate == "initializer" and other_gate,
+    )
+    add_gate = model.add_initializer_gate if gate == "initializer" else model.add_surface_gate
+    result = add_gate(source, key=jax.random.PRNGKey(122), **dimensions, initial_logit=0.0)
+    new_fields = {f"{gate}_gate_hidden", f"{gate}_gate_out"}
+
+    assert [field.name for field in fields(result)] == [field.name for field in fields(source)]
+    for field in fields(source):
+        if field.name in new_fields:
+            assert getattr(source, field.name) is None
+            assert getattr(result, field.name) is not None
+            continue
+        original = getattr(source, field.name)
+        retained = getattr(result, field.name)
+        assert jax.tree.structure(original) == jax.tree.structure(retained)
+        for before, after in zip(jax.tree.leaves(original), jax.tree.leaves(retained), strict=True):
+            np.testing.assert_array_equal(after, before)
+
+    # Adding an already-present gate must not reset its learned parameters.
+    assert add_gate(result, key=jax.random.PRNGKey(123), **dimensions, initial_logit=6.0) is result
+
+
+@pytest.mark.parametrize("bounded", [False, True])
+def test_predict_restores_units_without_mutating_jax_buffers(bounded: bool) -> None:
+    arrays = toy_training_arrays()
+    network = model.DREEMS(
+        jax.random.PRNGKey(124),
+        node_dim=6,
+        edge_dim=5,
+        hidden_channels=8,
+        layers=1,
+        context_layers=1,
+    )
+    batch = {name: jnp.asarray(value) for name, value in arrays.items()}
+    expected = model.apply_batch_with_diagnostics(network, batch)
+    metadata = (
+        {"posterior": {"kind": "factorized_normal", "min_logvar": -7.0, "max_logvar": 5.0}}
+        if bounded
+        else {}
+    )
+    actual = model.predict_with_diagnostics(
+        network, arrays, y_scale=2.0, q_y_scale=3.0, model=metadata
+    )
+    np.testing.assert_allclose(actual[0], np.asarray(expected[0]) * 2.0)
+    np.testing.assert_allclose(actual[2], np.asarray(expected[3]) * 3.0)
+    for output_index, expected_index, scale in [(1, 1, 2.0), (3, 4, 3.0)]:
+        logvar = np.asarray(expected[expected_index])
+        if bounded:
+            logvar = np.clip(logvar, -7.0, 5.0)
+        assert actual[output_index].dtype == logvar.dtype
+        np.testing.assert_allclose(actual[output_index], logvar + 2.0 * np.log(scale), rtol=1e-6)
+    np.testing.assert_array_equal(actual[4], expected[6])
+
+
+def test_model_checks_shapes_when_called_directly_and_through_jit() -> None:
+    network = model.DREEMS(
+        jax.random.PRNGKey(125),
+        node_dim=6,
+        edge_dim=5,
+        hidden_channels=8,
+        layers=1,
+        context_layers=1,
+    )
+    arrays = toy_training_arrays()
+    inputs = tuple(
+        jnp.asarray(arrays[name][0])
+        for name in ("node_x", "edge_x", "edges", "node_mask", "edge_mask")
+    )
+    for evaluate in (network.apply_one, eqx.filter_jit(network.apply_one)):
+        with pytest.raises(TypeCheckError):
+            evaluate(*inputs[:-1], jnp.ones((5,), dtype=jnp.float32))
+        with pytest.raises(TypeCheckError):
+            evaluate(*inputs, edge_initializer=jnp.zeros((5,), dtype=jnp.float32))
 
 
 def test_train_save_and_load_production_checkpoint(tmp_path) -> None:
@@ -113,6 +199,59 @@ def test_train_save_and_load_production_checkpoint(tmp_path) -> None:
     }
     assert loaded.model["edge_conditioner"]["method"] == "all_pair_diagonal_adjoint"
     assert loaded.payload["training_config"]["optimizer"]["learning_rate"] == 1e-3
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_failed_checkpoint_save_does_not_leave_a_partial_archive(
+    tmp_path, monkeypatch, existing: bool
+) -> None:
+    arrays = toy_training_arrays()
+    params = model.DREEMS(
+        jax.random.PRNGKey(126),
+        node_dim=6,
+        edge_dim=5,
+        hidden_channels=8,
+        layers=1,
+        context_layers=1,
+    )
+    path = tmp_path / "best.dreems.zip"
+    kwargs = dict(
+        params=params,
+        normalization={"y_scale": 1.0, "q_y_scale": 1.0},
+        config=small_config(),
+        train_losses=[],
+        train_arrays=arrays,
+    )
+    if existing:
+        train.save_checkpoint(path, **kwargs)
+        before = path.read_bytes()
+
+    def fail_during_write(*args, **kwargs):
+        raise OSError("simulated disk write failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(zipfile.ZipFile, "writestr", fail_during_write)
+        with pytest.raises(OSError, match="simulated disk write failure"):
+            train.save_checkpoint(path, **kwargs)
+
+    if existing:
+        assert path.read_bytes() == before
+        loaded = checkpoints.load_checkpoint(path)
+        for left, right in zip(
+            jax.tree.leaves(params), jax.tree.leaves(loaded.params), strict=True
+        ):
+            np.testing.assert_array_equal(left, right)
+    else:
+        assert not path.exists()
+    assert list(tmp_path.glob(".*.tmp")) == []
+
+
+def test_loading_incomplete_checkpoint_reports_missing_members(tmp_path) -> None:
+    path = tmp_path / "incomplete.dreems.zip"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr(checkpoints.CHECKPOINT_METADATA, "{}")
+    with pytest.raises(ValueError, match="missing metadata or parameters"):
+        checkpoints.load_checkpoint(path)
 
 
 def test_gated_checkpoint_round_trip(tmp_path) -> None:
@@ -306,6 +445,100 @@ def test_train_from_arrays_stops_on_validation_plateau() -> None:
     assert result.final_step == 2
     assert result.best_step == 1
     assert result.restored_best_validation
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
+@pytest.mark.parametrize(
+    "factory,name",
+    [
+        (factory, field.name)
+        for factory in (
+            train.DREEMSArchitectureConfig,
+            train.DREEMSFeatureConfig,
+            train.LinearizedResistanceConfig,
+            train.DREEMSLossConfig,
+            train.DREEMSOptimizerConfig,
+        )
+        for field in fields(factory)
+        if isinstance(field.default, float)
+    ],
+)
+def test_training_configs_reject_nonfinite_values(factory, name: str, value: float) -> None:
+    with pytest.raises(ValueError, match=name):
+        replace(factory(), **{name: value}).validate()
+
+
+@pytest.mark.parametrize("metric", ["validation_loss", "validation_q_nll"])
+def test_validation_failure_preserves_the_last_saved_checkpoint(
+    tmp_path, monkeypatch, metric
+) -> None:
+    arrays = toy_training_arrays()
+    config = small_config(steps=4, patience=2)
+    path = tmp_path / "best.dreems.zip"
+    callbacks = []
+    evaluations = 0
+    saved_bytes = None
+
+    def validation(*_args, **_kwargs):
+        nonlocal evaluations
+        evaluations += 1
+        return {"validation_loss": 1.0, metric: 1.0 if evaluations == 1 else np.nan}
+
+    def save_best(step, params, losses, row):
+        nonlocal saved_bytes
+        callbacks.append(step)
+        if row["validation_best"]:
+            train.save_checkpoint(
+                path,
+                params=params,
+                normalization={"y_scale": 1.0, "q_y_scale": 1.0},
+                config=config,
+                train_losses=losses,
+                train_arrays=arrays,
+            )
+            saved_bytes = path.read_bytes()
+
+    monkeypatch.setattr(train, "validation_metrics", validation)
+    with pytest.raises(FloatingPointError, match=f"step 2.*{metric}"):
+        train.train_from_arrays(
+            arrays,
+            config=config,
+            validation_arrays=arrays,
+            checkpoint_callback=save_best,
+        )
+    assert callbacks == [1]
+    assert path.read_bytes() == saved_bytes
+    assert isinstance(checkpoints.load_checkpoint(path).params, model.DREEMS)
+
+
+@pytest.mark.parametrize("failure", ["loss", "gradient"])
+def test_training_aborts_before_callback_on_nonfinite_updates(monkeypatch, failure: str) -> None:
+    @jax.custom_jvp
+    def bad_gradient(value):
+        return value * 0.0
+
+    @bad_gradient.defjvp
+    def derivative(primals, tangents):
+        return bad_gradient(primals[0]), jnp.nan * tangents[0]
+
+    def terms(params, _batch, _config):
+        value = jnp.sum(jax.tree.leaves(params)[0])
+        return {"loss": value * jnp.nan if failure == "loss" else bad_gradient(value)}
+
+    callbacks = []
+    monkeypatch.setattr(train, "loss_terms", terms)
+    with pytest.raises(FloatingPointError, match=f"nonfinite.*{failure}.*step 1"):
+        train.train_from_arrays(
+            toy_training_arrays(),
+            config=small_config(steps=1),
+            checkpoint_callback=lambda *args: callbacks.append(args),
+        )
+    assert callbacks == []
+
+
+def test_empty_batch_stream_cannot_return_an_untrained_success() -> None:
+    with pytest.raises(ValueError, match="batch stream is empty"):
+        train.train_from_batches(config=small_config(), node_dim=6, edge_dim=5, batches=[])
 
 
 def test_validation_metrics_can_batch_examples() -> None:

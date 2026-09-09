@@ -3,12 +3,94 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from numbers import Integral, Real
 from typing import Any
 
 import numpy as np
+from beartype import beartype
+
+from dreems.validation import _integer_array
 
 
+@beartype
+def _integer_setting(value: object, name: str, minimum: int = 1) -> int:
+    """Read a scalar count without truncation, clipping, or a fallback on error."""
+    if isinstance(value, str):
+        try:
+            value = int(value)
+        except ValueError as error:
+            raise ValueError(f"{name} must be an integer") from error
+    array = _integer_array(np.asarray(value), name=name, dtype=np.int64)
+    if array.ndim != 0 or array.item() < minimum:
+        raise ValueError(f"{name} must be a scalar integer >= {minimum}")
+    return array.item()
+
+
+@beartype
+def _finite_setting(value: object, name: str) -> float:
+    """Read a finite scalar number; a boolean is not a numeric setting."""
+    if isinstance(value, (bool, np.bool_)) or np.ndim(value) != 0:
+        raise ValueError(f"{name} must be a finite scalar number")
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError(f"{name} must be a finite scalar number") from error
+    if not np.isfinite(number):
+        raise ValueError(f"{name} must be finite")
+    return number
+
+
+@beartype
+def _positive_choices(choices: object, *, integer: bool) -> list[str]:
+    """Use the same numeric spelling as the existing named-weight lookup."""
+    if isinstance(choices, np.ndarray):
+        if choices.ndim != 1:
+            raise ValueError("choices must be one-dimensional")
+        values = list(choices)
+    else:
+        values = choices if isinstance(choices, (list, tuple)) else [choices]
+    if not values:
+        raise ValueError("choices must be a nonempty one-dimensional sequence")
+    convert = _integer_setting if integer else _finite_setting
+    numbers = [convert(value, "choice") for value in values]
+    if any(number <= 0 for number in numbers):
+        raise ValueError("choices must be positive")
+    return [str(number) for number in numbers]
+
+
+@beartype
+def _weight_probabilities(weights: np.ndarray) -> np.ndarray:
+    """Normalize finite, nonnegative weights with a positive total."""
+    total = weights.sum()
+    if (
+        not np.all(np.isfinite(weights))
+        or np.any(weights < 0)
+        or not np.isfinite(total)
+        or total <= 0
+    ):
+        raise ValueError("weights must be finite, nonnegative, and have a positive finite sum")
+    return weights / total
+
+
+@beartype
+def _integer_bounds(low: object, high: object, name: str) -> tuple[int, int] | None:
+    """Require both optional bounds, retaining the existing endpoint-order convention."""
+    if low is None and high is None:
+        return None
+    if low is None or high is None:
+        raise ValueError(f"{name} requires both lower and upper bounds")
+    values = (_integer_setting(low, name), _integer_setting(high, name))
+    return min(values), max(values)
+
+
+@beartype
 def simulation_config(config: Mapping[str, Any]) -> dict[str, Any]:
+    """Apply simulation defaults without modifying the caller's config.
+
+    The seed comes from ``simulation.seed``, then top-level ``seed``, then 12001.
+    Explicit null seeds use the same fallback as omitted seeds. The remaining
+    settings describe the mixture of graphs, surfaces, and sampling designs.
+    """
     defaults: dict[str, Any] = {
         "seed": None,
         "simulator": "auto",
@@ -183,6 +265,14 @@ def simulation_config(config: Mapping[str, Any]) -> dict[str, Any]:
     if unknown:
         raise ValueError(f"unsupported simulation config keys: {', '.join(unknown)}")
     defaults.update(user)
+    seed = defaults["seed"]
+    if seed is None:
+        seed = config.get("seed")
+    if seed is None:
+        seed = 12001
+    if isinstance(seed, bool) or not isinstance(seed, Integral) or seed < 0:
+        raise ValueError("simulation seed must be a nonnegative integer")
+    defaults["seed"] = int(seed)
     modes = string_list(defaults["sampling_counterfactual_modes"])
     supported_modes = {
         "independent",
@@ -203,12 +293,18 @@ def simulation_config(config: Mapping[str, Any]) -> dict[str, Any]:
         )
     min_strength = float(defaults["sampling_association_min_strength"])
     max_strength = float(defaults["sampling_association_max_strength"])
-    if min_strength < 0.0 or max_strength < min_strength:
+    if (
+        not np.isfinite([min_strength, max_strength]).all()
+        or min_strength < 0.0
+        or max_strength < min_strength
+    ):
         raise ValueError("sampling association strengths must satisfy 0 <= min <= max")
-    if float(defaults["sampling_spatial_noise_scale"]) < 0.0:
-        raise ValueError("sampling_spatial_noise_scale must be nonnegative")
-    if float(defaults["sampling_spatial_length_scale"]) <= 0.0:
-        raise ValueError("sampling_spatial_length_scale must be positive")
+    noise_scale = float(defaults["sampling_spatial_noise_scale"])
+    if not np.isfinite(noise_scale) or noise_scale < 0.0:
+        raise ValueError("sampling_spatial_noise_scale must be finite and nonnegative")
+    length_scale = float(defaults["sampling_spatial_length_scale"])
+    if not np.isfinite(length_scale) or length_scale <= 0.0:
+        raise ValueError("sampling_spatial_length_scale must be finite and positive")
     barrier_quantile = float(defaults["sampling_barrier_quantile"])
     if not 0.0 < barrier_quantile < 1.0:
         raise ValueError("sampling_barrier_quantile must lie strictly between zero and one")
@@ -226,6 +322,8 @@ def simulation_config(config: Mapping[str, Any]) -> dict[str, Any]:
                 raise ValueError(
                     "simulation.num_snps_log_bins must be a sequence of [low, high] pairs"
                 )
+            if any(isinstance(bound, bool) or not isinstance(bound, Integral) for bound in raw_bin):
+                raise ValueError("SNP bins must contain integer bounds")
             low, high = (int(raw_bin[0]), int(raw_bin[1]))
             if low <= 0 or high < low:
                 raise ValueError("SNP bins must satisfy 0 < low <= high")
@@ -233,10 +331,297 @@ def simulation_config(config: Mapping[str, Any]) -> dict[str, Any]:
         if not snp_bins:
             raise ValueError("simulation.num_snps_log_bins cannot be empty")
         defaults["num_snps_log_bins"] = snp_bins
+    validate_simulation_settings(defaults)
     return defaults
 
 
-def selected_simulator(sim: Mapping[str, Any], num_nodes: int) -> str:
+@beartype
+def validate_sampling_settings(local: Mapping[str, Any]) -> None:
+    """Check sampling overrides before selecting a node or drawing a count.
+
+    For the generic sampling designs, zero min/max_samples select the node
+    fraction and omit that count bound. The FEEMS-lattice sampler has its own
+    cap convention. max_samples also caps total individuals in both samplers.
+    """
+    for key in ("min_samples", "max_samples"):
+        if local.get(key) is not None:
+            _integer_setting(local[key], key, minimum=0)
+    for key in ("diploids_per_node", "diploids_per_site", "min_sampled_nodes", "max_sampled_nodes"):
+        if local.get(key) is not None:
+            _integer_setting(local[key], key)
+    for key in ("sampled_node_fraction", "min_sample_fraction", "max_sample_fraction"):
+        if local.get(key) is not None and not 0 <= _finite_setting(local[key], key) <= 1:
+            raise ValueError(f"{key} must lie in [0, 1]")
+    low, high = local.get("min_sample_fraction"), local.get("max_sample_fraction")
+    if (low is None) != (high is None):
+        raise ValueError(
+            "sample fractions require both min_sample_fraction and max_sample_fraction"
+        )
+    for name in ("diploids_per_site", "diploids_per_node"):
+        _integer_bounds(local.get(f"min_{name}"), local.get(f"max_{name}"), name)
+    low, high = local.get("min_samples", 0), local.get("max_samples", 0)
+    if low and high and int(low) > int(high):
+        raise ValueError("min_samples must not exceed max_samples")
+    design = local.get("sample_design", local.get("design"))
+    if design is not None and design not in {
+        "sites",
+        "poisson_sites",
+        "uniform",
+        "clustered",
+        "full",
+    }:
+        raise ValueError(f"unknown sample design: {design!r}")
+
+
+@beartype
+def validate_simulation_settings(sim: Mapping[str, Any]) -> None:
+    """Validate the complete recipe without drawing randomness or rewriting it."""
+    from dreems.island_sim import _check_ascertainment
+
+    validate_sampling_settings(sim)
+    for key in (
+        "min_height",
+        "max_height",
+        "min_width",
+        "max_width",
+        "earth_min_nodes",
+        "earth_max_nodes",
+        "global_landscape_min_nodes",
+        "global_landscape_max_nodes",
+        "global_landscape_target_nodes",
+        "global_landscape_max_region_tries",
+        "global_landscape_sampled_sites",
+        "global_landscape_min_sampled_sites",
+        "global_landscape_max_sampled_sites",
+        "global_landscape_max_total_samples",
+        "global_landscape_min_diploids_per_site",
+        "global_landscape_max_diploids_per_site",
+        "wolflike_target_nodes",
+        "wolflike_sampled_sites",
+        "wolflike_min_sampled_sites",
+        "wolflike_max_sampled_sites",
+        "wolflike_max_total_samples",
+        "wolflike_min_diploids_per_site",
+        "wolflike_max_diploids_per_site",
+        "feems_lattice_n_samples_per_node",
+        "num_snps",
+        "landscape_min_features",
+        "landscape_max_features",
+        "gp_features",
+        "coalescent_batch_replicates",
+        "coalescent_max_batches",
+        "island_ploidy",
+        "island_max_attempts",
+        "max_conditionable_attempts",
+    ):
+        if sim[key] is not None:
+            _integer_setting(sim[key], key)
+    for key in ("feems_lattice_rows", "feems_lattice_columns"):
+        _integer_setting(sim[key], key, minimum=2)
+    _integer_setting(sim["msprime_max_nodes"], "msprime_max_nodes", minimum=0)
+    _integer_bounds(sim["min_num_snps"], sim["max_num_snps"], "num_snps")
+    for key in (
+        "log_rate_std",
+        "q_log_std",
+        "global_landscape_center_jitter_deg",
+        "global_landscape_water_strength",
+        "global_landscape_coast_strength",
+        "global_landscape_ridge_strength",
+        "landscape_water_strength",
+        "landscape_mountain_strength",
+        "landscape_coast_strength",
+        "landscape_feature_jitter",
+    ):
+        if _finite_setting(sim[key], key) < 0:
+            raise ValueError(f"{key} must be nonnegative")
+    for key in (
+        "global_landscape_min_box_deg",
+        "global_landscape_max_box_deg",
+        "global_landscape_box_aspect_min",
+        "global_landscape_box_aspect_max",
+        "migration_gp_length_scale",
+        "q_gp_length_scale",
+        "coalescent_migration_scale",
+        "coalescent_effective_size",
+        "coalescent_mutation_rate",
+        "coalescent_sequence_length",
+        "island_mutation_rate",
+        "island_migration_scale",
+        "island_coalescence_scale",
+        "feems_lattice_barrier_w",
+        "feems_lattice_corridor_w",
+        "feems_lattice_anisotropy_scaler",
+    ):
+        if _finite_setting(sim[key], key) <= 0:
+            raise ValueError(f"{key} must be positive")
+    for key in (
+        "global_landscape_min_land_fraction",
+        "global_landscape_path_sample_probability",
+        "feems_lattice_barrier_prob",
+        "feems_lattice_corridor_left_prob",
+        "feems_lattice_corridor_right_prob",
+        "island_min_allele_frequency",
+        "island_max_allele_frequency",
+    ):
+        if not 0 <= _finite_setting(sim[key], key) <= 1:
+            raise ValueError(f"{key} must lie in [0, 1]")
+    for name in ("log_rate_std", "q_log_std", "migration_gp_length_scale", "q_gp_length_scale"):
+        low, high = sim[f"min_{name}"], sim[f"max_{name}"]
+        if low is None and high is None:
+            continue
+        if low is None or high is None:
+            raise ValueError(f"{name} requires both range bounds")
+        values = [_finite_setting(value, name) for value in (low, high)]
+        if min(values) < 0 or ("length_scale" in name and min(values) == 0):
+            raise ValueError(f"invalid bounds for {name}")
+    for low, high in (
+        ("min_height", "max_height"),
+        ("min_width", "max_width"),
+        ("earth_min_nodes", "earth_max_nodes"),
+        ("global_landscape_min_nodes", "global_landscape_max_nodes"),
+        ("global_landscape_min_diploids_per_site", "global_landscape_max_diploids_per_site"),
+        ("wolflike_min_diploids_per_site", "wolflike_max_diploids_per_site"),
+        ("landscape_min_features", "landscape_max_features"),
+        ("global_landscape_min_box_deg", "global_landscape_max_box_deg"),
+        ("island_min_allele_frequency", "island_max_allele_frequency"),
+    ):
+        if _finite_setting(sim[low], low) > _finite_setting(sim[high], high):
+            raise ValueError(f"{low} must not exceed {high}")
+    for key in (
+        "global_landscape_min_lat",
+        "global_landscape_max_lat",
+        "global_landscape_preferred_center_lat",
+    ):
+        if sim[key] is not None and not -90 <= _finite_setting(sim[key], key) <= 90:
+            raise ValueError(f"{key} must lie in [-90, 90]")
+    lon, lat = (
+        sim["global_landscape_preferred_center_lon"],
+        sim["global_landscape_preferred_center_lat"],
+    )
+    if (lon is None) != (lat is None):
+        raise ValueError("a preferred landscape center needs both longitude and latitude")
+    if lon is not None and not -180 <= _finite_setting(lon, "preferred longitude") <= 180:
+        raise ValueError("preferred longitude must lie in [-180, 180]")
+    if _finite_setting(sim["global_landscape_min_lat"], "minimum latitude") >= _finite_setting(
+        sim["global_landscape_max_lat"], "maximum latitude"
+    ):
+        raise ValueError("global_landscape_min_lat must be less than global_landscape_max_lat")
+    if _finite_setting(sim["feems_lattice_barrier_startpt"], "barrier start") >= _finite_setting(
+        sim["feems_lattice_barrier_endpt"], "barrier end"
+    ):
+        raise ValueError("FEEMS lattice barrier start must precede its end")
+    for key in (
+        "island_symmetric_migration",
+        "island_use_rust",
+        "island_require_rust",
+        "island_emit_covariance",
+    ):
+        if not isinstance(sim[key], (bool, np.bool_)):
+            raise ValueError(f"{key} must be a boolean")
+    if sim["q_prior"] not in {"constant", "smooth", "gp"}:
+        raise ValueError("q_prior must be constant, smooth, or gp")
+    if sim["earth_backend"] != "synthetic_grid":
+        raise ValueError("earth_backend must be synthetic_grid")
+    if sim["global_landscape_resolution"] not in {"110m", "50m", "10m"}:
+        raise ValueError("global_landscape_resolution must be 110m, 50m, or 10m")
+    selected_simulator(sim, 2)
+    _check_ascertainment(
+        min_allele_frequency=_finite_setting(
+            sim["island_min_allele_frequency"], "minimum frequency"
+        ),
+        max_allele_frequency=_finite_setting(
+            sim["island_max_allele_frequency"], "maximum frequency"
+        ),
+        marker_model=sim["island_marker_model"],
+    )
+
+    # Extra weight names are allowed: a graph family may use a subset of a
+    # shared surface mixture. Missing surface weights still mean one, not zero.
+    for key, value in sim.items():
+        if key.endswith("_weights"):
+            weights = parse_weight_mapping(value)
+            if weights:
+                _weight_probabilities(np.asarray(list(weights.values())))
+        if key.endswith("_choices") and value is not None:
+            integer = key not in {
+                "global_landscape_box_width_choices",
+                "global_landscape_sampled_fraction_choices",
+                "wolflike_sampled_fraction_choices",
+                "feems_lattice_sample_prob_choices",
+            }
+            candidates = _positive_choices(value, integer=integer)
+            if ("fraction" in key or "sample_prob" in key) and max(map(float, candidates)) > 1:
+                raise ValueError(f"{key} must lie in (0, 1]")
+            if (
+                key in {"feems_lattice_row_choices", "feems_lattice_column_choices"}
+                and min(map(int, candidates)) < 2
+            ):
+                raise ValueError(f"{key} must contain counts >=2")
+    case_weights = parse_weight_mapping(sim["case_weights"])
+    if set(case_weights) - set(CASE_KINDS):
+        raise ValueError("unsupported simulation case kinds")
+    _weight_probabilities(np.asarray([case_weights.get(name, 0.0) for name in CASE_KINDS]))
+    surfaces = {
+        "constant",
+        "smooth",
+        "barrier",
+        "corridor",
+        "gp",
+        "earth",
+        "landscape",
+        "north_america_landscape",
+        "multiscale",
+        "feems_homogeneous",
+        "feems_heterogeneous_barrier",
+        "feems_anisotropic",
+    }
+    for key, allowed in (
+        ("mask_kinds", {"full", "bay", "lake", "coast", "islands", "corridor"}),
+        ("sample_designs", {"sites", "poisson_sites", "uniform", "clustered", "full"}),
+        ("surface_kinds", surfaces),
+        ("wolflike_surface_kinds", surfaces),
+        ("feems_lattice_surface_kinds", surfaces),
+        ("global_landscape_surface_kinds", surfaces | {"global_landscape"}),
+        ("wolflike_graph_sources", {"synthetic-corridor", "corridor", "land"}),
+    ):
+        if sim[key] is not None:
+            names = string_list(sim[key])
+            if not names or set(names) - allowed:
+                raise ValueError(f"invalid {key}: {names}")
+    regimes = sim["sample_regimes"]
+    if regimes is not None and not isinstance(regimes, (list, tuple)):
+        raise ValueError("sample_regimes must be a list of mappings")
+    if regimes:
+        if not isinstance(regimes, (list, tuple)) or not all(
+            isinstance(row, Mapping) for row in regimes
+        ):
+            raise ValueError("sample_regimes must be a list of mappings")
+        allowed = {
+            "name",
+            "weight",
+            "sample_design",
+            "design",
+            "min_samples",
+            "max_samples",
+            "min_sample_fraction",
+            "max_sample_fraction",
+            "min_diploids_per_site",
+            "max_diploids_per_site",
+            "diploids_per_node",
+            "diploids_per_site",
+        }
+        for regime in regimes:
+            if set(regime) - allowed:
+                raise ValueError(f"unknown sample-regime fields: {set(regime) - allowed}")
+            validate_sampling_settings({**sim, **regime})
+        _weight_probabilities(
+            np.asarray([_finite_setting(row.get("weight", 1), "regime weight") for row in regimes])
+        )
+
+
+@beartype
+def selected_simulator(sim: Mapping[str, Any], num_nodes: Integral) -> str:
+    """Resolve backend aliases; auto uses msprime only on small graphs."""
     simulator = str(sim.get("simulator", "auto"))
     aliases = {
         "coalescent": "msprime_coalescent",
@@ -258,15 +643,33 @@ def selected_simulator(sim: Mapping[str, Any], num_nodes: int) -> str:
     return simulator
 
 
+@beartype
 def string_list(value: object, *, default: Sequence[str] = ()) -> list[str]:
+    """Accept a config list or names separated by commas or whitespace."""
     if value is None:
         return list(default)
     if isinstance(value, str):
         return [piece for chunk in value.split(",") for piece in chunk.split() if piece]
+    if isinstance(value, np.ndarray):
+        if value.ndim != 1:
+            raise ValueError("names must be a one-dimensional sequence")
+        value = value.tolist()
+    if (
+        not isinstance(value, Sequence)
+        or isinstance(value, bytes)
+        or not all(isinstance(item, str) for item in value)
+    ):
+        raise ValueError("names must be strings, supplied as a sequence or comma-separated text")
     return [str(item) for item in value]
 
 
+@beartype
 def parse_weight_mapping(value: object) -> dict[str, float]:
+    """Read named weights from a mapping or the historical ``name=weight`` form.
+
+    Invalid entries are errors, not an instruction to change the distribution.
+    Callers decide whether absent names receive zero or the default weight one.
+    """
     if value is None:
         return {}
     if isinstance(value, Mapping):
@@ -281,25 +684,31 @@ def parse_weight_mapping(value: object) -> dict[str, float]:
             else:
                 text = str(item)
                 if "=" not in text:
-                    continue
+                    raise ValueError(f"expected name=weight, got {item!r}")
                 key, weight = text.split("=", 1)
             raw_items.append((key, weight))
     weights: dict[str, float] = {}
     for key, weight in raw_items:
-        try:
-            numeric = float(weight)
-        except (TypeError, ValueError):
-            continue
-        if np.isfinite(numeric):
-            weights[str(key)] = numeric
+        if key is None or not str(key).strip() or str(key) in weights:
+            raise ValueError("weight names must be nonempty and unique")
+        numeric = _finite_setting(weight, f"weight for {key!r}")
+        if numeric < 0:
+            raise ValueError(f"weight for {key!r} must be nonnegative")
+        weights[str(key)] = numeric
     return weights
 
 
+@beartype
 def choose_weighted_name(
     rng: np.random.Generator,
     names: Sequence[str],
     weight_config: object,
 ) -> str:
+    """Draw a name, using weight one for unspecified candidates.
+
+    Zero excludes a candidate. Empty weights mean a uniform draw, but explicitly
+    assigning zero to every candidate is an error.
+    """
     candidates = [str(name) for name in names]
     if not candidates:
         raise ValueError("at least one candidate is required")
@@ -307,17 +716,15 @@ def choose_weighted_name(
     if not weights_map:
         return candidates[int(rng.integers(0, len(candidates)))]
     weights = np.asarray([weights_map.get(name, 1.0) for name in candidates], dtype=np.float64)
-    weights = np.where(np.isfinite(weights) & (weights > 0.0), weights, 0.0)
-    if float(weights.sum()) <= 0.0:
-        weights = np.ones(len(candidates), dtype=np.float64)
-    weights /= float(weights.sum())
-    return candidates[int(rng.choice(len(candidates), p=weights))]
+    return candidates[int(rng.choice(len(candidates), p=_weight_probabilities(weights)))]
 
 
 CASE_KINDS = ("grid", "earth_like", "wolflike", "global_landscape", "feems_lattice")
 
 
+@beartype
 def choose_case_kind(rng: np.random.Generator, value: object) -> str:
+    """Draw a graph family; unlike surface weights, absent families are excluded."""
     weights = parse_weight_mapping(value)
     unknown = sorted(set(weights) - set(CASE_KINDS))
     if unknown:
@@ -326,24 +733,33 @@ def choose_case_kind(rng: np.random.Generator, value: object) -> str:
     if not names:
         raise ValueError("simulation.case_weights must assign positive weight to a case kind")
     probabilities = np.asarray([weights[name] for name in names], dtype=np.float64)
-    probabilities /= probabilities.sum()
-    return names[int(rng.choice(len(names), p=probabilities))]
+    return names[int(rng.choice(len(names), p=_weight_probabilities(probabilities)))]
 
 
+@beartype
 def draw_float_range(
     rng: np.random.Generator,
-    default_value: float,
+    default_value: Real,
     min_value: object,
     max_value: object,
 ) -> float:
+    """Draw between the bounds; use the default only when both are absent."""
+    if min_value is None and max_value is None:
+        return _finite_setting(default_value, "default_value")
     if min_value is None or max_value is None:
-        return float(default_value)
-    low = min(float(min_value), float(max_value))
-    high = max(float(min_value), float(max_value))
+        raise ValueError("a floating-point range requires both bounds")
+    values = (_finite_setting(min_value, "min_value"), _finite_setting(max_value, "max_value"))
+    low, high = min(values), max(values)
     return float(rng.uniform(low, high))
 
 
+@beartype
 def draw_num_snps(rng: np.random.Generator, sim: Mapping[str, Any]) -> int:
+    """Draw SNP count from equal-weight log bins, an integer range, or a fixed count.
+
+    A single uniform draw chooses both the log bin and the position within it.
+    Keeping that draw order preserves the seeds of existing corpus examples.
+    """
     bins = sim.get("num_snps_log_bins")
     if bins:
         position = float(rng.random()) * len(bins)
@@ -357,118 +773,78 @@ def draw_num_snps(rng: np.random.Generator, sim: Mapping[str, Any]) -> int:
         log_value = np.log(low) + within_bin * (np.log(high + 1) - np.log(low))
         value = int(np.floor(np.exp(log_value)))
         return int(np.clip(value, low, high))
-    if sim.get("min_num_snps") is not None and sim.get("max_num_snps") is not None:
-        low = min(int(sim["min_num_snps"]), int(sim["max_num_snps"]))
-        high = max(int(sim["min_num_snps"]), int(sim["max_num_snps"]))
+    bounds = _integer_bounds(sim.get("min_num_snps"), sim.get("max_num_snps"), "num_snps")
+    if bounds is not None:
+        low, high = bounds
         return int(rng.integers(low, high + 1))
-    return int(sim["num_snps"])
+    return _integer_setting(sim["num_snps"], "num_snps")
 
 
+@beartype
 def local_simulation_parameters(
     rng: np.random.Generator,
     sim: Mapping[str, Any],
 ) -> dict[str, Any]:
+    """Draw per-example surface scales and sample counts in a fixed RNG order."""
     local = dict(sim)
-    local["log_rate_std"] = draw_float_range(
-        rng,
-        float(sim["log_rate_std"]),
-        sim.get("min_log_rate_std"),
-        sim.get("max_log_rate_std"),
-    )
-    local["q_log_std"] = draw_float_range(
-        rng,
-        float(sim["q_log_std"]),
-        sim.get("min_q_log_std"),
-        sim.get("max_q_log_std"),
-    )
-    local["migration_gp_length_scale"] = draw_float_range(
-        rng,
-        float(sim["migration_gp_length_scale"]),
-        sim.get("min_migration_gp_length_scale"),
-        sim.get("max_migration_gp_length_scale"),
-    )
-    local["q_gp_length_scale"] = draw_float_range(
-        rng,
-        float(sim["q_gp_length_scale"]),
-        sim.get("min_q_gp_length_scale"),
-        sim.get("max_q_gp_length_scale"),
-    )
+    for name in ("log_rate_std", "q_log_std", "migration_gp_length_scale", "q_gp_length_scale"):
+        local[name] = draw_float_range(
+            rng, sim[name], sim.get(f"min_{name}"), sim.get(f"max_{name}")
+        )
     local["diploids_per_node"] = draw_local_diploids_per_node(rng, local)
     return local
 
 
+@beartype
 def draw_weighted_positive_int(
     rng: np.random.Generator,
     *,
     value: object,
     choices: object,
     weights: object,
-    fallback: int,
+    fallback: Integral,
 ) -> int:
+    """Draw a positive integer; an omitted value uses the explicit fallback."""
     if choices is None:
-        try:
-            return max(int(value), 1)
-        except (TypeError, ValueError):
-            return max(int(fallback), 1)
-    candidates = []
-    values = choices if isinstance(choices, (list, tuple)) else [choices]
-    for raw in values:
-        try:
-            parsed = int(raw)
-        except (TypeError, ValueError):
-            continue
-        if parsed > 0:
-            candidates.append(str(parsed))
-    if not candidates:
-        return max(int(fallback), 1)
+        return _integer_setting(fallback if value is None else value, "value")
+    candidates = _positive_choices(choices, integer=True)
     return int(choose_weighted_name(rng, candidates, weights))
 
 
+@beartype
 def draw_weighted_positive_float(
     rng: np.random.Generator,
     *,
     choices: object,
     weights: object,
-    fallback: float,
+    fallback: Real,
 ) -> float:
+    """Draw a positive number; omitted choices use the explicit fallback."""
     if choices is None:
-        return max(float(fallback), 0.0)
-    candidates = []
-    values = choices if isinstance(choices, (list, tuple)) else [choices]
-    for raw in values:
-        try:
-            parsed = float(raw)
-        except (TypeError, ValueError):
-            continue
-        if np.isfinite(parsed) and parsed > 0.0:
-            candidates.append(str(parsed))
-    if not candidates:
-        return max(float(fallback), 0.0)
+        number = _finite_setting(fallback, "fallback")
+        if number <= 0:
+            raise ValueError("fallback must be positive")
+        return number
+    candidates = _positive_choices(choices, integer=False)
     return float(choose_weighted_name(rng, candidates, weights))
 
 
+@beartype
 def draw_local_diploids_per_node(
     rng: np.random.Generator,
     sim: Mapping[str, Any],
 ) -> int:
-    if (
-        sim.get("min_diploids_per_site") is not None
-        and sim.get("max_diploids_per_site") is not None
-    ):
-        low = min(int(sim["min_diploids_per_site"]), int(sim["max_diploids_per_site"]))
-        high = max(int(sim["min_diploids_per_site"]), int(sim["max_diploids_per_site"]))
-        return int(rng.integers(low, high + 1))
-    if (
-        sim.get("min_diploids_per_node") is not None
-        and sim.get("max_diploids_per_node") is not None
-    ):
-        low = min(int(sim["min_diploids_per_node"]), int(sim["max_diploids_per_node"]))
-        high = max(int(sim["min_diploids_per_node"]), int(sim["max_diploids_per_node"]))
-        return int(rng.integers(low, high + 1))
-    return max(int(sim["diploids_per_node"]), 1)
+    """Prefer per-site bounds, then per-node bounds, then the fixed sample count."""
+    for name in ("diploids_per_site", "diploids_per_node"):
+        bounds = _integer_bounds(sim.get(f"min_{name}"), sim.get(f"max_{name}"), name)
+        if bounds is not None:
+            return int(rng.integers(bounds[0], bounds[1] + 1))
+    return _integer_setting(sim["diploids_per_node"], "diploids_per_node")
 
 
+@beartype
 def local_simulation_metadata(local: Mapping[str, Any]) -> dict[str, Any]:
+    """Record the sampled parameters alongside each raw example."""
     return {
         "local_log_rate_std": float(local["log_rate_std"]),
         "local_q_log_std": float(local["q_log_std"]),

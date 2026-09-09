@@ -5,6 +5,7 @@ import pickle
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from dreems import counterfactual
 from dreems.geography import feems_triangular_lattice_graph
@@ -117,3 +118,82 @@ def test_base_selection_balances_available_surface_and_snp_strata(tmp_path: Path
         ]
     }
     assert [item.slot for item in selected] == list(range(8))
+
+
+def test_subset_keeps_all_sample_representations_aligned() -> None:
+    example = dense_example()
+    sample_nodes = example["sample_nodes"]
+    example["genotypes"] = np.arange(sample_nodes.size * 5, dtype=np.int8).reshape(-1, 5)
+    example["sample_coordinates"] = example["active_positions"][sample_nodes]
+    selected = np.asarray([2, 3, 7], dtype=np.int32)
+    subset = counterfactual.subset_example_to_nodes(example, selected)
+    keep = np.flatnonzero(np.isin(sample_nodes, selected))
+    for name in ("sample_nodes", "genotypes", "sample_coordinates"):
+        np.testing.assert_array_equal(subset[name], example[name][keep])
+        assert subset[name].dtype == example[name].dtype
+    np.testing.assert_array_equal(
+        subset["sample_covariance"], example["sample_covariance"][np.ix_(keep, keep)]
+    )
+    assert subset["sample_covariance"].dtype == np.float32
+    assert subset["graph"] is example["graph"]
+    assert subset["edge_log_rates"] is example["edge_log_rates"]
+    assert subset["effective_snps"] == example["effective_snps"]
+    assert len(example["genotypes"]) == sample_nodes.size
+
+
+def test_subset_preserves_covariance_dtype_and_values_without_float_roundtrip() -> None:
+    example = dense_example()
+    size = example["sample_nodes"].size
+    covariance = np.arange(size * size, dtype=np.int64).reshape(size, size) + 2**60
+    example["sample_covariance"] = covariance
+    subset = counterfactual.subset_example_to_nodes(example, np.asarray([0, 1]))
+    np.testing.assert_array_equal(subset["sample_covariance"], covariance[:4, :4])
+
+
+@pytest.mark.parametrize("selected", [[0.5, 1.0], [-1, 1, 2], [0, 1, 16], [0, 2**32 + 1], [[0, 1]]])
+def test_subset_rejects_invalid_selected_nodes(selected) -> None:
+    with pytest.raises(ValueError, match="selected_nodes"):
+        counterfactual.subset_example_to_nodes(dense_example(), np.asarray(selected))
+
+
+@pytest.mark.parametrize("name", ["sample_covariance", "genotypes", "sample_coordinates"])
+def test_subset_checks_sample_axes(name) -> None:
+    example = dense_example()
+    example[name] = np.ones((2, 2))
+    with pytest.raises(ValueError, match=name):
+        counterfactual.subset_example_to_nodes(example, np.asarray([0, 1]))
+
+
+def test_topology_rejects_disconnected_graph_with_some_reachable_samples() -> None:
+    with pytest.raises(ValueError, match="connected"):
+        counterfactual.topology_axis_scores(4, np.asarray([[0, 1], [2, 3]]), np.arange(4), seed=1)
+    # An unsampled disconnected component is invalid too.
+    with pytest.raises(ValueError, match="connected"):
+        counterfactual.topology_axis_scores(
+            4, np.asarray([[0, 1], [2, 3]]), np.asarray([0, 1]), seed=1
+        )
+
+
+@pytest.mark.parametrize(
+    ("edges", "observed", "message"),
+    [
+        ([[0, 1.5], [1, 2]], [0, 2], "edges"),
+        ([[0, -1], [1, 2]], [0, 2], "edges"),
+        ([[0, 1], [1, 3]], [0, 2], "edges"),
+        ([[0, 1], [1, 2]], [0, 2.5], "observed_nodes"),
+        ([[0, 1], [1, 2]], [0, -1], "observed_nodes"),
+        ([[0, 1], [1, 2]], [], "observed_nodes"),
+    ],
+)
+def test_topology_checks_indices_before_conversion(edges, observed, message) -> None:
+    with pytest.raises(ValueError, match=message):
+        counterfactual.topology_axis_scores(3, np.asarray(edges), np.asarray(observed), seed=1)
+
+
+@pytest.mark.parametrize("fraction", [np.nan, np.inf, -0.1, 1.1])
+def test_base_selection_rejects_invalid_density_metadata(tmp_path, fraction) -> None:
+    path = tmp_path / "pack.metadata.json"
+    path.write_text(json.dumps({"rows": [{"sampled_node_fraction": fraction}]}))
+    path.with_suffix("").with_suffix(".pkl").touch()
+    with pytest.raises(ValueError, match="sampled_node_fraction"):
+        counterfactual.select_base_examples([path], count=1, seed=1)

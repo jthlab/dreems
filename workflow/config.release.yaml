@@ -1,0 +1,17 @@
+# Scientific defaults come from config.snp_range_experiment.yaml and
+# config.full_retrain.yaml. Their dependencies are built in one DAG.
+# On Great Lakes, set outdir to scratch and publish_dir to Turbo.
+outdir: results/release
+publish_dir: null
+
+# The core uses a minority of masked validation views. The gate uses all of them.
+core_validation_mask_packs: 2
+
+# Optional overrides to config.sampling_robustness.yaml go here.
+sampling_views: {}
+
+# Set this mapping to evaluate the newly trained gate and make a verified
+# candidate. `validated_release` then runs both H2Hs, calibration, and promotion.
+# Broad and hard follow the ordinary h2h.Snakefile configuration. Each can name
+# a configfile plus overrides, including paths to saved FEEMS archives.
+release_validation: null

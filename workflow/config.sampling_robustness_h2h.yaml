@@ -12,6 +12,8 @@ example_ids: null
 
 feems_archive: /home/jonth/turbo/dreems/released_graph_balanced_loo_h2h_20260822/feems_results.tar.gz
 feems_archive_checksum: /home/jonth/turbo/dreems/released_graph_balanced_loo_h2h_20260822/feems_results.tar.gz.sha256
+# Explicitly reproduce pre-hash results; genotype identity remains unverified.
+allow_legacy_feems_archive: true
 
 # FEEMS results are extracted from the verified archive; these resources do
 # not trigger CV or refitting.

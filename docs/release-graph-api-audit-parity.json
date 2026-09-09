@@ -1,0 +1,29 @@
+{
+  "exact_comparisons": {
+    "arrays": 4259,
+    "scalars": 15292,
+    "seeded_calls": 1656
+  },
+  "public_signatures_preserved": {
+    "geography": 34,
+    "motifs": 22,
+    "datasets": 5,
+    "inference": 11
+  },
+  "dataclass_fields_preserved": [
+    "inference.DREEMSInput",
+    "inference.NodeCovarianceInput",
+    "inference.InferenceExample",
+    "inference._RefinementObservation",
+    "inference.DREEMSResult",
+    "inference.DREEMSPredictor"
+  ],
+  "checkpoint_sha256": "454cb50f4c7ef1213e001d700d1bf9e9f6a353b5c8be5619aae06e9d7a22cc15",
+  "seconds": 4.403127212077379,
+  "scope": "Valid graph/sampling/surface outputs and subsequent RNG states; no new SNP simulation or model fit.",
+  "intentional_changes": [
+    "Reject invalid sampler inputs and hex spacing",
+    "Keep one node, not every node, for an edgeless largest component",
+    "Propagate unexpected errors from land-path sampling"
+  ]
+}
