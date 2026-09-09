@@ -39,6 +39,17 @@ def node_input() -> dict[str, Any]:
         "genotypes",
         "refinement",
         "calibration",
+        "features",
+        "model",
+        "train",
+        "pipeline",
+        "checkpoints",
+        "losses",
+        "feems",
+        "validation",
+        "metrics",
+        "cli",
+        "workflow_io",
     ],
 )
 def test_array_annotations_describe_dimensions(module: str) -> None:
@@ -51,11 +62,17 @@ def test_array_annotations_describe_dimensions(module: str) -> None:
             return
         if isinstance(annotation, ast.Subscript) and isinstance(annotation.slice, ast.Tuple):
             arguments = annotation.slice.elts
-            if len(arguments) == 2 and ast.unparse(arguments[0]) == "np.ndarray":
+            if len(arguments) == 2 and ast.unparse(arguments[0]) in {
+                "np.ndarray",
+                "jax.Array",
+                "Array",
+            }:
                 assert isinstance(arguments[1], ast.Constant), ast.unparse(annotation)
                 assert isinstance(arguments[1].value, str), ast.unparse(annotation)
                 return
-        assert ast.unparse(annotation) != "np.ndarray", f"{module}:{annotation.lineno}"
+        assert ast.unparse(annotation) not in {"np.ndarray", "jax.Array", "Array"}, (
+            f"{module}:{annotation.lineno}"
+        )
         for child in ast.iter_child_nodes(annotation):
             check(child)
 

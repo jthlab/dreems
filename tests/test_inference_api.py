@@ -78,7 +78,6 @@ def write_test_checkpoint(path, *, spatial_encoding: str = "embedded") -> None:
         normalization=stats,
         config=config,
         train_losses=[],
-        train_arrays=arrays,
     )
 
 

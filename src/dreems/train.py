@@ -1,5 +1,7 @@
 """Training loop for the production DREEMS model."""
 
+# ruff: noqa: F722, F821
+
 from __future__ import annotations
 
 import io
@@ -15,10 +17,10 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 from beartype import beartype
+from jaxtyping import Array, Bool, Float
 
 from dreems import checkpoints, features, losses
 from dreems import model as dreems_model
-from dreems.checkpoints import canonical_feature_metadata as canonical_feature_metadata
 
 CheckpointCallback: TypeAlias = Callable[
     [int, dreems_model.DREEMS, list[float], dict[str, object]], None
@@ -147,7 +149,7 @@ class DREEMSLossConfig:
 class DREEMSOptimizerConfig:
     """Step budget, Adam settings, and validation-based checkpoint selection.
 
-    Patience counts validation checks, not steps. All supported stopping metrics
+    Patience counts validation checks. All supported stopping metrics
     are minimized. ``restore_best_validation`` controls which weights are
     returned; the history still records every logged step. Nonfinite losses,
     updates, or validation metrics abort the run instead of using patience.
@@ -346,14 +348,14 @@ def training_config_metadata(config: DREEMSTrainConfig) -> dict[str, Any]:
 
 
 @beartype
-def model_metadata(config: DREEMSTrainConfig, arrays: dict[str, np.ndarray]) -> dict[str, Any]:
+def model_metadata(config: DREEMSTrainConfig, params: dreems_model.DREEMS) -> dict[str, Any]:
     """Create inference metadata; optimizer and loss settings are stored separately."""
     config.validate()
     return {
         "schema_version": 2,
         "model_name": "dreems",
-        "node_dim": arrays["node_x"].shape[-1],
-        "edge_dim": arrays["edge_x"].shape[-1],
+        "node_dim": params.input.in_features,
+        "edge_dim": params.edge_feature_hidden.in_features,
         "architecture": architecture_metadata(config.architecture),
         "features": feature_metadata(config.features),
         "edge_conditioner": edge_conditioner_metadata(config.edge_conditioner),
@@ -394,10 +396,10 @@ def core_architecture_metadata(model: Mapping[str, Any]) -> dict[str, object]:
 
 @beartype
 def append_training_edge_conditioner_features(
-    prepared: list[dict[str, np.ndarray]],
+    prepared: list[features.PreparedExample],
     examples: list[dict[str, object]],
     config: DREEMSTrainConfig,
-) -> list[dict[str, np.ndarray]]:
+) -> list[features.PreparedExample]:
     """Append the linearized-resistance edge conditioner to prepared examples."""
 
     if not prepared:
@@ -428,7 +430,6 @@ def save_checkpoint(
     normalization: dict[str, Any],
     config: DREEMSTrainConfig,
     train_losses: list[float],
-    train_arrays: dict[str, np.ndarray],
     training_run: Mapping[str, Any] | None = None,
     edge_sd_calibration: Mapping[str, Any] | None = None,
 ) -> None:
@@ -438,7 +439,7 @@ def save_checkpoint(
         "format": "dreems-equinox-v1",
         "normalization": normalization,
         "train_losses": train_losses,
-        "model": model_metadata(config, train_arrays),
+        "model": model_metadata(config, params),
         "training_config": training_config_metadata(config),
     }
     if training_run is not None:
@@ -454,13 +455,13 @@ def save_checkpoint(
 
 @beartype
 def batch_stream(
-    arrays: dict[str, np.ndarray],
+    arrays: dreems_model.DREEMSTrainArrays,
     *,
     batch_size: int,
     steps: int,
     seed: int,
-) -> Iterable[dict[str, np.ndarray]]:
-    """Sample batches with replacement; a training step is not a corpus pass."""
+) -> Iterable[dreems_model.DREEMSTrainArrays]:
+    """Draw a random batch with replacement at each training step."""
 
     rng = np.random.default_rng(seed)
     size = arrays["node_x"].shape[0]
@@ -472,15 +473,15 @@ def batch_stream(
 @beartype
 def loss_terms(
     params: dreems_model.DREEMS,
-    batch: dict[str, jax.Array],
+    batch: dreems_model.DREEMSTrainBatch,
     config: DREEMSTrainConfig,
-) -> dict[str, jax.Array]:
+) -> dict[str, Float[Array, ""]]:
     """Compute supervised losses and gate diagnostics for a padded batch.
 
-    ``correlation`` is a loss (approximately ``1 - r`` on active graphs), not
-    Pearson r. The ``loss`` entry combines the configured terms; gate means are
-    diagnostics only. Targets are normalized log migration and log q, not node
-    resistance or observed covariance.
+    Targets are normalized log migration and log q. The ``loss`` entry
+    combines the configured terms. ``correlation`` measures approximately
+    ``1 - r`` on active graphs; lower is better. Gate means describe how much
+    each gate contributes to the prediction.
     """
 
     pred, edge_logvar, context_pred, q_pred, q_logvar, neural_weight, surface_weight = (
@@ -587,7 +588,7 @@ def loss_terms(
 
 
 @beartype
-def scalar_terms(terms: dict[str, jax.Array]) -> dict[str, float]:
+def scalar_terms(terms: dict[str, Float[Array, ""]]) -> dict[str, float]:
     """Transfer scalar metrics to the host for logging."""
     return {key: float(jax.device_get(value)) for key, value in terms.items()}
 
@@ -595,11 +596,13 @@ def scalar_terms(terms: dict[str, jax.Array]) -> dict[str, float]:
 @beartype
 def validation_metrics(
     params: dreems_model.DREEMS,
-    arrays: dict[str, np.ndarray],
+    arrays: dreems_model.DREEMSTrainArrays,
     config: DREEMSTrainConfig,
     *,
     batch_size: int | None = None,
-    terms_fn: Callable[[dreems_model.DREEMS, dict[str, jax.Array]], dict[str, jax.Array]]
+    terms_fn: Callable[
+        [dreems_model.DREEMS, dreems_model.DREEMSTrainBatch], dict[str, Float[Array, ""]]
+    ]
     | None = None,
 ) -> dict[str, float]:
     """Average per-graph losses across all validation examples, including a short last batch."""
@@ -638,9 +641,9 @@ def train_from_batches(
     config: DREEMSTrainConfig,
     node_dim: int,
     edge_dim: int,
-    batches: Iterable[dict[str, np.ndarray]],
+    batches: Iterable[dreems_model.DREEMSTrainArrays],
     init_params: dreems_model.DREEMS | None = None,
-    validation_arrays: dict[str, np.ndarray] | None = None,
+    validation_arrays: dreems_model.DREEMSTrainArrays | None = None,
     checkpoint_callback: CheckpointCallback | None = None,
 ) -> TrainingRunResult:
     """Train on a supplied batch stream, optionally selecting weights on validation.
@@ -722,14 +725,14 @@ def train_from_batches(
     def train_step(
         current_params: dreems_model.DREEMS,
         current_state: optax.OptState,
-        batch: dict[str, jax.Array],
-    ) -> tuple[dreems_model.DREEMS, optax.OptState, jax.Array, jax.Array]:
+        batch: dreems_model.DREEMSTrainBatch,
+    ) -> tuple[dreems_model.DREEMS, optax.OptState, Float[Array, ""], Bool[Array, ""]]:
         current_trainable = trainable_parameters(current_params)
 
         @eqx.filter_value_and_grad
         def objective(
             candidate: dreems_model.DREEMS | tuple[eqx.nn.Linear, eqx.nn.Linear],
-        ) -> jax.Array:
+        ) -> Float[Array, ""]:
             candidate_model = eqx.tree_at(trainable_parameters, current_params, candidate)
             return loss_terms(candidate_model, batch, config)["loss"]
 
@@ -750,8 +753,8 @@ def train_from_batches(
     @eqx.filter_jit
     def validation_step(
         current_params: dreems_model.DREEMS,
-        batch: dict[str, jax.Array],
-    ) -> dict[str, jax.Array]:
+        batch: dreems_model.DREEMSTrainBatch,
+    ) -> dict[str, Float[Array, ""]]:
         return loss_terms(current_params, batch, config)
 
     losses_out: list[float] = []
@@ -867,11 +870,11 @@ def train_from_batches(
 
 @beartype
 def train_from_arrays(
-    arrays: dict[str, np.ndarray],
+    arrays: dreems_model.DREEMSTrainArrays,
     *,
     config: DREEMSTrainConfig,
     init_params: dreems_model.DREEMS | None = None,
-    validation_arrays: dict[str, np.ndarray] | None = None,
+    validation_arrays: dreems_model.DREEMSTrainArrays | None = None,
     checkpoint_callback: CheckpointCallback | None = None,
 ) -> TrainingRunResult:
     """Train from in-memory arrays using reproducible sampling with replacement."""
@@ -898,7 +901,9 @@ def prepare_training_arrays(
     validation_examples: list[dict[str, object]] | None,
     *,
     config: DREEMSTrainConfig,
-) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray] | None, dict[str, object]]:
+) -> tuple[
+    dreems_model.DREEMSTrainArrays, dreems_model.DREEMSTrainArrays | None, dict[str, object]
+]:
     """Prepare both splits alike, fitting normalization only on the training split."""
     config.validate()
     prepared = []

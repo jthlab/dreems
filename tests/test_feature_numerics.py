@@ -4,8 +4,23 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from beartype import beartype
+from jaxtyping import jaxtyped
 
 from dreems import features, linearized
+
+
+@pytest.mark.parametrize(
+    "transform", [features.centered, features.scaled_log_support, features.absolute_log_support]
+)
+def test_array_helpers_keep_shape_bindings_local(transform) -> None:
+    @jaxtyped(typechecker=beartype)
+    def transform_edges_and_nodes():
+        return transform(np.arange(6.0)), transform(np.arange(4.0))
+
+    edges, nodes = transform_edges_and_nodes()
+    assert edges.shape == (6,)
+    assert nodes.shape == (4,)
 
 
 @pytest.fixture

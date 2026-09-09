@@ -6,6 +6,8 @@ order. Only LOO folds run independently; the penalty traversal and warm starts
 inside each fold follow the pinned FEEMS implementation.
 """
 
+# ruff: noqa: F722, F821, UP037
+
 from __future__ import annotations
 
 import math
@@ -15,11 +17,11 @@ from dataclasses import dataclass, replace
 from numbers import Integral
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Literal
+from typing import Any, Literal, TypeAlias, TypedDict
 
 import numpy as np
 from beartype import beartype
-from jaxtyping import Float, jaxtyped
+from jaxtyping import Bool, Float, Int, Real, Shaped, jaxtyped
 
 from dreems.validation import (
     _integer_array,
@@ -31,6 +33,15 @@ from dreems.workflow_io import _atomic_output
 
 FEEMSMode = Literal["free_q", "fixed_q", "scalar_q"]
 FEEMSCVMode = Literal["node_cv", "replicate_holdout"]
+
+JointCVErrors: TypeAlias = Float[np.ndarray, "lambda_q lambda_w"]
+
+
+class FEEMSGraph(TypedDict):
+    """Graph field read by the adapter; node positions are supplied separately."""
+
+    edges: Shaped[np.ndarray, "edges 2"]
+
 
 FEEMS_RECOMMENDED_LAMBDAS = tuple(
     float(x) for x in np.geomspace(1e-3, 1e2, 10, endpoint=True)[::-1]
@@ -45,7 +56,7 @@ FEEMS_RECOMMENDED_LOO_PROTOCOL = "v2_joint_lambda_lambda_q_leave_one_observed_de
 FEEMS_DEFAULT_FINAL_FACTR = 1e7
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def _import_feems() -> SimpleNamespace:
     """Load the optional solver only when a FEEMS operation is requested."""
     try:
@@ -73,7 +84,7 @@ class FEEMSConfig:
     Positive fold counts must be at least two. Penalty order is preserved
     because it determines warm starts. Bounds are on positive conductances;
     the adapter takes logs only for the low-level fit call. `cv_jobs` counts
-    independent fold processes, not BLAS threads.
+    independent fold processes.
     """
 
     mode: FEEMSMode = "free_q"
@@ -88,7 +99,7 @@ class FEEMSConfig:
     random_state: int = 500
     cv_jobs: int = 1
 
-    @beartype
+    @jaxtyped(typechecker=beartype)
     def __post_init__(self) -> None:
         """Reject invalid settings without changing field values or defaults."""
         if self.mode not in ("free_q", "fixed_q", "scalar_q"):
@@ -115,19 +126,19 @@ class FEEMSConfig:
         _penalty_grid(np.asarray(self.lambdas_q), name="lambdas_q")
 
     @property
-    @beartype
+    @jaxtyped(typechecker=beartype)
     def sklearn_cv_folds(self) -> int | None:
         """Translate the retained nonpositive LOO convention to FEEMS' None."""
         return None if self.cv_folds <= 0 else int(self.cv_folds)
 
     @property
-    @beartype
+    @jaxtyped(typechecker=beartype)
     def parallel_cv_jobs(self) -> int:
         """Return the validated number of fold processes."""
         return int(self.cv_jobs)
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def recommended_loo_config(*, cv_jobs: int = 1) -> FEEMSConfig:
     """Return the FEEMS v2 cross-validation recipe used in paper comparisons.
 
@@ -140,7 +151,7 @@ def recommended_loo_config(*, cv_jobs: int = 1) -> FEEMSConfig:
     return FEEMSConfig(cv_jobs=cv_jobs)
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def require_recommended_loo(config: FEEMSConfig) -> None:
     """Reject changes to the documented FEEMS comparison protocol."""
 
@@ -156,7 +167,7 @@ def require_recommended_loo(config: FEEMSConfig) -> None:
 class FEEMSResult:
     """Uncentered edge log-conductances and the recorded selection protocol."""
 
-    edge_log_rates: np.ndarray
+    edge_log_rates: Float[np.ndarray, "edges"]
     best_lambda: float
     best_lambda_q: float
     cv_folds: int
@@ -166,13 +177,13 @@ class FEEMSResult:
     n_snps_after_filter: int
     n_observed_nodes: int
     train_loss: float
-    mean_cv_error: np.ndarray
+    mean_cv_error: JointCVErrors | Float[np.ndarray, "lambda_w"]
     scalar_s2: float | None = None
     validation_n_snps: int | None = None
 
-    @beartype
+    @jaxtyped(typechecker=beartype)
     def info_dict(self) -> dict[str, object]:
-        """Export the existing report schema, including optional holdout fields."""
+        """Export fit statistics and the selection protocol."""
         out: dict[str, object] = {
             "feems_protocol": self.protocol,
             "best_lambda": self.best_lambda,
@@ -196,12 +207,12 @@ class FEEMSResult:
 class _FEEMSInputs:
     """Keep caller edge order and validate assignments before calling FEEMS."""
 
-    genotypes: np.ndarray
-    sample_nodes: np.ndarray
-    graph: dict[str, np.ndarray]
-    active_positions: np.ndarray
+    genotypes: Shaped[np.ndarray, "samples snps"]
+    sample_nodes: Shaped[np.ndarray, "samples"]
+    graph: FEEMSGraph
+    active_positions: Shaped[np.ndarray, "nodes 2"]
 
-    @beartype
+    @jaxtyped(typechecker=beartype)
     def __post_init__(self) -> None:
         """Validate before any lossy coordinate or node-index conversion."""
         positions = _real_array(self.active_positions, name="active_positions")
@@ -211,19 +222,19 @@ class _FEEMSInputs:
             sample_nodes=np.asarray(self.sample_nodes),
             genotypes=np.asarray(self.genotypes),
         )
-        # FEEMS assigns samples by nearest coordinates, not by our node IDs.
+        # FEEMS assigns each sample to the nearest node coordinate.
         if np.unique(positions, axis=0).shape[0] != positions.shape[0]:
             raise ValueError("FEEMS node coordinates must be unique to preserve sample assignments")
 
     @property
-    @beartype
-    def edges(self) -> np.ndarray:
+    @jaxtyped(typechecker=beartype)
+    def edges(self) -> Int[np.ndarray, "edges 2"]:
         """Read zero-based endpoints without truncating fractional IDs."""
         return _integer_array(np.asarray(self.graph["edges"]), name="edges", dtype=np.int32)
 
 
-@beartype
-def polymorphic_snp_mask(genotypes: np.ndarray) -> np.ndarray:
+@jaxtyped(typechecker=beartype)
+def polymorphic_snp_mask(genotypes: Shaped[np.ndarray, "samples snps"]) -> Bool[np.ndarray, "snps"]:
     """Select segregating SNPs from validated, complete diploid dosages."""
     genotypes = np.asarray(genotypes)
     validate_diploid_dosages(genotypes)
@@ -231,13 +242,13 @@ def polymorphic_snp_mask(genotypes: np.ndarray) -> np.ndarray:
     return (allele_sum > 0.0) & (allele_sum < 2.0 * genotypes.shape[0])
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def make_spatial_graph(
     *,
-    genotypes: np.ndarray,
-    sample_nodes: np.ndarray,
-    graph: dict[str, np.ndarray],
-    active_positions: np.ndarray,
+    genotypes: Shaped[np.ndarray, "samples snps"],
+    sample_nodes: Shaped[np.ndarray, "sample_assignments"],
+    graph: FEEMSGraph,
+    active_positions: Shaped[np.ndarray, "nodes 2"],
 ) -> Any:
     """Construct FEEMS' graph, dropping monomorphic SNPs and scaling by heterozygosity.
 
@@ -250,7 +261,7 @@ def make_spatial_graph(
     )
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def _make_spatial_graph(inputs: _FEEMSInputs, api: Any) -> Any:
     """Translate validated zero-based inputs to FEEMS' graph constructor."""
     genotypes = np.asarray(inputs.genotypes)
@@ -268,7 +279,7 @@ def _make_spatial_graph(inputs: _FEEMSInputs, api: Any) -> Any:
     )
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def _node_cv_folds(sp_graph: Any, config: FEEMSConfig) -> int:
     """Resolve LOO and reject fold counts that exceed observed demes."""
     count = sp_graph.n_observed_nodes if config.sklearn_cv_folds is None else config.cv_folds
@@ -278,7 +289,9 @@ def _node_cv_folds(sp_graph: Any, config: FEEMSConfig) -> int:
 
 
 @jaxtyped(typechecker=beartype)
-def _penalty_grid(values: np.ndarray, *, name: str) -> Float[np.ndarray, " penalties"]:  # noqa: F722
+def _penalty_grid(
+    values: Shaped[np.ndarray, "*input_axes"], *, name: str
+) -> Float[np.ndarray, "penalties"]:
     """Keep the caller's penalty order, requiring a nonempty nonnegative grid."""
     values = _real_array(values, name=name)
     if values.ndim != 1 or values.size == 0 or np.any(values < 0):
@@ -286,7 +299,7 @@ def _penalty_grid(values: np.ndarray, *, name: str) -> Float[np.ndarray, " penal
     return values
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def _fit_spatial_graph(
     sp_graph: Any,
     config: FEEMSConfig,
@@ -314,16 +327,23 @@ def _fit_spatial_graph(
     sp_graph.fit(**fit_kwargs)
 
 
-_joint_cv_worker_context: tuple[_FEEMSInputs, np.ndarray, np.ndarray, FEEMSConfig, float] | None = (
-    None
-)
+_joint_cv_worker_context: (
+    tuple[
+        _FEEMSInputs,
+        Float[np.ndarray, "lambda_w"],
+        Float[np.ndarray, "lambda_q"],
+        FEEMSConfig,
+        float,
+    ]
+    | None
+) = None
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def _initialize_joint_cv_fold_worker(
     inputs: _FEEMSInputs,
-    lamb_grid: np.ndarray,
-    lamb_q_grid: np.ndarray,
+    lamb_grid: Shaped[np.ndarray, "lambda_w"],
+    lamb_q_grid: Shaped[np.ndarray, "lambda_q"],
     config: FEEMSConfig,
     alpha_fact: float,
 ) -> None:
@@ -332,18 +352,18 @@ def _initialize_joint_cv_fold_worker(
     _joint_cv_worker_context = (inputs, lamb_grid, lamb_q_grid, config, alpha_fact)
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def _fit_joint_cv_fold_on_graph(
     *,
     fold: int,
-    is_train: np.ndarray,
+    is_train: Bool[np.ndarray, "observed"],
     api: Any,
     sp_graph: Any,
-    lamb_grid: np.ndarray,
-    lamb_q_grid: np.ndarray,
+    lamb_grid: Shaped[np.ndarray, "lambda_w"],
+    lamb_q_grid: Shaped[np.ndarray, "lambda_q"],
     config: FEEMSConfig,
     alpha_fact: float,
-) -> tuple[int, np.ndarray]:
+) -> tuple[int, JointCVErrors]:
     """Evaluate one fold with FEEMS' exact nested penalty and warm-start order."""
     sp_graph.fit_null_model(verbose=False)
     w0 = sp_graph.w0
@@ -388,17 +408,17 @@ def _fit_joint_cv_fold_on_graph(
     return int(fold), errors
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def _fit_joint_cv_fold(
     *,
     fold: int,
-    is_train: np.ndarray,
+    is_train: Bool[np.ndarray, "observed"],
     inputs: _FEEMSInputs,
-    lamb_grid: np.ndarray,
-    lamb_q_grid: np.ndarray,
+    lamb_grid: Shaped[np.ndarray, "lambda_w"],
+    lamb_q_grid: Shaped[np.ndarray, "lambda_q"],
     config: FEEMSConfig,
     alpha_fact: float,
-) -> tuple[int, np.ndarray]:
+) -> tuple[int, JointCVErrors]:
     """Construct a fresh graph so a fold cannot inherit another fold's fit."""
     api = _import_feems()
     sp_graph = _make_spatial_graph(inputs, api)
@@ -414,15 +434,15 @@ def _fit_joint_cv_fold(
     )
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def recommended_loo_fold_errors(
     *,
-    genotypes: np.ndarray,
-    sample_nodes: np.ndarray,
-    graph: dict[str, np.ndarray],
-    active_positions: np.ndarray,
+    genotypes: Shaped[np.ndarray, "samples snps"],
+    sample_nodes: Shaped[np.ndarray, "sample_assignments"],
+    graph: FEEMSGraph,
+    active_positions: Shaped[np.ndarray, "nodes 2"],
     fold: int,
-) -> np.ndarray:
+) -> JointCVErrors:
     """Fit one observed-deme fold from the documented FEEMS v2 LOO grid."""
 
     config = recommended_loo_config()
@@ -448,10 +468,10 @@ def recommended_loo_fold_errors(
     return errors
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def _fit_joint_cv_fold_worker(
-    payload: tuple[int, np.ndarray],
-) -> tuple[int, np.ndarray]:
+    payload: tuple[int, Bool[np.ndarray, "observed"]],
+) -> tuple[int, JointCVErrors]:
     """Read process-local inputs and fit the submitted held-out mask."""
     if _joint_cv_worker_context is None:
         raise RuntimeError("FEEMS CV worker was not initialized")
@@ -468,20 +488,20 @@ def _fit_joint_cv_fold_worker(
     )
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def _cv_fold_checkpoint_path(checkpoint_dir: Path, fold: int) -> Path:
     """Use the established fold filenames for resumable LOO runs."""
     return checkpoint_dir / f"fold_{fold:04d}.npz"
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def _load_cv_fold_checkpoint(
     path: Path,
     *,
     fold: int,
     checkpoint_key: str,
     expected_shape: tuple[int, int],
-) -> np.ndarray | None:
+) -> JointCVErrors | None:
     """Reuse matching fold errors; malformed or stale files are cache misses."""
     if not path.is_file():
         return None
@@ -499,13 +519,13 @@ def _load_cv_fold_checkpoint(
     return errors.astype(np.float64, copy=False)
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def write_cv_fold_checkpoint(
     path: Path,
     *,
     fold: int,
     checkpoint_key: str,
-    errors: np.ndarray,
+    errors: Shaped[np.ndarray, "*input_axes"],
 ) -> None:
     """Atomically store one FEEMS CV fold for reuse or downstream aggregation."""
 
@@ -530,30 +550,30 @@ def write_cv_fold_checkpoint(
         )
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def _report_cv_progress(*, completed: int, total: int, reused: int) -> None:
-    """Report fold completion without implying that missing fits succeeded."""
+    """Report completed and reused folds."""
     print(
         f"FEEMS LOO folds complete: {completed}/{total} ({reused} reused)",
         flush=True,
     )
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def run_cv_joint_fold_parallel(
     *,
-    genotypes: np.ndarray,
-    sample_nodes: np.ndarray,
-    graph: dict[str, np.ndarray],
-    active_positions: np.ndarray,
+    genotypes: Shaped[np.ndarray, "samples snps"],
+    sample_nodes: Shaped[np.ndarray, "sample_assignments"],
+    graph: FEEMSGraph,
+    active_positions: Shaped[np.ndarray, "nodes 2"],
     sp_graph: Any,
-    lamb_grid: np.ndarray,
-    lamb_q_grid: np.ndarray,
+    lamb_grid: Shaped[np.ndarray, "lambda_w"],
+    lamb_q_grid: Shaped[np.ndarray, "lambda_q"],
     config: FEEMSConfig,
     alpha_fact: float = 1.0,
     checkpoint_dir: Path | None = None,
     checkpoint_key: str | None = None,
-) -> np.ndarray:
+) -> Float[np.ndarray, "folds lambda_q lambda_w"]:
     """Run FEEMS joint CV with independent folds distributed over processes.
 
     This mirrors ``feems.cross_validation.run_cv_joint`` except for the outer
@@ -576,7 +596,7 @@ def run_cv_joint_fold_parallel(
     payloads = [(fold, is_train[:, fold]) for fold in range(n_folds)]
     fold_shape = (lamb_q_grid.shape[0], lamb_grid.shape[0])
     cv_errors = np.full((n_folds, *fold_shape), np.nan, dtype=np.float64)
-    pending_payloads: list[tuple[int, np.ndarray]] = []
+    pending_payloads: list[tuple[int, Bool[np.ndarray, "observed"]]] = []
     reused = 0
     for payload in payloads:
         fold = int(payload[0])
@@ -598,7 +618,7 @@ def run_cv_joint_fold_parallel(
     report_every = max(1, n_folds // 20)
     _report_cv_progress(completed=completed, total=n_folds, reused=reused)
 
-    def record(result: tuple[int, np.ndarray]) -> None:
+    def record(result: tuple[int, JointCVErrors]) -> None:
         nonlocal completed
         fold, errors = result
         errors = np.asarray(errors, dtype=np.float64)
@@ -645,8 +665,10 @@ def run_cv_joint_fold_parallel(
     return cv_errors
 
 
-@beartype
-def feems_edge_log_rates(sp_graph: Any, edges: np.ndarray) -> np.ndarray:
+@jaxtyped(typechecker=beartype)
+def feems_edge_log_rates(
+    sp_graph: Any, edges: Shaped[np.ndarray, "edges 2"]
+) -> Float[np.ndarray, "edges"]:
     """Map FEEMS' internal edge order back to the caller's undirected edges."""
     edges = _integer_array(edges, name="edges", dtype=np.int32)
     if edges.ndim != 2 or edges.shape[1] != 2:
@@ -666,8 +688,10 @@ def feems_edge_log_rates(sp_graph: Any, edges: np.ndarray) -> np.ndarray:
     return np.asarray(out, dtype=np.float64)
 
 
-@beartype
-def _n_dim_s2_init(sp_graph: Any, s2: np.ndarray | float) -> np.ndarray:
+@jaxtyped(typechecker=beartype)
+def _n_dim_s2_init(
+    sp_graph: Any, s2: Real[np.ndarray, "*variance_axes"] | float
+) -> Float[np.ndarray, "nodes"]:
     """Expand a null-model scalar variance to FEEMS' node-variance vector."""
     values = np.asarray(s2, dtype=np.float64).reshape(-1)
     if values.size == 1:
@@ -675,17 +699,17 @@ def _n_dim_s2_init(sp_graph: Any, s2: np.ndarray | float) -> np.ndarray:
     return values.astype(np.float64, copy=True)
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def _result(
     *,
     config: FEEMSConfig,
     sp_graph: Any,
-    edges: np.ndarray,
+    edges: Shaped[np.ndarray, "edges 2"],
     best_lambda: float,
     best_lambda_q: float,
     optimize_q: str,
     protocol: str,
-    mean_cv: np.ndarray,
+    mean_cv: JointCVErrors | Float[np.ndarray, "lambda_w"],
     scalar_s2: float | None = None,
     validation_n_snps: int | None = None,
 ) -> FEEMSResult:
@@ -717,7 +741,7 @@ def _result(
     )
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def _official_cv_options(config: FEEMSConfig) -> dict[str, Any]:
     """Use the same keyword arguments for official fixed- and free-q CV."""
     return {
@@ -731,13 +755,13 @@ def _official_cv_options(config: FEEMSConfig) -> dict[str, Any]:
     }
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def _replicate_holdout_validation_nll(
     *,
     api: Any,
     inputs: _FEEMSInputs,
-    weights: np.ndarray,
-    s2: np.ndarray | float,
+    weights: Real[np.ndarray, "edges"],
+    s2: Real[np.ndarray, "*variance_axes"] | float,
 ) -> tuple[float, int]:
     """Score fitted parameters on an independent genotype replicate, per SNP."""
     sp_graph = _make_spatial_graph(inputs, api)
@@ -749,7 +773,7 @@ def _replicate_holdout_validation_nll(
     return float(score), int(sp_graph.n_snps)
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def _fit_node_cv(
     inputs: _FEEMSInputs,
     config: FEEMSConfig,
@@ -875,10 +899,10 @@ def _fit_node_cv(
     )
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def _fit_replicate_holdout(
     inputs: _FEEMSInputs,
-    validation_genotypes: np.ndarray | None,
+    validation_genotypes: Shaped[np.ndarray, "samples validation_snps"] | None,
     config: FEEMSConfig,
 ) -> FEEMSResult:
     """Select penalties on independent SNPs with the same sample-node order."""
@@ -969,15 +993,15 @@ def _fit_replicate_holdout(
     )
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def fit_feems(
     *,
-    genotypes: np.ndarray,
-    sample_nodes: np.ndarray,
-    graph: dict[str, np.ndarray],
-    active_positions: np.ndarray,
+    genotypes: Shaped[np.ndarray, "samples snps"],
+    sample_nodes: Shaped[np.ndarray, "sample_assignments"],
+    graph: FEEMSGraph,
+    active_positions: Shaped[np.ndarray, "nodes 2"],
     config: FEEMSConfig | None = None,
-    validation_genotypes: np.ndarray | None = None,
+    validation_genotypes: Shaped[np.ndarray, "validation_samples validation_snps"] | None = None,
 ) -> FEEMSResult:
     """Fit the requested q model, using deme CV or an independent SNP replicate."""
     config = FEEMSConfig() if config is None else config
@@ -991,28 +1015,13 @@ def fit_feems(
     return _fit_node_cv(inputs, config, config.mode)
 
 
-@beartype
-def fit_feems_free_q(
-    *,
-    genotypes: np.ndarray,
-    sample_nodes: np.ndarray,
-    graph: dict[str, np.ndarray],
-    active_positions: np.ndarray,
-    config: FEEMSConfig | None = None,
-) -> FEEMSResult:
-    """Tune both penalties by deme CV, fitting a separate variance at each node."""
-    config = FEEMSConfig(mode="free_q") if config is None else config
-    inputs = _FEEMSInputs(genotypes, sample_nodes, graph, active_positions)
-    return _fit_node_cv(inputs, config, "free_q")
-
-
-@beartype
+@jaxtyped(typechecker=beartype)
 def fit_feems_recommended_loo(
     *,
-    genotypes: np.ndarray,
-    sample_nodes: np.ndarray,
-    graph: dict[str, np.ndarray],
-    active_positions: np.ndarray,
+    genotypes: Shaped[np.ndarray, "samples snps"],
+    sample_nodes: Shaped[np.ndarray, "sample_assignments"],
+    graph: FEEMSGraph,
+    active_positions: Shaped[np.ndarray, "nodes 2"],
     cv_jobs: int = 1,
     cv_checkpoint_dir: Path | None = None,
     cv_checkpoint_key: str | None = None,
@@ -1030,50 +1039,3 @@ def fit_feems_recommended_loo(
         cv_checkpoint_dir=cv_checkpoint_dir,
         cv_checkpoint_key=cv_checkpoint_key,
     )
-
-
-@beartype
-def fit_feems_free_q_replicate_holdout(
-    *,
-    genotypes: np.ndarray,
-    validation_genotypes: np.ndarray | None,
-    sample_nodes: np.ndarray,
-    graph: dict[str, np.ndarray],
-    active_positions: np.ndarray,
-    config: FEEMSConfig | None = None,
-) -> FEEMSResult:
-    """Tune FEEMS hyperparameters by independent SNP-replicate validation."""
-
-    config = FEEMSConfig(mode="free_q", cv_mode="replicate_holdout") if config is None else config
-    inputs = _FEEMSInputs(genotypes, sample_nodes, graph, active_positions)
-    return _fit_replicate_holdout(inputs, validation_genotypes, config)
-
-
-@beartype
-def fit_feems_fixed_q(
-    *,
-    genotypes: np.ndarray,
-    sample_nodes: np.ndarray,
-    graph: dict[str, np.ndarray],
-    active_positions: np.ndarray,
-    config: FEEMSConfig | None = None,
-) -> FEEMSResult:
-    """Tune migration smoothing by deme CV with FEEMS' null-model variance fixed."""
-    config = FEEMSConfig(mode="fixed_q") if config is None else config
-    inputs = _FEEMSInputs(genotypes, sample_nodes, graph, active_positions)
-    return _fit_node_cv(inputs, config, "fixed_q")
-
-
-@beartype
-def fit_feems_scalar_q(
-    *,
-    genotypes: np.ndarray,
-    sample_nodes: np.ndarray,
-    graph: dict[str, np.ndarray],
-    active_positions: np.ndarray,
-    config: FEEMSConfig | None = None,
-) -> FEEMSResult:
-    """Tune migration smoothing by deme CV while fitting one shared variance."""
-    config = FEEMSConfig(mode="scalar_q") if config is None else config
-    inputs = _FEEMSInputs(genotypes, sample_nodes, graph, active_positions)
-    return _fit_node_cv(inputs, config, "scalar_q")

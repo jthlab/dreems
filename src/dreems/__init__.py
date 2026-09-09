@@ -1,4 +1,4 @@
-"""Publication-facing DREEMS APIs."""
+"""Estimate effective migration surfaces from genetic data."""
 
 from dreems.calibration import SDCalibration
 from dreems.datasets import (

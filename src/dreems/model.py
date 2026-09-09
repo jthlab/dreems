@@ -66,6 +66,28 @@ class DREEMSArrays(TypedDict):
     edge_initializer_valid: NotRequired[Float[np.ndarray, "batch edges"]]
 
 
+class DREEMSTrainBatch(DREEMSBatch):
+    """Model inputs and normalized targets on the device."""
+
+    y: Float[Array, "batch edges"]
+    q: Float[Array, "batch nodes"]
+    counterfactual_group: NotRequired[Int[Array, "batch"]]
+    counterfactual_anchor: NotRequired[Float[Array, "batch"]]
+    counterfactual_mask: NotRequired[Int[Array, "batch"]]
+    sampled_node_fraction: NotRequired[Float[Array, "batch"]]
+
+
+class DREEMSTrainArrays(DREEMSArrays):
+    """Padded features and normalized targets before transfer to the device."""
+
+    y: Float[np.ndarray, "batch edges"]
+    q: Float[np.ndarray, "batch nodes"]
+    counterfactual_group: NotRequired[Int[np.ndarray, "batch"]]
+    counterfactual_anchor: NotRequired[Float[np.ndarray, "batch"]]
+    counterfactual_mask: NotRequired[Int[np.ndarray, "batch"]]
+    sampled_node_fraction: NotRequired[Float[np.ndarray, "batch"]]
+
+
 BatchOutput: TypeAlias = tuple[
     Float[Array, "batch edges"],
     Float[Array, "batch edges"],
@@ -121,7 +143,7 @@ class DREEMS(eqx.Module):
     """Fixed diffusion-band architecture used by the released checkpoint.
 
     A local GNN uses edge features in each message. A second branch supplies
-    context on the same graph; it does not coarsen the graph. Each edge then
+    context on the same graph at full resolution. Each edge then
     attends to all nodes before predicting a mean and log variance. The input
     features already contain the diffusion bands, computed in ``features.py``.
 

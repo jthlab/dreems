@@ -184,13 +184,12 @@ def test_train_save_and_load_production_checkpoint(tmp_path) -> None:
         normalization=normalization,
         config=config,
         train_losses=result.losses,
-        train_arrays=arrays,
         training_run=result.summary(),
     )
 
     assert zipfile.is_zipfile(path)
     loaded = checkpoints.load_checkpoint(path)
-    assert loaded.model == train.model_metadata(config, arrays)
+    assert loaded.model == train.model_metadata(config, result.params)
     assert loaded.model["schema_version"] == 2
     assert loaded.model["architecture"]["kind"] == "diffusion_band_gnn_v1"
     assert loaded.model["features"] == {
@@ -205,7 +204,6 @@ def test_train_save_and_load_production_checkpoint(tmp_path) -> None:
 def test_failed_checkpoint_save_does_not_leave_a_partial_archive(
     tmp_path, monkeypatch, existing: bool
 ) -> None:
-    arrays = toy_training_arrays()
     params = model.DREEMS(
         jax.random.PRNGKey(126),
         node_dim=6,
@@ -220,7 +218,6 @@ def test_failed_checkpoint_save_does_not_leave_a_partial_archive(
         normalization={"y_scale": 1.0, "q_y_scale": 1.0},
         config=small_config(),
         train_losses=[],
-        train_arrays=arrays,
     )
     if existing:
         train.save_checkpoint(path, **kwargs)
@@ -283,7 +280,6 @@ def test_gated_checkpoint_round_trip(tmp_path) -> None:
         normalization=normalization,
         config=config,
         train_losses=result.losses,
-        train_arrays=arrays,
         edge_sd_calibration=edge_sd_calibration,
     )
     loaded = checkpoints.load_checkpoint(path)
@@ -335,7 +331,6 @@ def test_surface_gate_checkpoint_round_trip(tmp_path) -> None:
         normalization=normalization,
         config=config,
         train_losses=[],
-        train_arrays=arrays,
     )
 
     loaded = checkpoints.load_checkpoint(path)
@@ -494,7 +489,6 @@ def test_validation_failure_preserves_the_last_saved_checkpoint(
                 normalization={"y_scale": 1.0, "q_y_scale": 1.0},
                 config=config,
                 train_losses=losses,
-                train_arrays=arrays,
             )
             saved_bytes = path.read_bytes()
 

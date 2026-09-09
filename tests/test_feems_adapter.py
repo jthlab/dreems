@@ -568,7 +568,10 @@ def test_feems_rejects_complex_inputs(fit_inputs, monkeypatch, field) -> None:
 
 
 @pytest.mark.parametrize("invalid", ["duplicate_positions", "one_observed", "row_count"])
-def test_feems_cannot_silently_reassign_samples(fit_inputs, fake_api, invalid) -> None:
+@pytest.mark.parametrize(
+    "fit", [feems.make_spatial_graph, feems.fit_feems, feems.fit_feems_recommended_loo]
+)
+def test_feems_cannot_silently_reassign_samples(fit_inputs, fake_api, invalid, fit) -> None:
     if invalid == "duplicate_positions":
         fit_inputs["active_positions"][1] = fit_inputs["active_positions"][0]
     elif invalid == "one_observed":
@@ -576,7 +579,7 @@ def test_feems_cannot_silently_reassign_samples(fit_inputs, fake_api, invalid) -
     else:
         fit_inputs["sample_nodes"] = fit_inputs["sample_nodes"][:-1]
     with pytest.raises(ValueError):
-        feems.make_spatial_graph(**fit_inputs)
+        fit(**fit_inputs)
     assert FakeSpatialGraph.instances == []
 
 
@@ -586,22 +589,22 @@ def test_more_folds_than_observed_nodes_fails_before_cv(fake_api, fit_inputs) ->
     assert not fake_api.joint_cv_calls
 
 
-def test_named_helpers_report_the_cv_they_actually_run(fake_api, fit_inputs) -> None:
-    config = feems.FEEMSConfig(lambdas=(100.0, 10.0), lambdas_q=(20.0, 2.0))
-    holdout = feems.fit_feems_free_q_replicate_holdout(
-        config=config, validation_genotypes=fit_inputs["genotypes"], **fit_inputs
+@pytest.mark.parametrize(
+    ("cv_mode", "reported_mode", "folds"),
+    [("node_cv", "leave_one_out", 3), ("replicate_holdout", "replicate_holdout", 1)],
+)
+def test_report_preserves_requested_cv_configuration(
+    fake_api, fit_inputs, cv_mode, reported_mode, folds
+) -> None:
+    config = feems.FEEMSConfig(cv_mode=cv_mode, lambdas=(100.0, 10.0), lambdas_q=(20.0, 2.0))
+    result = feems.fit_feems(
+        config=config,
+        validation_genotypes=fit_inputs["genotypes"] if cv_mode == "replicate_holdout" else None,
+        **fit_inputs,
     )
-    assert holdout.cv_mode == "replicate_holdout"
-    assert holdout.cv_folds == 1
-    assert config.cv_mode == "node_cv"
-
-    loo_config = feems.FEEMSConfig(
-        cv_mode="replicate_holdout", lambdas=config.lambdas, lambdas_q=config.lambdas_q
-    )
-    loo = feems.fit_feems_free_q(config=loo_config, **fit_inputs)
-    assert loo.cv_mode == "leave_one_out"
-    assert loo.cv_folds == 3
-    assert loo_config.cv_mode == "replicate_holdout"
+    assert result.cv_mode == reported_mode
+    assert result.cv_folds == folds
+    assert config.cv_mode == cv_mode
 
 
 @pytest.mark.parametrize("field", ["fold", "errors", "checkpoint_key"])

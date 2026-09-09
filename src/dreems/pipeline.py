@@ -5,6 +5,8 @@ unpadded; normalization statistics use training packs only. Training pads each
 batch to fixed dimensions and delegates model updates to ``dreems.train``.
 """
 
+# ruff: noqa: F722, F821, UP037
+
 from __future__ import annotations
 
 import argparse
@@ -19,7 +21,7 @@ from typing import Any
 
 import numpy as np
 from beartype import beartype
-from jaxtyping import Shaped, jaxtyped
+from jaxtyping import Float, Shaped, jaxtyped
 
 from dreems import checkpoints, corpus, counterfactual, features, metrics, simulation, train
 from dreems import model as dreems_model
@@ -56,7 +58,7 @@ def nested_mapping(config: Mapping[str, Any], key: str) -> dict[str, Any]:
 
 @beartype
 def dreems_config(config: Mapping[str, Any]) -> train.DREEMSTrainConfig:
-    """Build the existing training dataclasses from the YAML/JSON topic blocks."""
+    """Read architecture, features, loss, and optimizer settings from config."""
     dreems = nested_mapping(config, "dreems")
     return train.DREEMSTrainConfig(
         architecture=train.DREEMSArchitectureConfig(**nested_mapping(dreems, "architecture")),
@@ -83,8 +85,8 @@ def load_examples(path: Path) -> list[dict[str, Any]]:
 
 
 @beartype
-def _read_prepared_shard(path: Path) -> list[dict[str, Any]]:
-    """Require the list-of-dictionaries format written by preparation workers."""
+def _read_prepared_shard(path: Path) -> list[features.PreparedExample]:
+    """Read the list of prepared examples stored in a pack."""
     items = read_pickle(path)
     if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
         raise ValueError(f"expected prepared shard {path} to contain a list of dictionaries")
@@ -103,11 +105,11 @@ def _count(value: Any, *, name: str, minimum: int = 0) -> int:
 @beartype
 def load_prepared_shards(
     paths: Sequence[Path], max_examples: int | None = None
-) -> list[dict[str, Any]]:
+) -> list[features.PreparedExample]:
     """Concatenate packs in input order, optionally taking a validation prefix."""
     if max_examples is not None:
         max_examples = _count(max_examples, name="max_examples", minimum=1)
-    out: list[dict[str, Any]] = []
+    out: list[features.PreparedExample] = []
     for path in paths:
         shard = _read_prepared_shard(path)
         out.extend(shard)
@@ -210,8 +212,8 @@ def scan_prepared_dimensions(
 
 @beartype
 def pad_with_dimensions(
-    items: list[dict[str, np.ndarray]], dims: Mapping[str, int]
-) -> dict[str, np.ndarray]:
+    items: list[features.PreparedExample], dims: Mapping[str, int]
+) -> dreems_model.DREEMSTrainArrays:
     """Pad a batch to the sizes obtained by scanning the training packs."""
     return features.pad_examples(
         items,
@@ -220,11 +222,11 @@ def pad_with_dimensions(
     )
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def _normalization_moments(
     accumulator: Mapping[str, Any],
     prefix: str,
-) -> tuple[np.ndarray, np.ndarray, int]:
+) -> tuple[Float[np.ndarray, "*shape"], Float[np.ndarray, "*shape"], int]:
     """Read one field's moments with matching shape and a positive count."""
     total = np.asarray(accumulator[f"{prefix}_sum"])
     squares = np.asarray(accumulator[f"{prefix}_sumsq"])
@@ -245,7 +247,7 @@ def _normalization_moments(
 
 @beartype
 def normalization_accumulator_from_prepared(paths: Sequence[Path]) -> dict[str, object]:
-    """Sum each training field in float64, weighting nodes/edges rather than graphs.
+    """Accumulate sums and squared sums over all training nodes and edges.
 
     The target moments use the stored, uncentered targets. Per-graph centering
     happens later in apply_normalization; this preserves the released convention.
@@ -337,7 +339,7 @@ def finalize_normalization_stats(
 
 
 @beartype
-def normalized_shard(path: Path, stats: Mapping[str, Any]) -> list[dict[str, np.ndarray]]:
+def normalized_shard(path: Path, stats: Mapping[str, Any]) -> list[features.PreparedExample]:
     """Apply saved training statistics to one ordered prepared pack."""
     return features.apply_normalization(_read_prepared_shard(path), stats)
 
@@ -351,7 +353,7 @@ def iter_training_batches(
     batch_size: int,
     steps: int,
     seed: int,
-) -> Iterable[dict[str, np.ndarray]]:
+) -> Iterable[dreems_model.DREEMSTrainArrays]:
     """Shuffle packs and examples deterministically, keeping sampling views together.
 
     Pending groups and ordinary examples carry across pack/epoch boundaries.
@@ -365,17 +367,17 @@ def iter_training_batches(
         raise ValueError("no training shards")
     rng = np.random.default_rng(seed)
     produced = 0
-    grouped_pending: list[list[dict[str, np.ndarray]]] = []
-    singleton_pending: list[dict[str, np.ndarray]] = []
+    grouped_pending: list[list[features.PreparedExample]] = []
+    singleton_pending: list[features.PreparedExample] = []
     group_size = None
 
     def units(
-        shard: list[dict[str, np.ndarray]],
-    ) -> tuple[list[list[dict[str, np.ndarray]]], list[dict[str, np.ndarray]]]:
+        shard: list[features.PreparedExample],
+    ) -> tuple[list[list[features.PreparedExample]], list[features.PreparedExample]]:
         """Collect paired views before shuffling so anchors stay in the batch."""
         nonlocal group_size
-        grouped: dict[int, list[dict[str, np.ndarray]]] = {}
-        singletons: list[dict[str, np.ndarray]] = []
+        grouped: dict[int, list[features.PreparedExample]] = {}
+        singletons: list[features.PreparedExample] = []
         for item in shard:
             group = _count(
                 item.get("counterfactual_group", -1), name="counterfactual_group", minimum=-1
@@ -507,7 +509,7 @@ def prepare_raw_examples(
     *,
     source: Path,
     index_offset: int = 0,
-) -> tuple[list[dict[str, np.ndarray]], list[dict[str, Any]], list[dict[str, Any]]]:
+) -> tuple[list[features.PreparedExample], list[dict[str, Any]], list[dict[str, Any]]]:
     """Prepare one raw shard while retaining its audit metadata."""
 
     kept: list[tuple[int, dict[str, Any]]] = []
@@ -630,7 +632,7 @@ def command_prepare_batch(args: argparse.Namespace) -> None:
     """Prepare several independent raw shards into one ordered training pack."""
 
     run_config = dreems_config(load_config(args.config))
-    prepared: list[dict[str, np.ndarray]] = []
+    prepared: list[features.PreparedExample] = []
     skipped: list[dict[str, Any]] = []
     rows: list[dict[str, Any]] = []
     raw_example_count = 0
@@ -895,7 +897,7 @@ def _command_train(args: argparse.Namespace, cache_dir: Path | None) -> None:
         checkpoint_features = model_metadata.get("features")
         if not isinstance(checkpoint_features, dict):
             raise ValueError("init checkpoint is missing feature metadata")
-        checkpoint_features = train.canonical_feature_metadata(checkpoint_features)
+        checkpoint_features = checkpoints.canonical_feature_metadata(checkpoint_features)
         if checkpoint_features != expected_features:
             raise ValueError(
                 "init checkpoint feature metadata does not match the training config: "
@@ -919,10 +921,6 @@ def _command_train(args: argparse.Namespace, cache_dir: Path | None) -> None:
                 if not isinstance(calibration_payload, Mapping):
                     raise ValueError("init checkpoint has invalid edge SD calibration metadata")
                 inherited_edge_sd_calibration = dict(calibration_payload)
-    metadata_arrays_stub = {
-        "node_x": np.zeros((1, 1, int(dims["node_dim"])), dtype=np.float32),
-        "edge_x": np.zeros((1, 1, int(dims["edge_dim"])), dtype=np.float32),
-    }
     validation_arrays = None
     validation_limit = int(cfg.get("train_validation_examples", 0) or 0)
     if validation_inputs and validation_limit > 0:
@@ -933,14 +931,15 @@ def _command_train(args: argparse.Namespace, cache_dir: Path | None) -> None:
     history_path.parent.mkdir(parents=True, exist_ok=True)
     history_path.unlink(missing_ok=True)
 
-    def best_checkpoint_callback(
+    def training_progress_callback(
         step: int,
         params: dreems_model.DREEMS,
         losses: list[float],
         row: Mapping[str, Any],
-        metadata_arrays: Mapping[str, np.ndarray],
     ) -> None:
-        """Keep the best completed validation step available during a long run."""
+        """Log each completed step and save improving validation checkpoints."""
+        with history_path.open("a") as handle:
+            handle.write(json.dumps(json_ready(row), sort_keys=True) + "\n")
         if row.get("validation_best") is not True:
             return
         best_path = args.output.with_name("checkpoint.best.dreems.zip")
@@ -954,7 +953,6 @@ def _command_train(args: argparse.Namespace, cache_dir: Path | None) -> None:
             normalization=stats,
             config=run_config,
             train_losses=losses,
-            train_arrays=dict(metadata_arrays),
             training_run={
                 "final_step": step,
                 "best_step": step,
@@ -984,21 +982,8 @@ def _command_train(args: argparse.Namespace, cache_dir: Path | None) -> None:
             },
         )
 
-    def training_progress_callback(
-        step: int,
-        params: dreems_model.DREEMS,
-        losses: list[float],
-        row: Mapping[str, Any],
-        metadata_arrays: Mapping[str, np.ndarray],
-    ) -> None:
-        """Append each completed log row before updating the best checkpoint."""
-        with history_path.open("a") as handle:
-            handle.write(json.dumps(json_ready(row), sort_keys=True) + "\n")
-        best_checkpoint_callback(step, params, losses, row, metadata_arrays)
-
     if args.stream:
         # Streaming keeps memory bounded by loading one prepared shard at a time.
-        metadata_arrays = metadata_arrays_stub
         train_result = train.train_from_batches(
             config=run_config,
             node_dim=int(dims["node_dim"]),
@@ -1013,32 +998,19 @@ def _command_train(args: argparse.Namespace, cache_dir: Path | None) -> None:
             ),
             init_params=init_params,
             validation_arrays=validation_arrays,
-            checkpoint_callback=lambda step, params, losses, row: training_progress_callback(
-                step,
-                params,
-                losses,
-                row,
-                metadata_arrays,
-            ),
+            checkpoint_callback=training_progress_callback,
         )
     else:
         # The eager path is useful for smoke tests and small local runs.
         prepared = load_prepared_shards(inputs)
         prepared = features.apply_normalization(prepared, stats)
         train_arrays = features.pad_examples(prepared)
-        metadata_arrays = train_arrays
         train_result = train.train_from_arrays(
             train_arrays,
             config=run_config,
             init_params=init_params,
             validation_arrays=validation_arrays,
-            checkpoint_callback=lambda step, params, losses, row: training_progress_callback(
-                step,
-                params,
-                losses,
-                row,
-                metadata_arrays,
-            ),
+            checkpoint_callback=training_progress_callback,
         )
 
     train.save_checkpoint(
@@ -1047,7 +1019,6 @@ def _command_train(args: argparse.Namespace, cache_dir: Path | None) -> None:
         normalization=stats,
         config=run_config,
         train_losses=train_result.losses,
-        train_arrays=metadata_arrays,
         training_run=train_result.summary(),
         edge_sd_calibration=inherited_edge_sd_calibration,
     )
@@ -1105,7 +1076,7 @@ def command_train(args: argparse.Namespace) -> None:
 def command_evaluate(args: argparse.Namespace) -> None:
     """Evaluate in graph-size order while retaining each input example's identity.
 
-    Replicate IDs follow input order across packs, not the padded batch order.
+    Replicate IDs follow input order across packs.
     Means and SDs are exported in log-rate units, with stored SD calibration.
     """
     batch_size = _count(args.batch_size, name="batch_size", minimum=1)
@@ -1135,13 +1106,13 @@ def command_evaluate(args: argparse.Namespace) -> None:
     rows: list[dict[str, Any]] = []
     prediction_replicates: list[int] = []
     edge_offsets = [0]
-    edge_truth_parts: list[np.ndarray] = []
-    edge_mean_parts: list[np.ndarray] = []
-    edge_sd_parts: list[np.ndarray] = []
+    edge_truth_parts: list[Float[np.ndarray, "_edges"]] = []
+    edge_mean_parts: list[Float[np.ndarray, "_edges"]] = []
+    edge_sd_parts: list[Float[np.ndarray, "_edges"]] = []
     q_offsets = [0]
-    q_truth_parts: list[np.ndarray] = []
-    q_mean_parts: list[np.ndarray] = []
-    q_sd_parts: list[np.ndarray] = []
+    q_truth_parts: list[Float[np.ndarray, "_nodes"]] = []
+    q_mean_parts: list[Float[np.ndarray, "_nodes"]] = []
+    q_sd_parts: list[Float[np.ndarray, "_nodes"]] = []
     for shard_index, path in enumerate(inputs):
         if max_examples is not None and len(rows) >= max_examples:
             break

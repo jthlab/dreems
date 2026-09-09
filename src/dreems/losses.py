@@ -4,7 +4,7 @@ Each term averages within a graph before averaging across the batch, so large
 graphs do not dominate. Unless stated otherwise, inactive graphs contribute
 zero but remain in the batch denominator. Masks must be finite, with zero for
 padding and one for observations; padded prediction and target values must also
-be finite. These are edge-recovery losses, not a covariance likelihood.
+be finite. Training targets are simulated log migration and log q.
 """
 # ruff: noqa: F722, F821
 
@@ -86,8 +86,8 @@ def counterfactual_anchor_consistency_loss(
     """Match subsamples to their richer anchor from the same simulation.
 
     Only pairs with a shared nonnegative group ID and exactly one anchor count.
-    Gradients flow to the subsample prediction, not the anchor. Unlike the other
-    losses, this term averages over valid pairs rather than over all graphs.
+    The anchor is held fixed while gradients update the subsample prediction.
+    This term averages over valid pairs.
     """
 
     batch_size = prediction.shape[0]
@@ -128,7 +128,7 @@ def masked_gaussian_nll(
     """Gaussian NLL for the target log rate, omitting the constant log(2*pi)/2.
 
     The predicted log variance is bounded in the forward pass with a
-    straight-through gradient. This loss can be negative; it is not MSE.
+    straight-through gradient. This loss can be negative.
     """
 
     clipped_logvar = straight_through_clip(logvar, min_logvar, max_logvar)
@@ -228,8 +228,8 @@ def masked_centered_correlation_loss(
     """Average ``1 - r`` with a stabilized denominator, skipping flat truth.
 
     Logged as ``correlation`` (or ``validation_correlation``) by the trainer.
-    It is a loss, not Pearson r: smaller is better. Inactive graphs contribute
-    zero, so subtracting this batch loss from one is not a mean Pearson r.
+    Smaller is better. Inactive graphs contribute zero. Reported Pearson
+    correlations are computed separately by ``metrics.edge_log_metrics``.
     """
 
     prediction_centered, target_centered, count = _centered_signals(prediction, target, mask)
@@ -253,7 +253,7 @@ def masked_edge_orientation_loss(
     margin_fraction: float,
     eps: float = 1e-6,
 ) -> Scalar:
-    """Require a high-versus-low contrast with the same sign as the truth.
+    """Match the sign and relative magnitude of the true contrast.
 
     Truth determines the two tails and their weights. The predicted contrast
     must reach ``margin_fraction`` of the true contrast to avoid a penalty.

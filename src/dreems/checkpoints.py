@@ -1,4 +1,6 @@
-"""Load Equinox weights and keep metadata edits separate from parameter bytes."""
+"""Read and write checkpoints containing Equinox weights and JSON metadata."""
+
+# ruff: noqa: F722, F821, UP037
 
 from __future__ import annotations
 
@@ -16,6 +18,7 @@ import equinox as eqx
 import jax
 import numpy as np
 from beartype import beartype
+from jaxtyping import Float
 
 from dreems import calibration, features
 from dreems import model as dreems_model
@@ -59,13 +62,13 @@ class DREEMSCheckpoint:
 
 @dataclass(frozen=True)
 class DREEMSPrediction:
-    """Unpadded outputs, in input order; calibration changes SDs, not means."""
+    """Unpadded means and calibrated SDs, in input order."""
 
-    edge_mean: list[np.ndarray]
-    edge_sd: list[np.ndarray]
-    raw_edge_sd: list[np.ndarray]
-    node_log_q_mean: list[np.ndarray]
-    node_log_q_sd: list[np.ndarray]
+    edge_mean: list[Float[np.ndarray, "_edges"]]
+    edge_sd: list[Float[np.ndarray, "_edges"]]
+    raw_edge_sd: list[Float[np.ndarray, "_edges"]]
+    node_log_q_mean: list[Float[np.ndarray, "_nodes"]]
+    node_log_q_sd: list[Float[np.ndarray, "_nodes"]]
     surface_weight: list[float]
     checkpoint: DREEMSCheckpoint
 
@@ -168,11 +171,9 @@ def predict_examples(
     checkpoint: DREEMSCheckpoint | Path | str,
     examples: list[dict[str, object]],
 ) -> DREEMSPrediction:
-    """Predict edge log-rate means and posterior SDs for prepared examples.
+    """Estimate mean log migration and posterior SDs from raw observations.
 
-    This is the production inference path: diffusion-band features,
-    optional linearized-resistance edge conditioning, and the DREEMS GNN
-    forward pass.
+    Apply saved preprocessing, run the GNN, and calibrate its predicted SDs.
     """
 
     loaded = (
@@ -206,11 +207,11 @@ def predict_examples(
             model=model,
         )
     )
-    means: list[np.ndarray] = []
-    sds: list[np.ndarray] = []
-    raw_sds: list[np.ndarray] = []
-    q_means: list[np.ndarray] = []
-    q_sds: list[np.ndarray] = []
+    means: list[Float[np.ndarray, "_edges"]] = []
+    sds: list[Float[np.ndarray, "_edges"]] = []
+    raw_sds: list[Float[np.ndarray, "_edges"]] = []
+    q_means: list[Float[np.ndarray, "_nodes"]] = []
+    q_sds: list[Float[np.ndarray, "_nodes"]] = []
     edge_sd_calibration = loaded.edge_sd_calibration
     for index in range(len(examples)):
         edge_mask = arrays["edge_mask"][index] > 0.0
@@ -241,7 +242,7 @@ def predict_examples(
 
 @beartype
 def _sampled_node_fraction(example: Mapping[str, object]) -> float:
-    """Count occupied nodes, not individuals, for density-dependent calibration."""
+    """Compute the fraction of occupied graph nodes for SD calibration."""
     if "active_positions" in example:
         positions = _real_array(example["active_positions"], name="graph node positions")
     elif "positions" in example:

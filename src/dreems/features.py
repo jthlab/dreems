@@ -1,4 +1,4 @@
-"""Covariance, sampling-support, and diffusion features for the graph model.
+"""Build features from covariance, sampling locations, and graph diffusion.
 
 Preprocessing runs in NumPy/SciPy on CPU; the learned model runs in JAX. Column
 order is part of the checkpoint contract, including zeroed coordinate columns.
@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from typing import Any, Literal
+from typing import Any, Literal, NotRequired, TypedDict
 
 import numpy as np
 import scipy.linalg as la
@@ -20,6 +20,7 @@ import scipy.sparse.linalg as spla
 from beartype import beartype
 from jaxtyping import Float, Int, Real, jaxtyped
 
+from dreems.model import DREEMSTrainArrays
 from dreems.validation import validate_diploid_dosages
 
 EDGE_CONDITIONER_FEATURE_NAMES = (
@@ -32,8 +33,74 @@ SpatialEncoding = Literal["embedded", "topology", "topology_node_covariance"]
 SPATIAL_ENCODINGS = ("embedded", "topology", "topology_node_covariance")
 
 
-@beartype
-def centered(values: np.ndarray) -> np.ndarray:
+class DemeSummaries(TypedDict):
+    """Genotype or covariance-factor summaries at graph nodes.
+
+    Columns index retained SNPs for genotype input and factors for covariance
+    input. ``effective_snps`` records the data size independently of that width.
+    """
+
+    effective_snps: int
+    sample_count: Float[np.ndarray, "nodes"]
+    sum_x: Float[np.ndarray, "nodes columns"]
+    sum_x2: Float[np.ndarray, "nodes columns"]
+    mean_x: Float[np.ndarray, "nodes columns"]
+    mean_x2: Float[np.ndarray, "nodes columns"]
+    diag_mean: Float[np.ndarray, "nodes"]
+
+
+class SamplingSupport(TypedDict):
+    """Covariance summaries attached to nodes, adjacent pairs, and paths."""
+
+    node_total_support: Float[np.ndarray, "nodes"]
+    node_within_support: Float[np.ndarray, "nodes"]
+    node_total_log_support: Float[np.ndarray, "nodes"]
+    node_within_log_support: Float[np.ndarray, "nodes"]
+    edge_direct_support: Float[np.ndarray, "edges"]
+    edge_endpoint_support: Float[np.ndarray, "edges"]
+    edge_path_support: Float[np.ndarray, "edges"]
+    edge_direct_log_support: Float[np.ndarray, "edges"]
+    edge_endpoint_log_support: Float[np.ndarray, "edges"]
+    edge_path_log_support: Float[np.ndarray, "edges"]
+    edge_path_cov: Float[np.ndarray, "edges"]
+    edge_path_resistance: Float[np.ndarray, "edges"]
+    edge_path_length: Float[np.ndarray, "edges"]
+
+
+class DiffusionBands(TypedDict):
+    """Filtered node signals and their contrasts at edge endpoints."""
+
+    node_bands: Float[np.ndarray, "nodes band_channels"]
+    edge_abs_contrast: Float[np.ndarray, "edges band_channels"]
+    edge_squared_contrast: Float[np.ndarray, "edges band_channels"]
+    edge_endpoint_energy: Float[np.ndarray, "edges band_channels"]
+
+
+class PreparedExample(TypedDict):
+    """Features and targets for one graph before padding.
+
+    Normalization preserves the layout. It replaces the raw initializer fields
+    with ``edge_initializer`` and ``edge_initializer_valid`` in target units.
+    Counterfactual fields identify subsamples drawn from the same simulation.
+    """
+
+    node_x: Float[np.ndarray, "nodes node_dim"]
+    edge_x: Float[np.ndarray, "edges edge_dim"]
+    edges: Int[np.ndarray, "edges 2"]
+    y: Float[np.ndarray, "edges"]
+    q: Float[np.ndarray, "nodes"]
+    linearized_resistance_edge_log: NotRequired[Float[np.ndarray, "edges"]]
+    linearized_resistance_valid: NotRequired[Float[np.ndarray, "edges"]]
+    edge_initializer: NotRequired[Float[np.ndarray, "edges"]]
+    edge_initializer_valid: NotRequired[Float[np.ndarray, "edges"]]
+    counterfactual_group: NotRequired[Int[np.ndarray, ""]]
+    counterfactual_anchor: NotRequired[Float[np.ndarray, ""]]
+    counterfactual_mask: NotRequired[Int[np.ndarray, ""]]
+    sampled_node_fraction: NotRequired[Float[np.ndarray, ""]]
+
+
+@jaxtyped(typechecker=beartype)
+def centered(values: Real[np.ndarray, "*shape"]) -> Float[np.ndarray, "*shape"] | np.float64:
     """Center finite values, filling missing entries with their finite mean."""
     array = np.asarray(values, dtype=np.float64)
     if array.size == 0:
@@ -44,12 +111,6 @@ def centered(values: np.ndarray) -> np.ndarray:
     filled = array.copy()
     filled[~finite] = float(np.mean(filled[finite]))
     return filled - float(np.mean(filled))
-
-
-@beartype
-def centered_edge_feature(values: np.ndarray) -> np.ndarray:
-    """Store a centered initializer as the model's float32 edge channel."""
-    return centered(np.asarray(values, dtype=np.float64)).astype(np.float32)
 
 
 @jaxtyped(typechecker=beartype)
@@ -98,8 +159,8 @@ def _factor_deme_summaries(
     factors: Float[np.ndarray, "nodes rank"],
     sample_count: Float[np.ndarray, "nodes"],
     effective_snps: int,
-) -> dict[str, np.ndarray | int]:
-    """Summaries of identical virtual samples at each deme, not observed SNPs."""
+) -> DemeSummaries:
+    """Summarize covariance factors weighted by the sample count at each deme."""
     squared = factors * factors
     return {
         "effective_snps": effective_snps,
@@ -136,7 +197,7 @@ def standardized_deme_summaries(
     genotypes: "Float[np.ndarray, 'samples snps']",
     sample_nodes: "Int[np.ndarray, 'samples']",
     num_nodes: int,
-) -> dict[str, np.ndarray | int]:
+) -> DemeSummaries:
     """Aggregate standardized diploid genotypes while retaining SNP columns."""
     standardized = standardized_polymorphic_genotypes(genotypes)
     effective_snps = int(standardized.shape[1])
@@ -191,11 +252,11 @@ def covariance_deme_summaries(
     num_nodes: int,
     *,
     effective_snps: int | None = None,
-) -> dict[str, np.ndarray | int]:
+) -> DemeSummaries:
     """Average sample-covariance factors at nodes for the earlier encodings.
 
-    The columns are covariance factors, not independent markers. ``effective_snps``
-    sets their scale; it cannot be recovered from the covariance alone.
+    Each column is a covariance factor. Supply ``effective_snps`` from the
+    data to set their scale; covariance alone cannot determine the SNP count.
     """
     covariance = np.asarray(sample_covariance, dtype=np.float64)
     sample_nodes = np.asarray(sample_nodes, dtype=np.int32)
@@ -224,7 +285,7 @@ def node_covariance_deme_summaries(
     num_nodes: int,
     *,
     effective_snps: int,
-) -> dict[str, np.ndarray | int]:
+) -> DemeSummaries:
     """Construct production features from observed-deme covariance.
 
     The factorization is equivalent to expanding each observed deme into
@@ -260,7 +321,11 @@ def sample_covariance_to_node_covariance(
     sample_covariance: Real[np.ndarray, "samples samples"],
     sample_nodes: Int[np.ndarray, "samples"],
     num_nodes: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[
+    Float[np.ndarray, "observed observed"],
+    Int[np.ndarray, "observed"],
+    Float[np.ndarray, "nodes"],
+]:
     """Collapse sample covariance to covariance among observed graph nodes."""
 
     covariance = np.asarray(sample_covariance, dtype=np.float64)
@@ -303,14 +368,14 @@ def example_sample_nodes(
     )
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def example_deme_summaries(
     example: Mapping[str, Any],
-    active_positions: np.ndarray,
+    active_positions: Real[np.ndarray, "nodes 2"],
     num_nodes: int,
     *,
     canonical_node_covariance: bool = False,
-) -> tuple[np.ndarray, dict[str, np.ndarray | int]]:
+) -> tuple[Int[np.ndarray, "observations"], DemeSummaries]:
     """Read one input format, using a common node covariance in production."""
     sample_nodes = example_sample_nodes(example, active_positions)
     if "node_covariance" in example:
@@ -357,11 +422,11 @@ def example_deme_summaries(
     )
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def deme_covariance_scores(
-    summaries: Mapping[str, np.ndarray | int],
+    summaries: DemeSummaries,
     covariance_components: int,
-) -> np.ndarray:
+) -> Float[np.ndarray, "nodes components"]:
     """Return leading covariance scores, zero-padded at unobserved nodes.
 
     Signs use the largest-magnitude entry of each component. A repeated eigenvalue
@@ -391,8 +456,10 @@ def deme_covariance_scores(
     return scores
 
 
-@beartype
-def scaled_log_support(values: np.ndarray) -> np.ndarray:
+@jaxtyped(typechecker=beartype)
+def scaled_log_support(
+    values: Real[np.ndarray, "*shape"],
+) -> Float[np.ndarray, "*shape"] | np.float64:
     """Compress nonnegative support to [0, 1] within an example."""
     logged = np.log1p(np.maximum(values, 0.0))
     max_value = float(logged.max()) if logged.size > 0 else 0.0
@@ -401,17 +468,19 @@ def scaled_log_support(values: np.ndarray) -> np.ndarray:
     return (logged / max_value).astype(np.float64)
 
 
-@beartype
-def absolute_log_support(values: np.ndarray) -> np.ndarray:
+@jaxtyped(typechecker=beartype)
+def absolute_log_support(
+    values: Real[np.ndarray, "*shape"],
+) -> Float[np.ndarray, "*shape"] | np.float64:
     """Compress support without removing its between-example magnitude."""
     return np.log1p(np.maximum(values, 0.0)).astype(np.float64)
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def shortest_path_tree(
     start: int,
     adjacency: list[list[tuple[int, int]]],
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[Int[np.ndarray, "nodes"], Int[np.ndarray, "nodes"]]:
     """Choose one BFS path per node for checkpoints using the embedded encoding."""
     parent = np.full(len(adjacency), -1, dtype=np.int32)
     parent_edge = np.full(len(adjacency), -1, dtype=np.int32)
@@ -430,11 +499,13 @@ def shortest_path_tree(
     return parent, parent_edge
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def shortest_path_dag(
     start: int,
     adjacency: list[list[tuple[int, int]]],
-) -> tuple[list[int], list[list[tuple[int, int]]], np.ndarray, np.ndarray]:
+) -> tuple[
+    list[int], list[list[tuple[int, int]]], Int[np.ndarray, "nodes"], Float[np.ndarray, "nodes"]
+]:
     """Build the directed acyclic graph containing every shortest path."""
 
     distance = np.full(len(adjacency), -1, dtype=np.int32)
@@ -462,7 +533,7 @@ def shortest_path_dag(
     return order, predecessors, distance, log_path_count
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def distribute_over_shortest_paths(
     start: int,
     right_nodes: list[int],
@@ -470,8 +541,8 @@ def distribute_over_shortest_paths(
     pair_precision: Mapping[tuple[int, int], float],
     pair_cov_sum: Mapping[tuple[int, int], float],
     pair_resistance_sum: Mapping[tuple[int, int], float],
-    sample_count: np.ndarray,
-    edge_totals: np.ndarray,
+    sample_count: Real[np.ndarray, "nodes"],
+    edge_totals: Float[np.ndarray, "edges 5"],
 ) -> None:
     """Distribute pair summaries uniformly over all shortest paths."""
 
@@ -505,12 +576,12 @@ def distribute_over_shortest_paths(
             node_totals[parent] += contribution
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def path_from_tree(
     start: int,
     target: int,
-    parent: np.ndarray,
-    parent_edge: np.ndarray,
+    parent: Int[np.ndarray, "nodes"],
+    parent_edge: Int[np.ndarray, "nodes"],
 ) -> list[int]:
     """Return edge indices on a BFS path, or an empty list if none exists."""
     if start == target:
@@ -528,19 +599,18 @@ def path_from_tree(
     return path
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def deme_covariance_precision_summaries(
-    summaries: Mapping[str, np.ndarray | int],
-    edges: np.ndarray,
+    summaries: DemeSummaries,
+    edges: Int[np.ndarray, "edges 2"],
     *,
     path_routing: Literal["single_shortest", "all_shortest"] = "single_shortest",
-) -> dict[str, np.ndarray]:
+) -> SamplingSupport:
     """Summarize direct and path support for the feature encoder.
 
-    The precision channels are heuristics, not calibrated uncertainties. For
-    covariance inputs, the columns in ``mean_x`` are synthetic factors rather than
-    SNPs, so their fourth moments are not observed genotype fourth moments.
-    Production shares support across all equally short paths.
+    The precision channels measure sampling support heuristically. With
+    covariance input, their fourth moments describe the synthetic factors in
+    ``mean_x``. Production shares support across all equally short paths.
     """
     if path_routing not in {"single_shortest", "all_shortest"}:
         raise ValueError(f"unsupported path routing: {path_routing!r}")
@@ -730,8 +800,10 @@ def deme_covariance_precision_summaries(
     }
 
 
-@beartype
-def standardized_signal_columns(values: np.ndarray) -> np.ndarray:
+@jaxtyped(typechecker=beartype)
+def standardized_signal_columns(
+    values: Real[np.ndarray, "nodes"] | Real[np.ndarray, "nodes channels"],
+) -> Float[np.ndarray, "nodes channels"]:
     """Fill missing entries, standardize each signal, and clip it to [-8, 8]."""
     signals = np.asarray(values, dtype=np.float64)
     if signals.ndim == 1:
@@ -826,10 +898,10 @@ def geometry_normalized_laplacian(
 def diffusion_band_summaries(
     positions: Real[np.ndarray, "nodes 2"],
     edges: Int[np.ndarray, "edges 2"],
-    signals: np.ndarray,
+    signals: Real[np.ndarray, "nodes"] | Real[np.ndarray, "nodes channels"],
     *,
     times: tuple[float, ...] = DIFFUSION_BAND_TIMES,
-) -> dict[str, np.ndarray]:
+) -> DiffusionBands:
     """Split standardized signals into heat-diffusion bands on a fixed graph.
 
     For S(t)=exp(-tL), the blocks are X-S(t0)X, S(t0)X-S(t1)X, ..., S(tK)X.
@@ -883,13 +955,13 @@ def diffusion_band_summaries(
     }
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def graph_features(
     example: Mapping[str, Any],
     covariance_components: int,
     *,
     spatial_encoding: SpatialEncoding = "embedded",
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[Float[np.ndarray, "nodes node_dim"], Float[np.ndarray, "edges edge_dim"]]:
     """Build checkpoint-ordered node and edge columns for one observation.
 
     The topology encodings retain zero placeholders for x/y and dx/dy. Removing
@@ -1018,15 +1090,15 @@ def graph_features(
     return node_x, edge_x
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def prepare_examples(
     examples: list[Mapping[str, Any]],
     *,
     covariance_components: int,
     spatial_encoding: SpatialEncoding = "embedded",
-) -> list[dict[str, np.ndarray]]:
+) -> list[PreparedExample]:
     """Build unnormalized features; absent training targets are filled with zeros."""
-    out: list[dict[str, np.ndarray]] = []
+    out: list[PreparedExample] = []
     for example in examples:
         node_x, edge_x = graph_features(
             example,
@@ -1061,11 +1133,11 @@ def prepare_examples(
     return out
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def apply_normalization(
-    items: list[dict[str, np.ndarray]],
+    items: list[PreparedExample],
     stats: Mapping[str, Any],
-) -> list[dict[str, np.ndarray]]:
+) -> list[PreparedExample]:
     """Apply saved feature statistics and center each example's log-rate targets."""
     node_mean = np.asarray(stats["node_mean"], dtype=np.float32)[None, :]
     node_std = np.asarray(stats["node_std"], dtype=np.float32)[None, :]
@@ -1105,7 +1177,7 @@ def apply_normalization(
             )
         else:
             initializer = np.zeros((edge_count,), dtype=np.float64)
-        normalized: dict[str, np.ndarray] = {
+        normalized: PreparedExample = {
             "node_x": ((item["node_x"] - node_mean) / node_std).astype(np.float32),
             "edge_x": ((item["edge_x"] - edge_mean) / edge_std).astype(np.float32),
             "edges": item["edges"],
@@ -1138,13 +1210,13 @@ def apply_normalization(
     return out
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def normalize_prepared(
-    train: list[dict[str, np.ndarray]],
-    validation: list[dict[str, np.ndarray]] | None = None,
+    train: list[PreparedExample],
+    validation: list[PreparedExample] | None = None,
     *,
     std_floor: float = 0.2,
-) -> tuple[list[dict[str, np.ndarray]], list[dict[str, np.ndarray]] | None, dict[str, object]]:
+) -> tuple[list[PreparedExample], list[PreparedExample] | None, dict[str, object]]:
     """Fit normalization on training examples only, then apply it to both splits."""
     if not train:
         raise ValueError("cannot normalize an empty training set")
@@ -1173,12 +1245,12 @@ def normalize_prepared(
     return normalized_train, normalized_validation, stats
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def pad_examples(
-    items: list[dict[str, np.ndarray]],
+    items: list[PreparedExample],
     max_nodes: int | None = None,
     max_edges: int | None = None,
-) -> dict[str, np.ndarray]:
+) -> DREEMSTrainArrays:
     """Zero-pad graphs to a shared shape and mark real nodes and edges with masks."""
     if not items:
         raise ValueError("cannot pad an empty example list")
@@ -1330,7 +1402,7 @@ def sparse_laplacian(
     return sp.coo_matrix((data, (rows, cols)), shape=(num_nodes, num_nodes)).tocsr()
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def edge_conditioner_config(config: Mapping[str, Any]) -> Mapping[str, Any]:
     """Read the conditioner settings stored with a checkpoint or training run."""
     edge_conditioner = config.get("edge_conditioner")
@@ -1339,10 +1411,15 @@ def edge_conditioner_config(config: Mapping[str, Any]) -> Mapping[str, Any]:
     return edge_conditioner
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def _linearized_conditioner_observation(
     example: Mapping[str, Any],
-) -> tuple[np.ndarray, np.ndarray, int | None, np.ndarray | None]:
+) -> tuple[
+    Float[np.ndarray, "observations observations"],
+    Int[np.ndarray, "observations"],
+    int | None,
+    Float[np.ndarray, "nodes"] | None,
+]:
     """Resolve the covariance rows, graph indices, SNP count, and deme counts."""
     active_positions = np.asarray(example["active_positions"], dtype=np.float64)
     sample_nodes = example_sample_nodes(example, active_positions)
@@ -1373,11 +1450,11 @@ def _linearized_conditioner_observation(
     raise ValueError("example must contain node_covariance, sample_covariance, or genotypes")
 
 
-@beartype
-def _fit_all_pair_diagonal_resistance_proxy(
+@jaxtyped(typechecker=beartype)
+def fit_linearized_resistance_proxy(
     example: Mapping[str, Any],
     config: Mapping[str, Any],
-) -> tuple[np.ndarray, dict[str, object]]:
+) -> tuple[Float[np.ndarray, "edges"], dict[str, object]]:
     """Run the initializer with checkpoint settings and attach workflow diagnostics."""
     from dreems.linearized import all_pair_adjoint_conductance_initializer
 
@@ -1385,6 +1462,8 @@ def _fit_all_pair_diagonal_resistance_proxy(
     edges = np.asarray(graph["edges"], dtype=np.int32)
     node_coordinates = np.asarray(example["active_positions"], dtype=np.float64)
     conditioner = edge_conditioner_config(config)
+    if conditioner.get("method") != "all_pair_diagonal_adjoint":
+        raise ValueError("DREEMS requires the all-pair diagonal-adjoint conditioner")
     sample_covariance, sample_nodes, effective_snps, node_sample_count = (
         _linearized_conditioner_observation(example)
     )
@@ -1413,25 +1492,13 @@ def _fit_all_pair_diagonal_resistance_proxy(
     return estimate.edge_log_conductance.astype(np.float32), diagnostics
 
 
-@beartype
-def fit_linearized_resistance_proxy(
-    example: Mapping[str, Any],
-    config: Mapping[str, Any],
-) -> tuple[np.ndarray, dict[str, object]]:
-    """Validate the saved method name before constructing its edge feature."""
-    conditioner = edge_conditioner_config(config)
-    if conditioner.get("method") != "all_pair_diagonal_adjoint":
-        raise ValueError("DREEMS requires the all-pair diagonal-adjoint conditioner")
-    return _fit_all_pair_diagonal_resistance_proxy(example, config)
-
-
-@beartype
+@jaxtyped(typechecker=beartype)
 def append_edge_conditioner_features_to_item(
-    item: dict[str, np.ndarray],
-    edge_values: np.ndarray | None,
+    item: PreparedExample,
+    edge_values: Real[np.ndarray, "edges"] | None,
     *,
     valid: bool,
-) -> dict[str, np.ndarray]:
+) -> PreparedExample:
     """Append the centered initializer and a validity flag without mutating input."""
     edge_count = int(np.asarray(item["edges"]).shape[0])
     if valid and edge_values is not None:
@@ -1441,7 +1508,7 @@ def append_edge_conditioner_features_to_item(
                 f"linearized edge conditioner shape {values.shape} does not match "
                 f"edge count {edge_count}"
             )
-        feature = centered_edge_feature(values)
+        feature = centered(values).astype(np.float32)
         valid_column = np.ones((edge_count,), dtype=np.float32)
     else:
         values = np.full((edge_count,), np.nan, dtype=np.float64)
@@ -1457,15 +1524,15 @@ def append_edge_conditioner_features_to_item(
     return out
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def append_edge_conditioner_features_for_checkpoint(
-    prepared: list[dict[str, np.ndarray]],
+    prepared: list[PreparedExample],
     examples: list[Mapping[str, Any]],
     model: Mapping[str, Any],
     stats: Mapping[str, Any],
     *,
     fail_on_error: bool = True,
-) -> list[dict[str, np.ndarray]]:
+) -> list[PreparedExample]:
     """Add missing conditioner columns, reporting failures instead of hiding them.
 
     Inference raises on a failed solve by default. Corpus preparation may opt

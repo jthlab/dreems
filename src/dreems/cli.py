@@ -1,5 +1,7 @@
 """Command line interface for DREEMS inference."""
 
+# ruff: noqa: F722, F821, UP037
+
 from __future__ import annotations
 
 import argparse
@@ -11,6 +13,7 @@ from typing import Any
 
 import numpy as np
 from beartype import beartype
+from jaxtyping import Shaped, jaxtyped
 
 from dreems import features, feems, metrics, refinement
 from dreems.inference import (
@@ -24,8 +27,8 @@ from dreems.validation import _integer_array, _real_array, validate_graph_arrays
 from dreems.workflow_io import _atomic_output, json_ready
 
 
-@beartype
-def load_array(path: Path) -> np.ndarray:
+@jaxtyped(typechecker=beartype)
+def load_array(path: Path) -> Shaped[np.ndarray, "*stored_axes"]:
     """Load one array without pickle; CSV rows stay two-dimensional."""
 
     if path.suffix == ".npy":

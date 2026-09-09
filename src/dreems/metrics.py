@@ -1,8 +1,10 @@
-"""Graph-balanced comparisons use these centered edge-log surface metrics.
+"""Score a pair of migration surfaces after centering their log rates.
 
 Nonfinite pairs are excluded, and a constant truth has no defined correlation.
-This module does not apply uncertainty weights or change the prediction scale.
+Every retained edge contributes equally.
 """
+
+# ruff: noqa: F722, F821, UP037
 
 from __future__ import annotations
 
@@ -11,12 +13,12 @@ from dataclasses import asdict, dataclass
 
 import numpy as np
 from beartype import beartype
-from jaxtyping import Float, jaxtyped
+from jaxtyping import Float, Shaped, jaxtyped
 
 
 @dataclass(frozen=True)
 class EdgeLogMetrics:
-    """Scale-free and scale-sensitive metrics for centered edge log surfaces."""
+    """Correlation, error, and amplitude comparisons for one graph."""
 
     corr: float
     rmse: float
@@ -24,14 +26,14 @@ class EdgeLogMetrics:
     scale_ratio: float
     slope: float
 
-    @beartype
+    @jaxtyped(typechecker=beartype)
     def to_prefixed_dict(self, prefix: str = "edge_log") -> dict[str, float]:
         """Prefix the saved field names without maintaining a second field list."""
         return {f"{prefix}_{name}": value for name, value in asdict(self).items()}
 
 
 @jaxtyped(typechecker=beartype)
-def centered(values: np.ndarray) -> Float[np.ndarray, "*shape"]:  # noqa: F722
+def centered(values: Shaped[np.ndarray, "*shape"]) -> Float[np.ndarray, "*shape"]:  # noqa: F722
     """Return finite entries centered by their finite mean, preserving NaNs."""
 
     if values.dtype.kind not in "biuf":
@@ -44,8 +46,11 @@ def centered(values: np.ndarray) -> Float[np.ndarray, "*shape"]:  # noqa: F722
     return out
 
 
-@beartype
-def edge_log_metrics(truth: np.ndarray, estimate: np.ndarray) -> EdgeLogMetrics:
+@jaxtyped(typechecker=beartype)
+def edge_log_metrics(
+    truth: Shaped[np.ndarray, "*truth_shape"],
+    estimate: Shaped[np.ndarray, "*estimate_shape"],
+) -> EdgeLogMetrics:
     """Compare two edge-log surfaces after removing their arbitrary global scale.
 
     FEEMS/EEMS-style migration surfaces are interpreted up to an additive

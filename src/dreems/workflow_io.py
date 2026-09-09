@@ -5,6 +5,8 @@ Atomic replacement protects an existing file if serialization or writing fails;
 Snakemake still owns retries and the dependencies between multiple outputs.
 """
 
+# ruff: noqa: F722, F821, UP037
+
 from __future__ import annotations
 
 import csv
@@ -23,6 +25,7 @@ from typing import IO, Any
 import numpy as np
 import yaml
 from beartype import beartype
+from jaxtyping import Shaped, jaxtyped
 
 
 @contextmanager
@@ -65,8 +68,8 @@ def write_pickle(path: Path, payload: Any) -> None:
         pickle.dump(payload, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
 
-@beartype
-def write_npz(path: Path, **arrays: np.ndarray) -> None:
+@jaxtyped(typechecker=beartype)
+def write_npz(path: Path, **arrays: Shaped[np.ndarray, "*_stored_axes"]) -> None:
     """Replace a compressed NumPy archive only after every array is written."""
     with _atomic_output(path) as handle:
         np.savez_compressed(handle, **arrays)

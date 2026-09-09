@@ -1,4 +1,10 @@
-"""Array validation shared by inference inputs and benchmark workers."""
+"""Check raw arrays before inference or benchmarking.
+
+Raw arrays may have any rank or dtype. Each routine checks its expected layout
+and reports which argument is invalid.
+"""
+
+# ruff: noqa: F722, F821, UP037
 
 from __future__ import annotations
 
@@ -6,14 +12,14 @@ from typing import Any
 
 import numpy as np
 from beartype import beartype
-from jaxtyping import Float, Int, jaxtyped
+from jaxtyping import Float, Int, Shaped, jaxtyped
 from scipy.sparse import coo_array
 from scipy.sparse.csgraph import connected_components
 
 
 @jaxtyped(typechecker=beartype)
 def _real_array(values: Any, *, name: str) -> Float[np.ndarray, "*shape"]:  # noqa: F722
-    """Convert real numeric inputs without silently discarding complex components."""
+    """Convert finite real values to float64, rejecting complex data."""
     array = np.asarray(values)
     if array.dtype.kind not in "biuf":
         raise ValueError(f"{name} must contain real numbers")
@@ -25,12 +31,12 @@ def _real_array(values: Any, *, name: str) -> Float[np.ndarray, "*shape"]:  # no
 
 @jaxtyped(typechecker=beartype)
 def _integer_array(
-    values: np.ndarray,
+    values: Shaped[np.ndarray, "*shape"],
     *,
     name: str,
     dtype: type[np.signedinteger],
 ) -> Int[np.ndarray, "*shape"]:  # noqa: F722
-    """Accept integer-valued numeric arrays without rounding or overflowing.
+    """Convert whole numbers after checking that they fit the requested dtype.
 
     CSV readers produce floats even for integer columns, so integral floats are
     valid. Bounds are compared as Python scalars to avoid rounding int64 limits
@@ -47,7 +53,7 @@ def _integer_array(
     return values.astype(dtype, copy=False)
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def _effective_snp_count(value: Any) -> int:
     """Validate the scalar precision count before converting it to an integer."""
 
@@ -57,8 +63,10 @@ def _effective_snp_count(value: Any) -> int:
     return count.item()
 
 
-@beartype
-def validate_graph_arrays(*, positions: np.ndarray, edges: np.ndarray) -> None:
+@jaxtyped(typechecker=beartype)
+def validate_graph_arrays(
+    *, positions: Shaped[np.ndarray, "*positions_axes"], edges: Shaped[np.ndarray, "*edges_axes"]
+) -> None:
     """Require finite coordinates and a simple, connected, undirected graph."""
 
     positions = _real_array(positions, name="node coordinates")
@@ -85,8 +93,8 @@ def validate_graph_arrays(*, positions: np.ndarray, edges: np.ndarray) -> None:
         raise ValueError("edges must define a connected graph")
 
 
-@beartype
-def _validate_covariance(covariance: np.ndarray, *, name: str) -> None:
+@jaxtyped(typechecker=beartype)
+def _validate_covariance(covariance: Shaped[np.ndarray, "*covariance_axes"], *, name: str) -> None:
     """Check the shared matrix requirements for sample and node covariance."""
 
     covariance = _real_array(covariance, name=name)
@@ -98,11 +106,11 @@ def _validate_covariance(covariance: np.ndarray, *, name: str) -> None:
         raise ValueError(f"{name} must be symmetric")
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def validate_covariance_arrays(
     *,
-    sample_covariance: np.ndarray,
-    sample_coordinates: np.ndarray,
+    sample_covariance: Shaped[np.ndarray, "*sample_covariance_axes"],
+    sample_coordinates: Shaped[np.ndarray, "*sample_coordinates_axes"],
 ) -> None:
     """Match covariance rows to finite sample coordinates in the same order."""
 
@@ -117,12 +125,12 @@ def validate_covariance_arrays(
         )
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def validate_node_covariance_arrays(
     *,
-    node_covariance: np.ndarray,
-    observed_nodes: np.ndarray,
-    node_sample_count: np.ndarray,
+    node_covariance: Shaped[np.ndarray, "*node_covariance_axes"],
+    observed_nodes: Shaped[np.ndarray, "*observed_nodes_axes"],
+    node_sample_count: Shaped[np.ndarray, "*node_sample_count_axes"],
     num_nodes: int,
 ) -> None:
     """Require one covariance row per sampled node and consistent sample counts."""
@@ -149,12 +157,12 @@ def validate_node_covariance_arrays(
         raise ValueError("node_covariance must be positive semidefinite")
 
 
-@beartype
-def validate_diploid_dosages(genotypes: np.ndarray) -> None:
-    """Require a complete sample-by-SNP matrix of diploid dosages.
+@jaxtyped(typechecker=beartype)
+def validate_diploid_dosages(genotypes: Shaped[np.ndarray, "*genotypes_axes"]) -> None:
+    """Require complete diploid dosages with rows for samples and columns for SNPs.
 
-    Fractional values from imputation are valid. Missing-call sentinels, NaNs,
-    and counts outside [0, 2] are not; use the genotype-dataset QC path first.
+    Fractional values from imputation are valid. Use ``from_genotype_dataset``
+    to filter and impute missing calls before this check.
     """
     genotypes = _real_array(genotypes, name="genotypes")
     if genotypes.ndim != 2 or genotypes.shape[0] < 2 or genotypes.shape[1] < 1:
@@ -163,13 +171,13 @@ def validate_diploid_dosages(genotypes: np.ndarray) -> None:
         raise ValueError("diploid genotypes must contain dosages in [0, 2]")
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def validate_genotype_arrays(
     *,
-    positions: np.ndarray,
-    edges: np.ndarray,
-    sample_nodes: np.ndarray,
-    genotypes: np.ndarray,
+    positions: Shaped[np.ndarray, "*positions_axes"],
+    edges: Shaped[np.ndarray, "*edges_axes"],
+    sample_nodes: Shaped[np.ndarray, "*sample_nodes_axes"],
+    genotypes: Shaped[np.ndarray, "*genotypes_axes"],
 ) -> None:
     """Validate complete diploid dosages and their graph-node assignments."""
 

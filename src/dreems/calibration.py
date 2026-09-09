@@ -69,11 +69,11 @@ class SDCalibration:
         object.__setattr__(self, "density_scales", scales)
 
     @classmethod
-    @beartype
+    @jaxtyped(typechecker=beartype)
     def from_squared_errors(
         cls,
         errors: Shaped[np.ndarray, "*shape"],
-        raw_sd: Shaped[np.ndarray, "*shape"],
+        raw_sd: Shaped[np.ndarray, "*sd_shape"],
         *,
         floor: Real = 1e-12,
     ) -> SDCalibration:
@@ -87,7 +87,7 @@ class SDCalibration:
         return cls(method="global", global_scale=max(float(np.sqrt(graph_score)), floor))
 
     @classmethod
-    @beartype
+    @jaxtyped(typechecker=beartype)
     def from_graphs(
         cls,
         errors: Sequence[RealArray[np.ndarray, "*_edge_shape"]],
@@ -227,9 +227,9 @@ def _standardized_errors(
     return standardized
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def _mean_squared_standardized_error(
-    errors: Shaped[np.ndarray, "*shape"], raw_sd: Shaped[np.ndarray, "*shape"], *, floor: Real
+    errors: Shaped[np.ndarray, "*shape"], raw_sd: Shaped[np.ndarray, "*sd_shape"], *, floor: Real
 ) -> float:
     """Give each graph one squared-error score, regardless of its edge count."""
     standardized = _standardized_errors(errors, raw_sd, floor=_positive_finite(floor, name="floor"))
@@ -240,7 +240,7 @@ def _mean_squared_standardized_error(
     return score
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def candidates(
     errors: Sequence[RealArray[np.ndarray, "*_edge_shape"]],
     raw_sd: Sequence[RealArray[np.ndarray, "*_edge_shape"]],
@@ -255,7 +255,7 @@ def candidates(
     }
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def summarize(
     errors: Sequence[RealArray[np.ndarray, "*_edge_shape"]],
     raw_sd: Sequence[RealArray[np.ndarray, "*_edge_shape"]],
