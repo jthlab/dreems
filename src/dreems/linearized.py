@@ -1,4 +1,4 @@
-"""A fast all-pair resistance initializer, not a fitted FEEMS model."""
+"""Estimate conductance from a linear approximation to effective resistance."""
 
 # ruff: noqa: F722,F821,UP037
 
@@ -18,28 +18,27 @@ from dreems import features
 from dreems.features import geometry_conductance as _baseline_conductance
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 @dataclass(frozen=True)
 class LinearizedConductanceEstimate:
-    """An edge field and diagnostics from the linearized resistance calculation.
+    """Conductance estimates and sensitivity diagnostics.
 
-    ``edge_information`` is the diagonal sensitivity sum, not posterior precision.
-    Pair arrays follow the upper triangle of sorted ``observed_nodes``. Field
-    order is kept stable for callers and previously saved objects.
+    ``edge_information`` is the diagonal sensitivity sum. Pair arrays follow
+    the upper triangle of sorted ``observed_nodes``.
     """
 
-    edge_log_conductance: np.ndarray
-    edge_information: np.ndarray
-    observed_nodes: np.ndarray
-    observed_pair_log_resistance: np.ndarray
-    baseline_pair_log_resistance: np.ndarray
-    pair_residual: np.ndarray
+    edge_log_conductance: Float[np.ndarray, "edges"]
+    edge_information: Float[np.ndarray, "edges"]
+    observed_nodes: Int[np.ndarray, "observed"]
+    observed_pair_log_resistance: Float[np.ndarray, "pairs"]
+    baseline_pair_log_resistance: Float[np.ndarray, "pairs"]
+    pair_residual: Float[np.ndarray, "pairs"]
     diagnostics: dict[str, Any]
 
 
-@beartype
-def _centered(values: np.ndarray) -> np.ndarray:
-    """Remove the mean without imputing missing values."""
+@jaxtyped(typechecker=beartype)
+def _centered(values: Real[np.ndarray, "values"]) -> Float[np.ndarray, "values"]:
+    """Subtract the mean."""
     array = np.asarray(values, dtype=np.float64)
     if array.size == 0:
         return array
@@ -81,7 +80,13 @@ def _deme_pair_log_resistance(
     sample_nodes: Int[np.ndarray, "samples"],
     num_nodes: int,
     effective_snps: int | None,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[
+    Int[np.ndarray, "observed"],
+    Float[np.ndarray, "observed"],
+    Int[np.ndarray, "pairs"],
+    Int[np.ndarray, "pairs"],
+    Float[np.ndarray, "pairs"],
+]:
     """Form centered log dissimilarities between every pair of observed demes."""
     summaries = features.covariance_deme_summaries(
         sample_covariance,
@@ -119,7 +124,7 @@ def all_pair_adjoint_conductance_initializer(
     node_coordinates: Real[np.ndarray, "nodes 2"],
     edges: Int[np.ndarray, "edges 2"],
     effective_snps: int | None = None,
-    node_sample_count: np.ndarray | None = None,
+    node_sample_count: Real[np.ndarray, "nodes"] | None = None,
     smoothness: float = 0.01,
     ridge_scale: float = 0.001,
     pair_weight_power: float = 0.0,
@@ -127,19 +132,18 @@ def all_pair_adjoint_conductance_initializer(
     output_sd: float | None = 1.0,
     batch_size: int = 256,
 ) -> LinearizedConductanceEstimate:
-    """Estimate an edge log-conductance field from all observed resistance pairs.
+    """Estimate log conductances using every pair of observed nodes.
 
-    This is a deliberately approximate FEEMS-like initializer. It linearizes
-    effective-resistance observations around a fixed baseline graph, accumulates
-    the all-pair adjoint score on edges, and solves a smoothed diagonal-normal
-    system on the line graph.
+    Linearize resistance around a fixed geographic graph. For conductance w
+    and pair potential v, sensitivity is
+    S[e,p] = -w[e] * (v[i,p]-v[j,p])**2 / R[p].
+    Accumulate S @ (W*r) and the diagonal sum_p W[p]*S[e,p]**2, then
+    solve with a penalty for differences between incident edges.
+    The diagonal approximation omits curvature between different edges.
 
-    For baseline conductances w and pair potentials v, a sensitivity entry is
-    S[e,p] = -w[e] * (v[i,p]-v[j,p])**2 / R[p]. The right-hand side is S @ (W*r);
-    the diagonal is sum_p W[p]*S[e,p]**2. Cross-edge curvature is omitted.
-    ``batch_size`` limits temporary storage, not the number of observed pairs.
-    ``output_sd`` optionally fixes amplitude after centering; it is not an
-    uncertainty estimate. This calculation has no separately fitted q field.
+    ``batch_size`` controls temporary memory; all observed pairs contribute.
+    ``output_sd`` sets surface amplitude after centering. The calculation
+    fits no q field.
     """
 
     started = time.perf_counter()

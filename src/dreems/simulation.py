@@ -1,5 +1,7 @@
 """Generate one conditioned coalescent example from a corpus configuration."""
 
+# ruff: noqa: F722, F821, UP037
+
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -7,9 +9,9 @@ from typing import Any
 
 import numpy as np
 from beartype import beartype
+from jaxtyping import Bool, Float, Integer, Real, jaxtyped
 
 from dreems import island_sim
-from dreems.coalescent import simulate_msprime_genotypes
 from dreems.motifs import (
     apply_migration_associated_sampling,
     choose_sample_regime,
@@ -49,8 +51,8 @@ def simulate_case_genotypes(
     node_log_q = np.asarray(case["node_log_q"], dtype=np.float64)
     sample_nodes = np.asarray(case["sample_nodes"], dtype=np.int32)
     simulator = selected_simulator(sim, positions.shape[0])
-    genotypes: np.ndarray | None = None
-    sample_covariance: np.ndarray | None = None
+    genotypes: Float[np.ndarray, "sample snp"] | None = None
+    sample_covariance: Float[np.ndarray, "sample sample"] | None = None
     effective_snps: int | None = None
     if simulator in {"msprime_coalescent", "island_coalescent"}:
         case["island_min_allele_frequency"] = float(sim["island_min_allele_frequency"])
@@ -255,3 +257,159 @@ def pairwise_conditionable_example(example: Mapping[str, Any]) -> bool:
     """A resistance conditioner needs at least one pair of observed demes."""
     sample_nodes = np.asarray(example.get("sample_nodes", []), dtype=np.int32)
     return bool(np.unique(sample_nodes).shape[0] >= 2)
+
+
+@jaxtyped(typechecker=beartype)
+def allele_frequency_columns(
+    genotypes: Real[np.ndarray, "sample snp"],
+    *,
+    ploidy: int = 2,
+) -> Float[np.ndarray, "snp"]:
+    """Calculate allele frequency from dosage and ploidy."""
+    values = np.asarray(genotypes, dtype=np.float64)
+    return values.sum(axis=0) / float(int(ploidy) * values.shape[0])
+
+
+@jaxtyped(typechecker=beartype)
+def ascertained_columns(
+    genotypes: Real[np.ndarray, "sample snp"],
+    *,
+    min_allele_frequency: float,
+    max_allele_frequency: float,
+    ploidy: int = 2,
+) -> Bool[np.ndarray, "snp"]:
+    """Select segregating SNPs in the requested frequency interval."""
+    values = np.asarray(genotypes)
+    allele_sum = values.sum(axis=0)
+    polymorphic = (allele_sum > 0.0) & (allele_sum < float(int(ploidy) * values.shape[0]))
+    frequency = allele_frequency_columns(values, ploidy=ploidy)
+    return polymorphic & (frequency >= min_allele_frequency) & (frequency <= max_allele_frequency)
+
+
+@jaxtyped(typechecker=beartype)
+def genotypes_from_grouped_haplotypes(
+    haplotypes: Real[np.ndarray, "snp haploid"],
+    *,
+    sample_nodes: Integer[np.ndarray, "sample"],
+    num_nodes: int,
+    ploidy: int = 2,
+) -> Real[np.ndarray, "sample snp"]:
+    """Sum haplotypes into dosages and restore the caller's sample order."""
+
+    samples = np.asarray(sample_nodes)
+    values = np.asarray(haplotypes)
+    if ploidy <= 0:
+        raise ValueError("ploidy must be positive")
+    if np.any(samples < 0) or np.any(samples >= num_nodes):
+        raise ValueError("sample_nodes are outside the graph")
+    if len(samples) * ploidy != values.shape[1]:
+        raise ValueError("haplotype count does not match sample_nodes and ploidy")
+    grouped_dosages = values.reshape(values.shape[0], len(samples), ploidy).sum(axis=2).T
+    genotypes = np.empty(grouped_dosages.shape, dtype=values.dtype)
+    # msprime groups samples by deme; stable sorting preserves within-deme order.
+    genotypes[np.argsort(samples, kind="stable")] = grouped_dosages
+    return genotypes
+
+
+@jaxtyped(typechecker=beartype)
+def simulate_msprime_genotypes(
+    *,
+    num_nodes: int,
+    edges: Integer[np.ndarray, "edge 2"],
+    edge_log_rates: Real[np.ndarray, "edge"],
+    node_log_q: Real[np.ndarray, "node"],
+    sample_nodes: Integer[np.ndarray, "sample"],
+    num_snps: int,
+    rng: np.random.Generator,
+    migration_scale: float,
+    effective_size: float,
+    mutation_rate: float,
+    sequence_length: float,
+    batch_replicates: int,
+    max_batches: int,
+    min_allele_frequency: float = 0.0,
+    max_allele_frequency: float = 1.0,
+) -> Float[np.ndarray, "sample retained_snps"]:
+    """Select one segregating site from each msprime replicate with mutations.
+
+    This is diploid and uses Ne=effective_size*exp(-node_log_q), clipped to
+    [1e-3, 1e6]. Each tree contributes at most one site; retained sites then
+    pass the derived-frequency filter. This simulator weights trees through
+    their probability of carrying mutations. The Rust ``conditioned_marker``
+    mode samples a branch on each tree in proportion to its eligible length.
+    """
+    try:
+        import msprime
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "msprime is required for simulation.simulator='msprime_coalescent'"
+        ) from exc
+
+    sample_nodes = np.asarray(sample_nodes, dtype=np.int32)
+    sample_counts = np.bincount(sample_nodes, minlength=num_nodes).astype(np.int32)
+    node_ne = float(effective_size) * np.exp(-np.asarray(node_log_q, dtype=np.float64))
+    node_ne = np.clip(node_ne, 1e-3, 1e6)
+    population_configurations = [
+        msprime.PopulationConfiguration(
+            sample_size=2 * int(sample_counts[node]),
+            initial_size=float(node_ne[node]),
+        )
+        for node in range(num_nodes)
+    ]
+    migration_matrix = np.zeros((num_nodes, num_nodes), dtype=np.float64)
+    rates = float(migration_scale) * np.exp(np.asarray(edge_log_rates, dtype=np.float64))
+    for (left, right), rate in zip(edges, rates, strict=True):
+        migration_matrix[int(left), int(right)] = float(rate)
+        migration_matrix[int(right), int(left)] = float(rate)
+
+    chunks: list[Float[np.ndarray, "sample retained_snps"]] = []
+    remaining = int(num_snps)
+    for _batch in range(int(max_batches)):
+        if remaining <= 0:
+            break
+        replicates = max(int(batch_replicates), remaining)
+        seed = int(rng.integers(1, np.iinfo(np.int32).max))
+        tree_sequences = msprime.simulate(
+            population_configurations=population_configurations,
+            migration_matrix=migration_matrix,
+            length=float(sequence_length),
+            mutation_rate=float(mutation_rate),
+            num_replicates=replicates,
+            Ne=1.0,
+            random_seed=seed,
+        )
+        haplotypes = []
+        for tree_sequence in tree_sequences:
+            matrix = tree_sequence.genotype_matrix()
+            if matrix.shape[0] == 0:
+                continue
+            chosen = matrix[int(rng.integers(0, matrix.shape[0])), :]
+            if np.all(chosen == chosen[0]):
+                continue
+            haplotypes.append(chosen.astype(np.float64, copy=False))
+            if len(haplotypes) >= remaining:
+                break
+        if haplotypes:
+            haplotype_matrix = np.vstack(haplotypes)
+            genotypes = genotypes_from_grouped_haplotypes(
+                haplotype_matrix,
+                sample_nodes=sample_nodes,
+                num_nodes=num_nodes,
+                ploidy=2,
+            )
+            keep = ascertained_columns(
+                genotypes,
+                min_allele_frequency=float(min_allele_frequency),
+                max_allele_frequency=float(max_allele_frequency),
+                ploidy=2,
+            )
+            if np.any(keep):
+                kept = genotypes[:, keep][:, :remaining]
+                chunks.append(kept)
+                remaining -= kept.shape[1]
+    if remaining > 0:
+        raise RuntimeError(
+            f"msprime simulator produced {num_snps - remaining} polymorphic SNPs "
+            f"after {max_batches} batches; requested {num_snps}"
+        )
+    return np.concatenate(chunks, axis=1)[:, :num_snps]

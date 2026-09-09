@@ -142,6 +142,15 @@ def test_metrics_weight_graphs_equally_and_preserve_keys() -> None:
     }
 
 
+def test_graph_arrays_accept_scalar_vector_and_matrix_shapes() -> None:
+    errors = [np.full(shape, 2.0) for shape in ((), (3,), (2, 2))]
+    raw_sd = [np.ones_like(error) for error in errors]
+    density = np.asarray([0.05, 0.2, 0.5])
+    fitted = candidates(errors, raw_sd, density)["global"]
+
+    assert fitted.global_scale == 2.0
+
+
 def test_overflow_is_not_a_successful_calibration() -> None:
     with pytest.raises(ValueError, match="overflow"):
         SDCalibration(method="global", global_scale=1e300).apply(np.asarray([1e300]))

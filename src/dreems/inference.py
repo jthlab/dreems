@@ -1,4 +1,4 @@
-"""User-facing inference API for trained DREEMS checkpoints."""
+"""Load a checkpoint and estimate migration from covariance or genotypes."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from typing import Any
 
 import numpy as np
 from beartype import beartype
-from jaxtyping import Float, Int, jaxtyped
+from jaxtyping import Float, Int, Shaped, jaxtyped
 
 from dreems import checkpoints, features, metrics, refinement
 from dreems.validation import (
@@ -28,12 +28,12 @@ from dreems.validation import (
 
 @dataclass(frozen=True)
 class DREEMSInput:
-    """Covariance-first input for DREEMS inference.
+    """Sample covariance and geographic coordinates.
 
     Parameters
     ----------
     sample_covariance
-        Sample-level covariance matrix with shape ``(samples, samples)``.
+        Covariance matrix between samples with shape ``(samples, samples)``.
     sample_coordinates
         Coordinates for rows/columns of ``sample_covariance`` with shape
         ``(samples, 2)``. Samples are assigned to their nearest graph node.
@@ -52,10 +52,10 @@ class DREEMSInput:
         Optional user metadata propagated to prediction results.
     """
 
-    sample_covariance: np.ndarray
-    sample_coordinates: np.ndarray
-    node_coordinates: np.ndarray
-    edges: np.ndarray
+    sample_covariance: Float[np.ndarray, "samples samples"]
+    sample_coordinates: Float[np.ndarray, "samples 2"]
+    node_coordinates: Float[np.ndarray, "nodes 2"]
+    edges: Int[np.ndarray, "edges 2"]
     effective_snps: int | None = None
     name: str | None = None
     metadata: Mapping[str, Any] | None = None
@@ -85,14 +85,14 @@ class DREEMSInput:
 
     @property
     @beartype
-    def positions(self) -> np.ndarray:
-        """Graph node coordinates, kept as ``positions`` for result construction."""
+    def positions(self) -> Float[np.ndarray, "nodes 2"]:
+        """Coordinates of graph nodes."""
 
         return self.node_coordinates
 
     @beartype
     def to_raw_example(self) -> dict[str, Any]:
-        """Return the internal raw-example mapping consumed by feature builders."""
+        """Build the input mapping for feature construction."""
 
         payload: dict[str, Any] = {
             "graph": {
@@ -112,18 +112,18 @@ class DREEMSInput:
 
 @dataclass(frozen=True)
 class NodeCovarianceInput:
-    """Node-level covariance input used by the xarray public API.
+    """Covariance between sampled graph nodes.
 
     ``node_covariance`` contains covariance among the observed graph nodes,
     whose graph indices are given by ``observed_nodes``. ``node_sample_count``
     records how many samples contributed to every graph node.
     """
 
-    node_covariance: np.ndarray
-    observed_nodes: np.ndarray
-    node_sample_count: np.ndarray
-    node_coordinates: np.ndarray
-    edges: np.ndarray
+    node_covariance: Float[np.ndarray, "observed observed"]
+    observed_nodes: Int[np.ndarray, "observed"]
+    node_sample_count: Int[np.ndarray, "nodes"]
+    node_coordinates: Float[np.ndarray, "nodes 2"]
+    edges: Int[np.ndarray, "edges 2"]
     effective_snps: int
     name: str | None = None
     metadata: Mapping[str, Any] | None = None
@@ -160,8 +160,8 @@ class NodeCovarianceInput:
 
     @property
     @beartype
-    def positions(self) -> np.ndarray:
-        """Graph coordinates, using the same name as genotype inputs and results."""
+    def positions(self) -> Float[np.ndarray, "nodes 2"]:
+        """Coordinates of graph nodes."""
 
         return self.node_coordinates
 
@@ -187,17 +187,15 @@ class NodeCovarianceInput:
 
 @dataclass(frozen=True)
 class InferenceExample:
-    """Genotype-based compatibility input for DREEMS inference.
+    """Complete diploid dosages with a graph node assigned to each sample.
 
-    Prefer the xarray API in :mod:`dreems.datasets` for user-facing inference.
-    This class is useful when tests or internal workflows still have genotypes
-    and sample-node assignments rather than an already-computed covariance.
+    Use ``dreems.from_genotype_dataset`` to filter and impute allele calls.
     """
 
-    positions: np.ndarray
-    edges: np.ndarray
-    sample_nodes: np.ndarray
-    genotypes: np.ndarray
+    positions: Float[np.ndarray, "nodes 2"]
+    edges: Int[np.ndarray, "edges 2"]
+    sample_nodes: Int[np.ndarray, "samples"]
+    genotypes: Float[np.ndarray, "samples snps"]
     name: str | None = None
     metadata: Mapping[str, Any] | None = None
 
@@ -227,7 +225,7 @@ class InferenceExample:
 
     @beartype
     def to_raw_example(self) -> dict[str, Any]:
-        """Return the internal raw-example mapping consumed by feature builders."""
+        """Build the input mapping for feature construction."""
 
         payload: dict[str, Any] = {
             "graph": {
@@ -248,9 +246,9 @@ InferenceLike = DREEMSInput | NodeCovarianceInput | InferenceExample | Mapping[s
 
 @dataclass(frozen=True)
 class _RefinementObservation:
-    node_covariance: np.ndarray
-    observed_nodes: np.ndarray
-    observed_sample_count: np.ndarray
+    node_covariance: Float[np.ndarray, "observed observed"]
+    observed_nodes: Int[np.ndarray, "observed"]
+    observed_sample_count: Float[np.ndarray, "observed"] | Int[np.ndarray, "observed"]
     effective_snps: int
 
 
@@ -295,18 +293,18 @@ class DREEMSResult:
     separate point estimate; the SD fields still describe the neural output.
     """
 
-    edge_log_mean: np.ndarray
-    edge_log_sd: np.ndarray
-    edges: np.ndarray
-    positions: np.ndarray
-    raw_edge_log_sd: np.ndarray | None = None
+    edge_log_mean: Float[np.ndarray, "edges"]
+    edge_log_sd: Float[np.ndarray, "edges"]
+    edges: Int[np.ndarray, "edges 2"]
+    positions: Float[np.ndarray, "nodes 2"]
+    raw_edge_log_sd: Float[np.ndarray, "edges"] | None = None
     surface_weight: float = 1.0
-    node_log_q_mean: np.ndarray | None = None
-    node_log_q_sd: np.ndarray | None = None
+    node_log_q_mean: Float[np.ndarray, "nodes"] | None = None
+    node_log_q_sd: Float[np.ndarray, "nodes"] | None = None
     name: str | None = None
     checkpoint_path: Path | None = None
     metadata: Mapping[str, Any] | None = None
-    refined_edge_log_mean: np.ndarray | None = None
+    refined_edge_log_mean: Float[np.ndarray, "edges"] | None = None
     refinement_diagnostics: Mapping[str, Any] | None = None
 
     @beartype
@@ -323,8 +321,7 @@ class DREEMSResult:
         if (self.node_log_q_mean is None) != (self.node_log_q_sd is None):
             raise ValueError("node_log_q_mean and node_log_q_sd must be supplied together")
 
-        # A result may represent an edge subset. Check its indexing, not whether
-        # that subset still forms the connected graph required for inference.
+        # Results can contain an edge subset, so connectivity is checked on input.
         for name, size in (
             ("edge_log_mean", edges.shape[0]),
             ("edge_log_sd", edges.shape[0]),
@@ -531,8 +528,10 @@ def normalize_refinement_config(
     return config
 
 
-@beartype
-def genotype_covariance(genotypes: np.ndarray) -> tuple[np.ndarray, int]:
+@jaxtyped(typechecker=beartype)
+def genotype_covariance(
+    genotypes: Shaped[np.ndarray, "samples snps"],
+) -> tuple[Float[np.ndarray, "samples samples"], int]:
     """Standardize complete diploid dosages and return sample covariance.
 
     Monomorphic sites are removed, but no MAF, missing-call, or LD filtering

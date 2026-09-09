@@ -11,7 +11,6 @@ import pytest
 from dreems import (
     calibration,
     checkpoints,
-    coalescent,
     corpus,
     features,
     geography,
@@ -195,7 +194,7 @@ def test_msprime_haplotypes_are_restored_to_requested_sample_order() -> None:
         dtype=np.int8,
     )
 
-    genotypes = coalescent.genotypes_from_grouped_haplotypes(
+    genotypes = simulation.genotypes_from_grouped_haplotypes(
         haplotypes,
         sample_nodes=sample_nodes,
         num_nodes=3,

@@ -1,9 +1,7 @@
 # DREEMS Package
 
-This package is the publication-facing API for Deep Recovery of Effective
-Migration Surfaces (DREEMS). Code here
-should be reusable, tested, and stable enough for paper figures and reproducible
-evaluation scripts.
+Deep Recovery of Effective Migration Surfaces (DREEMS) estimates migration
+from genetic covariance and geography.
 
 Modules:
 
@@ -21,7 +19,8 @@ Modules:
 - `dreems.h2h`: DREEMS benchmark inference, paired reports, and the combined CLI.
 - `dreems.feems_benchmark`: FEEMS-only workers, separate from neural and rendering
   code so model changes do not invalidate expensive FEEMS fits.
-- `dreems.benchmark_data`: common simulated-case inputs and report fields.
+- `dreems.benchmark_data`: benchmark inputs, shared report fields, and verified
+  archives of FEEMS results.
 - `dreems.features`: topology-invariant covariance, graph-diffusion-band, and
   all-pair linearized-resistance feature construction.
 - `dreems.model`: production GNN forward pass, including the edgewise blend
@@ -34,6 +33,7 @@ Modules:
 - `dreems.corpus`: one-example MAF-conditioned simulation worker and
   deterministic raw-pack writer used by Snakemake; raw corpus artifacts are
   independent of training code.
+- `dreems.simulation`: example generation and the small-graph msprime adapter.
 - `dreems.pipeline`: artifact-oriented feature preparation, normalization,
   training, and evaluation CLI used by `workflow/Snakefile`.
 - `dreems.island_sim`: sparse island-model coalescent simulator with genotype

@@ -64,8 +64,9 @@ class CovarianceScales:
 class DREEMSMapRefinementConfig:
     """Settings for constrained covariance fitting around a DREEMS prediction.
 
-    Radius limits the RMS edge change in units of the floored prior SD. Zero
-    disables this limit; it does not freeze the surface. SDs are not refitted.
+    Radius limits the RMS change in edge logs, measured in units of the prior
+    SD after applying ``sd_floor``. A zero radius disables the limit.
+    Refinement keeps the prior SDs fixed.
     """
 
     steps: int = 50
@@ -92,16 +93,16 @@ class DREEMSMapRefinementConfig:
 @beartype
 @dataclass(frozen=True)
 class DREEMSMapRefinementResult:
-    """Result of DREEMS-prior MAP refinement."""
+    """Refined conductances, covariance fit statistics, and optimizer history."""
 
-    edge_log_conductance: np.ndarray
-    observed_nodes: np.ndarray
-    empirical_centered_covariance: np.ndarray
+    edge_log_conductance: Float[np.ndarray, "edge"]
+    observed_nodes: Int[np.ndarray, "observed"]
+    empirical_centered_covariance: Float[np.ndarray, "observed observed"]
     initial_fit: CovarianceFit
     refined_fit: CovarianceFit
     diagnostics: dict[str, Any]
     history: list[dict[str, float | int]]
-    node_log_q: np.ndarray | None = None
+    node_log_q: Float[np.ndarray, "node"] | None = None
 
 
 @jaxtyped(typechecker=beartype)
@@ -224,7 +225,11 @@ def empirical_observed_covariance(
     sample_nodes: Int[np.ndarray, "sample"],
     num_nodes: int,
     effective_snps: int | None = None,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[
+    Float[np.ndarray, "observed observed"],
+    Int[np.ndarray, "observed"],
+    Float[np.ndarray, "observed"],
+]:
     """Average sample covariance within demes, retaining only observed demes."""
     summaries = features.covariance_deme_summaries(
         sample_covariance,
@@ -249,7 +254,11 @@ def validate_observed_covariance(
     observed_nodes: Int[np.ndarray, "observed"],
     observed_sample_count: Real[np.ndarray, "observed"],
     num_nodes: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[
+    Float[np.ndarray, "observed observed"],
+    Int[np.ndarray, "observed"],
+    Float[np.ndarray, "observed"],
+]:
     """Check node order, covariance shape, and positive observation counts."""
     covariance = symmetrize(np.asarray(node_covariance, dtype=np.float64))
     nodes = np.asarray(observed_nodes)
@@ -351,7 +360,7 @@ def q_covariance_at_observed_nodes(
 
 
 @beartype
-def offdiag_indices(count: int) -> tuple[np.ndarray, np.ndarray]:
+def offdiag_indices(count: int) -> tuple[Int[np.ndarray, "pair"], Int[np.ndarray, "pair"]]:
     """Select each unordered off-diagonal pair exactly once."""
     return np.triu_indices(int(count), k=1)
 
@@ -361,7 +370,7 @@ def normalized_pair_indices(
     pair_indices: tuple[Int[np.ndarray, "*shape"], Int[np.ndarray, "*shape"]] | None,
     *,
     count: int,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[Int[np.ndarray, "pair"], Int[np.ndarray, "pair"]]:
     """Validate a supplied pair subset, or use all off-diagonal pairs."""
     if pair_indices is None:
         return offdiag_indices(int(count))
@@ -450,7 +459,7 @@ def covariance_fit(
     empirical_covariance: Real[np.ndarray, "observed observed"],
     model_covariance: Real[np.ndarray, "observed observed"],
     q_covariance: Real[np.ndarray, "observed observed"] | None = None,
-    pair_indices: tuple[np.ndarray, np.ndarray] | None = None,
+    pair_indices: tuple[Int[np.ndarray, "*pairs"], Int[np.ndarray, "*pairs"]] | None = None,
     scales: CovarianceScales | None = None,
 ) -> CovarianceFit:
     """Score centered off-diagonal covariance, optionally using fixed scales."""
@@ -498,12 +507,12 @@ def covariance_objective_and_gradient(
     empirical_centered_covariance: Real[np.ndarray, "observed observed"],
     line_laplacian: sp.csr_matrix,
     q_centered_covariance: Real[np.ndarray, "observed observed"] | None = None,
-    pair_indices: tuple[np.ndarray, np.ndarray] | None = None,
+    pair_indices: tuple[Int[np.ndarray, "*pairs"], Int[np.ndarray, "*pairs"]] | None = None,
     prior_weight: float,
     smoothness_weight: float,
     sd_floor: float,
     edge_batch_size: int,
-) -> tuple[float, np.ndarray, dict[str, float]]:
+) -> tuple[float, Float[np.ndarray, "edge"], dict[str, float]]:
     """Evaluate least squares plus penalties and the analytic edge gradient.
 
     The Green derivative for edge e is -w[e] * v[e] * v[e].T, where v is
@@ -604,7 +613,7 @@ def refine_edge_log_conductance(
     initial_node_log_q: Real[np.ndarray, "node"] | None = None,
     effective_snps: int | None = None,
     config: DREEMSMapRefinementConfig | None = None,
-    fit_pair_indices: tuple[np.ndarray, np.ndarray] | None = None,
+    fit_pair_indices: tuple[Int[np.ndarray, "*pairs"], Int[np.ndarray, "*pairs"]] | None = None,
 ) -> DREEMSMapRefinementResult:
     """Refine edge log-conductances against the observed covariance.
 

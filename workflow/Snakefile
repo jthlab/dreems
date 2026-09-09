@@ -33,7 +33,6 @@ def source_paths(*names):
 
 
 SIMULATION_SOURCES = source_paths(
-    "coalescent.py",
     "corpus.py",
     "geography.py",
     "island_sim.py",

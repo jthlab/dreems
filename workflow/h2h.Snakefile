@@ -362,7 +362,7 @@ if FEEMS_ARCHIVE:
             archive=FEEMS_ARCHIVE,
             checksum=FEEMS_ARCHIVE_CHECKSUM,
             examples=[source_path(INPUT_PATTERN, example) for example in EXAMPLES],
-            runner=str(PROJECT / "src/dreems/benchmark_archive.py"),
+            runner=str(PROJECT / "src/dreems/benchmark_data.py"),
             adapter=str(PROJECT / "src/dreems/feems.py"),
             code=BENCHMARK_CODE,
             environment=ENVIRONMENT,
@@ -387,7 +387,7 @@ if FEEMS_ARCHIVE:
         shell:
             """
             set -euo pipefail
-            uv --project {params.project:q} run --frozen --no-sync python -m dreems.benchmark_archive restore \
+            uv --project {params.project:q} run --frozen --no-sync python -m dreems.benchmark_data restore \
                 --archive {input.archive:q} --checksum {input.checksum:q} \
                 --results-dir {params.target:q} --input-pattern {params.input_pattern:q} \
                 --examples {params.examples:q} --verification {output.verification:q} {params.legacy:q}
@@ -538,7 +538,7 @@ if not ARCHIVE_IS_PUBLISHED:
             json=[feems_json(example) for example in EXAMPLES],
             npz=[feems_npz(example) for example in EXAMPLES],
             examples=[source_path(INPUT_PATTERN, example) for example in EXAMPLES],
-            runner=str(PROJECT / "src/dreems/benchmark_archive.py"),
+            runner=str(PROJECT / "src/dreems/benchmark_data.py"),
             adapter=str(PROJECT / "src/dreems/feems.py"),
             code=BENCHMARK_CODE,
             environment=ENVIRONMENT,
@@ -562,7 +562,7 @@ if not ARCHIVE_IS_PUBLISHED:
         shell:
             """
             set -euo pipefail
-            uv --project {params.project:q} run --frozen --no-sync python -m dreems.benchmark_archive pack \
+            uv --project {params.project:q} run --frozen --no-sync python -m dreems.benchmark_data pack \
                 --archive {output.archive:q} --checksum {output.checksum:q} \
                 --results-dir {params.results_dir:q} --input-pattern {params.input_pattern:q} \
                 --examples {params.examples:q} {params.legacy:q}

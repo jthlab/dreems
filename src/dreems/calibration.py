@@ -1,6 +1,6 @@
-"""Post-hoc calibration for edge posterior standard deviations."""
+"""Fit multiplicative corrections to posterior standard deviations."""
 
-# ruff: noqa: UP037
+# ruff: noqa: F722, F821, UP037
 
 from __future__ import annotations
 
@@ -11,7 +11,8 @@ from typing import Any, Literal
 
 import numpy as np
 from beartype import beartype
-from jaxtyping import Float, jaxtyped
+from jaxtyping import Float, Shaped, jaxtyped
+from jaxtyping import Real as RealArray
 
 CalibrationMethod = Literal["raw", "global", "density"]
 DEFAULT_DENSITY_BREAKS = (0.10, 0.25)
@@ -71,8 +72,8 @@ class SDCalibration:
     @beartype
     def from_squared_errors(
         cls,
-        errors: np.ndarray,
-        raw_sd: np.ndarray,
+        errors: Shaped[np.ndarray, "*shape"],
+        raw_sd: Shaped[np.ndarray, "*shape"],
         *,
         floor: Real = 1e-12,
     ) -> SDCalibration:
@@ -89,21 +90,21 @@ class SDCalibration:
     @beartype
     def from_graphs(
         cls,
-        errors: Sequence[np.ndarray],
-        raw_sd: Sequence[np.ndarray],
-        sampled_node_fraction: Sequence[Real] | np.ndarray,
+        errors: Sequence[RealArray[np.ndarray, "*_edge_shape"]],
+        raw_sd: Sequence[RealArray[np.ndarray, "*_edge_shape"]],
+        sampled_node_fraction: Sequence[Real] | RealArray[np.ndarray, "graphs"],
         *,
-        density_breaks: Sequence[Real] | np.ndarray = DEFAULT_DENSITY_BREAKS,
+        density_breaks: Sequence[Real] | RealArray[np.ndarray, "breaks"] = DEFAULT_DENSITY_BREAKS,
         density_shrinkage: Real = 25.0,
         floor: Real = 1e-12,
     ) -> SDCalibration:
-        """Fit graph-balanced global and sampling-density scales.
+        """Fit global scales and separate scales for sampling-density bins.
 
-        ``density_shrinkage`` is the number of global pseudo-graphs mixed into
-        every density-bin estimate. It stabilizes small bins while allowing
-        well-represented sparse and dense regimes to calibrate separately.
-        Empty graphs, invalid densities, and invalid residuals or SDs are errors,
-        not grounds for silently excluding a graph from calibration.
+        Arrays may have any shape; each graph contributes one mean squared
+        standardized error over all its entries. Within
+        each density bin, ``density_shrinkage`` sets the weight of the global
+        score, measured in equivalent graphs. This stabilizes sparsely
+        populated bins. All supplied observations must be valid.
         """
 
         if len(errors) != len(raw_sd) or len(errors) != len(sampled_node_fraction):
@@ -161,7 +162,7 @@ class SDCalibration:
 
     @beartype
     def to_dict(self) -> dict[str, Any]:
-        """Return the existing checkpoint metadata schema, without learned weights."""
+        """Return calibration settings in the checkpoint metadata format."""
         return {
             "schema_version": 1,
             "method": self.method,
@@ -188,10 +189,10 @@ class SDCalibration:
     @jaxtyped(typechecker=beartype)
     def apply(
         self,
-        raw_sd: np.ndarray,
+        raw_sd: Shaped[np.ndarray, "*shape"],
         *,
         sampled_node_fraction: Real | None = None,
-    ) -> Float[np.ndarray, "..."] | np.float64:
+    ) -> Float[np.ndarray, "*shape"] | np.float64:
         """Scale SDs, leaving means unchanged. Zero remains zero; negative SDs fail."""
         raw = np.asarray(raw_sd, dtype=np.float64)
         if np.any(~np.isfinite(raw) | (raw < 0.0)):
@@ -205,12 +206,12 @@ class SDCalibration:
 
 @jaxtyped(typechecker=beartype)
 def _standardized_errors(
-    errors: np.ndarray,
-    raw_sd: np.ndarray,
+    errors: Shaped[np.ndarray, "*shape"],
+    raw_sd: Shaped[np.ndarray, "*sd_shape"],
     *,
     floor: float,
-) -> Float[np.ndarray, "..."] | np.float64:
-    """Validate one graph before reducing its residuals or counting coverage."""
+) -> Float[np.ndarray, "*shape"] | np.float64:
+    """Validate one graph, raising ValueError for mismatched input shapes."""
     error = np.asarray(errors, dtype=np.float64)
     sd = np.asarray(raw_sd, dtype=np.float64)
     if error.shape != sd.shape:
@@ -228,7 +229,7 @@ def _standardized_errors(
 
 @beartype
 def _mean_squared_standardized_error(
-    errors: np.ndarray, raw_sd: np.ndarray, *, floor: Real
+    errors: Shaped[np.ndarray, "*shape"], raw_sd: Shaped[np.ndarray, "*shape"], *, floor: Real
 ) -> float:
     """Give each graph one squared-error score, regardless of its edge count."""
     standardized = _standardized_errors(errors, raw_sd, floor=_positive_finite(floor, name="floor"))
@@ -241,7 +242,9 @@ def _mean_squared_standardized_error(
 
 @beartype
 def candidates(
-    errors: Sequence[np.ndarray], raw_sd: Sequence[np.ndarray], density: np.ndarray
+    errors: Sequence[RealArray[np.ndarray, "*_edge_shape"]],
+    raw_sd: Sequence[RealArray[np.ndarray, "*_edge_shape"]],
+    density: RealArray[np.ndarray, "graphs"],
 ) -> dict[str, SDCalibration]:
     """Fit the same raw, global, and density options for both release workflows."""
     density_fit = SDCalibration.from_graphs(errors, raw_sd, density, density_shrinkage=25.0)
@@ -254,15 +257,15 @@ def candidates(
 
 @beartype
 def summarize(
-    errors: Sequence[np.ndarray],
-    raw_sd: Sequence[np.ndarray],
-    density: np.ndarray,
+    errors: Sequence[RealArray[np.ndarray, "*_edge_shape"]],
+    raw_sd: Sequence[RealArray[np.ndarray, "*_edge_shape"]],
+    density: RealArray[np.ndarray, "graphs"],
     fitted: SDCalibration,
 ) -> dict[str, float | int]:
     """Average NLL and interval coverage within each graph, then across graphs.
 
-    NLL omits the shared log(2*pi)/2 constant. No invalid edges are silently
-    dropped: a failed fit should not improve the reported coverage.
+    NLL omits the shared log(2*pi)/2 constant. Every supplied observation
+    contributes to the result; invalid observations raise an error.
     """
     if density.shape != (len(errors),) or len(raw_sd) != len(errors) or not len(errors):
         raise ValueError("calibration arrays must align over a nonempty set of graphs")

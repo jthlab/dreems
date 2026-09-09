@@ -73,7 +73,7 @@ def test_h2h_config_exposes_resources_but_not_feems_statistics() -> None:
     assert "snakemake_one_job_per_observed_deme" in snakefile
     assert "--cv-checkpoint-dir" in snakefile
     assert "feems_archive_checksum" in snakefile
-    assert "dreems.benchmark_archive restore" in snakefile
+    assert "dreems.benchmark_data restore" in snakefile
     assert "rule extract_feems_archive:" in snakefile
     assert "localrules: all" in snakefile
     assert "rm -rf" not in snakefile

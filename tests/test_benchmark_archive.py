@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 import yaml
 
-from dreems import benchmark_archive as archives
+from dreems import benchmark_data as archives
 from dreems import feems, workflow_io
 
 

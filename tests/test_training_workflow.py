@@ -14,7 +14,7 @@ from typing import Any
 import numpy as np
 import yaml
 
-from dreems import benchmark_archive, benchmark_data, checkpoints, feems, workflow_io
+from dreems import benchmark_data, checkpoints, feems, metrics, workflow_io
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -392,7 +392,9 @@ def test_fresh_release_dag_builds_views_core_and_gate(tmp_path: Path) -> None:
                     "cv_jobs": 1,
                     "n_snps_after_filter": genotypes.shape[1],
                     "elapsed_seconds": 1.0,
-                    **benchmark_data._metric_fields("feems_edge_log", truth, truth * 0.8),
+                    **metrics.edge_log_metrics(truth, truth * 0.8).to_prefixed_dict(
+                        "feems_edge_log"
+                    ),
                 },
             )
             workflow_io.write_npz(
@@ -404,7 +406,7 @@ def test_fresh_release_dag_builds_views_core_and_gate(tmp_path: Path) -> None:
                 sample_count=np.ones(3, dtype=np.int32),
             )
         archive, checksum = inputs / "feems.tar.gz", inputs / "feems.sha256"
-        benchmark_archive.pack_results(cached, source_paths, archive, checksum)
+        benchmark_data.pack_results(cached, source_paths, archive, checksum)
         config["release_validation"][label] = {
             "input_pattern": str(inputs / "example_{example}.pkl"),
             "metadata_pattern": str(inputs / "example_{example}.metadata.json"),

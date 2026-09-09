@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import ast
 from argparse import Namespace
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
 import pytest
 import xarray as xr
+from jaxtyping import TypeCheckError
 
-from dreems import cli, datasets, features, feems, inference
+from dreems import cli, datasets, features, feems, inference, linearized
 
 
 @pytest.fixture
@@ -24,6 +27,61 @@ def node_input() -> dict[str, Any]:
         "node_covariance": np.eye(3),
         "effective_snps": 100,
     }
+
+
+@pytest.mark.parametrize(
+    "module",
+    [
+        "inference",
+        "linearized",
+        "benchmark_data",
+        "simulation",
+        "genotypes",
+        "refinement",
+        "calibration",
+    ],
+)
+def test_array_annotations_describe_dimensions(module: str) -> None:
+    source = Path(__file__).parents[1] / "src/dreems" / f"{module}.py"
+    tree = ast.parse(source.read_text())
+
+    def check(annotation: ast.AST) -> None:
+        if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+            check(ast.parse(annotation.value, mode="eval").body)
+            return
+        if isinstance(annotation, ast.Subscript) and isinstance(annotation.slice, ast.Tuple):
+            arguments = annotation.slice.elts
+            if len(arguments) == 2 and ast.unparse(arguments[0]) == "np.ndarray":
+                assert isinstance(arguments[1], ast.Constant), ast.unparse(annotation)
+                assert isinstance(arguments[1].value, str), ast.unparse(annotation)
+                return
+        assert ast.unparse(annotation) != "np.ndarray", f"{module}:{annotation.lineno}"
+        for child in ast.iter_child_nodes(annotation):
+            check(child)
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.arg, ast.AnnAssign)) and node.annotation is not None:
+            check(node.annotation)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.returns is not None:
+            check(node.returns)
+
+
+def test_initializer_result_requires_matching_edge_dimensions() -> None:
+    with pytest.raises(TypeCheckError):
+        linearized.LinearizedConductanceEstimate(
+            edge_log_conductance=np.zeros(3),
+            edge_information=np.zeros(4),
+            observed_nodes=np.asarray([0, 1]),
+            observed_pair_log_resistance=np.zeros(1),
+            baseline_pair_log_resistance=np.zeros(1),
+            pair_residual=np.zeros(1),
+            diagnostics={},
+        )
+
+
+def test_covariance_input_requires_a_matrix_of_dosages() -> None:
+    with pytest.raises(TypeCheckError):
+        inference.genotype_covariance(np.asarray([0.0, 1.0, 2.0]))
 
 
 def dataset_from_input(values: dict[str, Any]) -> xr.Dataset:

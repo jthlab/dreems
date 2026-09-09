@@ -19,7 +19,6 @@ from dreems.benchmark_data import (
     _centered_rms,
     _example_arrays,
     _load_example,
-    _metric_fields,
 )
 from dreems.feems_benchmark import FEEMS_PINNED_COMMIT
 from dreems.feems_benchmark import run_feems_case as run_feems_case
@@ -115,9 +114,9 @@ def run_dreems_case(args: argparse.Namespace) -> None:
         "neural_50_coverage": _coverage(truth, neural, edge_sd, 0.67448975),
         "neural_80_coverage": _coverage(truth, neural, edge_sd, 1.28155157),
         "neural_95_coverage": _coverage(truth, neural, edge_sd, 1.95996398),
-        **_metric_fields("conditioner_edge_log", truth, conditioner),
-        **_metric_fields("dreems_edge_log", truth, neural),
-        **_metric_fields("dreems_map_edge_log", truth, refined),
+        **metrics.edge_log_metrics(truth, conditioner).to_prefixed_dict("conditioner_edge_log"),
+        **metrics.edge_log_metrics(truth, neural).to_prefixed_dict("dreems_edge_log"),
+        **metrics.edge_log_metrics(truth, refined).to_prefixed_dict("dreems_map_edge_log"),
     }
     if sha256(args.input) != input_digest:
         raise RuntimeError("DREEMS input changed during inference; refusing to publish the result")

@@ -21,7 +21,6 @@ from dreems.benchmark_data import (
     _centered_rms,
     _example_arrays,
     _load_example,
-    _metric_fields,
 )
 from dreems.workflow_io import json_ready, sha256, write_json, write_npz
 
@@ -123,7 +122,7 @@ def run_feems_case(args: argparse.Namespace) -> None:
         "train_loss": float(result.train_loss),
         "truth_edge_log_rms": _centered_rms(truth),
         "feems_edge_log_rms": _centered_rms(estimate),
-        **_metric_fields("feems_edge_log", truth, estimate),
+        **metrics.edge_log_metrics(truth, estimate).to_prefixed_dict("feems_edge_log"),
     }
     if sha256(args.input) != input_digest:
         raise RuntimeError("FEEMS input changed during fitting; refusing to publish the result")

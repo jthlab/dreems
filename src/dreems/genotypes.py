@@ -11,7 +11,7 @@ from typing import Any
 import numpy as np
 import xarray as xr
 from beartype import beartype
-from jaxtyping import Float, Int, jaxtyped
+from jaxtyping import Float, Int, Shaped, jaxtyped
 from scipy.spatial import cKDTree
 
 from dreems.datasets import (
@@ -80,9 +80,9 @@ def attach_sample_coordinates(
 def from_genotype_dataset(
     dataset: xr.Dataset,
     *,
-    node_latitude: np.ndarray,
-    node_longitude: np.ndarray,
-    edges: np.ndarray,
+    node_latitude: Shaped[np.ndarray, "nodes"],
+    node_longitude: Shaped[np.ndarray, "nodes"],
+    edges: Shaped[np.ndarray, "edges 2"],
     sample_coordinates: Mapping[str, tuple[Real, Real]] | None = None,
     sample_id: str = SAMPLE_ID,
     min_maf: Real = 0.05,
@@ -364,7 +364,11 @@ def _project_local_azimuthal_equidistant(
         raise ValueError("geographic coordinates do not define a stable projection center")
     radius_km = 6371.0088
 
-    def project(local_latitude: np.ndarray, local_longitude: np.ndarray) -> np.ndarray:
+    @jaxtyped(typechecker=beartype)
+    def project(
+        local_latitude: Float[np.ndarray, "locations"],
+        local_longitude: Float[np.ndarray, "locations"],
+    ) -> Float[np.ndarray, "locations 2"]:
         latitude_value = np.deg2rad(np.asarray(local_latitude, dtype=np.float64))
         longitude_delta = (
             np.deg2rad(np.asarray(local_longitude, dtype=np.float64))

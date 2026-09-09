@@ -7,7 +7,7 @@ import pytest
 from beartype.roar import BeartypeCallHintParamViolation
 from jaxtyping import TypeCheckError
 
-from dreems import coalescent, island_sim
+from dreems import island_sim, simulation
 
 
 @pytest.fixture
@@ -185,7 +185,7 @@ def test_grouped_haplotypes_preserve_sample_order(ploidy: int) -> None:
         for index in np.flatnonzero(samples == deme):
             expected[index] = values[:, cursor : cursor + ploidy].sum(axis=1)
             cursor += ploidy
-    result = coalescent.genotypes_from_grouped_haplotypes(
+    result = simulation.genotypes_from_grouped_haplotypes(
         values, sample_nodes=samples, num_nodes=3, ploidy=ploidy
     )
     np.testing.assert_array_equal(result, expected)
