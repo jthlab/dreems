@@ -1,5 +1,47 @@
 {
   "audit_commit": "463124663911453685e32023fd9e8e24bc58ad4e",
+  "branch_checks": [
+    {
+      "commit": "c3a0aed79abb180af646bd36aeeed188632cd078",
+      "date": "2026-09-09",
+      "full_suite_before_final_annotation_fix": {
+        "tests": 1023,
+        "passed": 1022,
+        "failures": 1,
+        "errors": 0,
+        "skipped": 0,
+        "failing_test": "tests/test_feems_adapter.py::test_feems_cannot_silently_reassign_samples[row_count]",
+        "correction": "Preserve the existing ValueError check for mismatched sample assignments."
+      },
+      "followup": {
+        "tests": 179,
+        "passed": 179,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "files": [
+          "tests/test_feems_adapter.py",
+          "tests/test_feems_edge_order.py",
+          "tests/test_feems_official_parity.py",
+          "tests/test_input_validation.py",
+          "tests/test_inference_api.py"
+        ]
+      },
+      "full_suite_rerun_after_final_annotation_fix": false,
+      "passed_checks": [
+        "ruff check and format",
+        "workflow dry run and launcher syntax",
+        "quickstart notebook execution",
+        "clean CPU wheel installation and packaged checkpoint loading"
+      ],
+      "feature_and_prediction_parity": {
+        "reference_commit": "d54a7954103a86f4dd0461fee110caf5667fe2b7",
+        "arrays": 66,
+        "exact": true
+      },
+      "checkpoint_sha256": "454cb50f4c7ef1213e001d700d1bf9e9f6a353b5c8be5619aae06e9d7a22cc15"
+    }
+  ],
   "records": {
     "release-api-audit-parity.json": {
       "public_signatures_and_dataclass_fields": "unchanged",

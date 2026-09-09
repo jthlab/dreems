@@ -68,7 +68,24 @@ All 166 tests in the follow-up run passed, including a new regression test.
 Ruff checks and formatting passed. The checkpoint checksum is unchanged.
 
 All 24 earlier JSON records were preserved in the combined verification
-file. The complete test suite has not been rerun for this update.
+file. Those checks covered the affected modules.
+
+### Core Interfaces
+
+Commit `c3a0aed` adds array layouts to feature and training data, removes
+redundant FEEMS wrappers, and reads checkpoint dimensions from the model.
+The annotation test now covers 18 core modules. Other modules still need review.
+
+The full test run passed 1,022 tests and found one validation regression:
+a FEEMS shape annotation raised a type error before the existing sample-count
+check could raise `ValueError`. The commit preserves that check. All 179
+follow-up tests passed, including the expanded FEEMS input tests, comparisons
+with the official solver, and inference tests. The complete suite was not
+rerun after this final annotation correction.
+
+Ruff, workflow dry runs, the executable notebook, and a clean CPU wheel
+installation passed again at this commit. All 66 arrays in the feature and
+prediction comparison matched `d54a795` exactly. The checkpoint is unchanged.
 
 ## Limits
 
