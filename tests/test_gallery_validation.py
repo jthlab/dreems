@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from dreems import benchmark_gallery as gallery
-from dreems.workflow_io import write_pickle
+from dreems.workflow_io import read_npz, read_pickle, write_pickle
 
 
 @pytest.mark.parametrize("value", [True, -1, "1.5", "nan", "inf", None])
@@ -56,8 +56,8 @@ def test_replacing_saved_inputs_is_visible(tmp_path: Path) -> None:
     for value in (1, 2):
         np.savez(archive, value=np.array([value]))
         write_pickle(pack, [{"value": value}])
-        assert gallery._scenario_archive(str(archive))["value"][0] == value
-        assert gallery.load_pickle_pack(str(pack))[0]["value"] == value
+        assert read_npz(archive)["value"][0] == value
+        assert read_pickle(pack)[0]["value"] == value
 
 
 @pytest.fixture

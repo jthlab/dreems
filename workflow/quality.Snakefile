@@ -44,8 +44,8 @@ rule ruff:
         mem_mb=4000,
         runtime="10m",
     shell:
-        "uv run --frozen --no-sync ruff check src tests && "
-        "uv run --frozen --no-sync ruff format --check src tests"
+        "uv run --frozen --no-sync ruff check src tests workflow && "
+        "uv run --frozen --no-sync ruff format --check src tests workflow"
 
 
 rule pytest:

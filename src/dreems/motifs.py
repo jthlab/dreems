@@ -11,11 +11,12 @@ from typing import Any
 import numpy as np
 import scipy.sparse as sp
 from beartype import beartype
-from jaxtyping import Bool, Int, Real, jaxtyped
+from jaxtyping import Bool, Float, Int, Real, jaxtyped
 from scipy.sparse.csgraph import shortest_path
 from scipy.spatial import cKDTree
 
 from dreems.geography import (
+    Graph,
     build_global_landscape_mesh,
     draw_q_surface,
     draw_rff_params,
@@ -107,13 +108,13 @@ def choose_sample_regime(
     return local
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def draw_sample_nodes_from_positions(
     rng: np.random.Generator,
-    positions: np.ndarray,
+    positions: Real[np.ndarray, "nodes 2"],
     local: Mapping[str, Any],
-) -> np.ndarray:
-    """Draw individual-to-node assignments, retaining at least two sampled nodes.
+) -> Int[np.ndarray, "samples"]:
+    """Assign individuals to at least two graph nodes.
 
     The historical max_samples setting caps both the site draw and the total
     individuals. Repeated node IDs represent distinct diploid individuals.
@@ -152,7 +153,9 @@ def draw_sample_nodes_from_positions(
             num_samples = int(rng.integers(min_samples, max_samples + 1))
             num_samples = int(np.clip(num_samples, 1, num_nodes))
 
-    def repair_sample_nodes(sample_nodes: np.ndarray) -> np.ndarray:
+    def repair_sample_nodes(
+        sample_nodes: Int[np.ndarray, "samples"],
+    ) -> Int[np.ndarray, "repaired_samples"]:
         samples = np.asarray(sample_nodes, dtype=np.int32).reshape(-1)
         if num_nodes <= 0:
             raise ValueError("cannot draw samples from an empty graph")
@@ -176,7 +179,9 @@ def draw_sample_nodes_from_positions(
             samples[-1] = replacement
         return samples.astype(np.int32)
 
-    def cap_total_samples(sample_nodes: np.ndarray) -> np.ndarray:
+    def cap_total_samples(
+        sample_nodes: Int[np.ndarray, "samples"],
+    ) -> Int[np.ndarray, "kept_samples"]:
         samples = np.asarray(sample_nodes, dtype=np.int32).reshape(-1)
         if max_samples <= 0:
             return repair_sample_nodes(samples)
@@ -228,12 +233,12 @@ def draw_sample_nodes_from_positions(
     return cap_total_samples(np.asarray(nearest, dtype=np.int32))
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def node_mean_edge_values(
     num_nodes: int,
-    edges: np.ndarray,
-    edge_values: np.ndarray,
-) -> np.ndarray:
+    edges: Int[np.ndarray, "edges 2"],
+    edge_values: Real[np.ndarray, "edges"],
+) -> Float[np.ndarray, "nodes"]:
     """Average an undirected edge field onto incident nodes."""
 
     edge_array = np.asarray(edges, dtype=np.int32)
@@ -247,14 +252,14 @@ def node_mean_edge_values(
     return sums / np.maximum(counts, 1.0)
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def node_barrier_proximity(
     num_nodes: int,
-    edges: np.ndarray,
-    edge_log_rates: np.ndarray,
+    edges: Int[np.ndarray, "edges 2"],
+    edge_log_rates: Real[np.ndarray, "edges"],
     *,
     quantile: float,
-) -> np.ndarray:
+) -> Float[np.ndarray, "nodes"]:
     """Score nodes adjacent to unusually low-conductance edges."""
 
     edge_array = np.asarray(edges, dtype=np.int32)
@@ -279,8 +284,10 @@ def node_barrier_proximity(
     return standardize(direct + 0.5 * neighboring)
 
 
-@beartype
-def sampling_correlation(values: np.ndarray, score: np.ndarray) -> float:
+@jaxtyped(typechecker=beartype)
+def sampling_correlation(
+    values: Real[np.ndarray, "nodes"], score: Real[np.ndarray, "nodes"]
+) -> float:
     """Measure sampling association; return NaN when either field is constant."""
     left = standardize(np.asarray(values, dtype=np.float64))
     right = standardize(np.asarray(score, dtype=np.float64))
@@ -301,7 +308,7 @@ def apply_migration_associated_sampling(
     Positive and negative modes favor high and low incident log migration;
     barrier proximity favors nodes near low-conductance edges. Accessibility
     noise varies smoothly in space. Existing per-site counts are permuted
-    across the selected sites, not redrawn.
+    across the selected sites.
     """
 
     supported = {
@@ -503,12 +510,12 @@ def reconstruct_shortest_path(
     return np.asarray(path[::-1], dtype=np.int32)
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def draw_feems_lattice_sample_nodes(
     rng: np.random.Generator,
-    positions: np.ndarray,
+    positions: Real[np.ndarray, "nodes 2"],
     local: Mapping[str, Any],
-) -> tuple[np.ndarray, dict[str, Any]]:
+) -> tuple[Int[np.ndarray, "samples"], dict[str, Any]]:
     """Draw regional binomial diploid counts, thin sites, then cap individuals.
 
     Keep the per-node RNG order: each nonempty binomial draw is immediately
@@ -696,7 +703,7 @@ def draw_earth_like_case(
     *,
     surface_kind: str,
 ) -> dict[str, Any]:
-    """Draw synthetic coast/island masks, not geographic crops from a world map."""
+    """Draw procedural coast and island masks."""
     target_nodes = int(rng.integers(int(sim["earth_min_nodes"]), int(sim["earth_max_nodes"]) + 1))
     for _attempt in range(50):
         height, width = draw_target_grid_dimensions(rng, target_nodes)
@@ -740,12 +747,12 @@ def draw_weighted_diploids(
     return int(choose_weighted_name(rng, candidates, weights))
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def global_landscape_environment(
     rng: np.random.Generator,
-    positions: np.ndarray,
-    lonlat: np.ndarray,
-    land_mask: np.ndarray,
+    positions: Real[np.ndarray, "nodes 2"],
+    lonlat: Real[np.ndarray, "nodes 2"],
+    land_mask: Bool[np.ndarray, "nodes"],
     land_xy: Any,
     local: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -788,13 +795,13 @@ def global_landscape_environment(
     }
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def global_landscape_ridge(
     rng: np.random.Generator,
-    positions: np.ndarray,
+    positions: Real[np.ndarray, "nodes 2"],
     strength_scale: float,
 ) -> dict[str, Any]:
-    """Draw a synthetic mountain-like ridge, not an observed elevation profile."""
+    """Draw a synthetic ridge with a sinusoidal centerline."""
     center = np.mean(positions, axis=0)
     extent = max(float(np.ptp(positions[:, 0])), float(np.ptp(positions[:, 1])), 1.0)
     theta = float(rng.uniform(0.0, math.pi))
@@ -819,17 +826,17 @@ def global_landscape_ridge(
     }
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def global_landscape_surfaces(
     rng: np.random.Generator,
     *,
-    positions: np.ndarray,
-    lonlat: np.ndarray,
-    edges: np.ndarray,
-    land_mask: np.ndarray,
+    positions: Real[np.ndarray, "nodes 2"],
+    lonlat: Real[np.ndarray, "nodes 2"],
+    edges: Int[np.ndarray, "edges 2"],
+    land_mask: Bool[np.ndarray, "nodes"],
     land_xy: Any,
     local: Mapping[str, Any],
-) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+) -> tuple[Float[np.ndarray, "edges"], Float[np.ndarray, "nodes"], dict[str, Any]]:
     """Draw migration and local coalescence fields on a real land/water mesh.
 
     Water and coast locations come from the map. Ridges and habitat variation
@@ -1099,24 +1106,19 @@ def draw_global_landscape_case(
     }
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def draw_known_graph_case(
     rng: np.random.Generator,
-    sim: Mapping[str, Any],
     local: Mapping[str, Any],
     *,
-    graph: dict[str, np.ndarray],
-    positions: np.ndarray,
-    sample_sites: np.ndarray,
+    graph: Graph,
+    positions: Real[np.ndarray, "nodes 2"],
+    sample_sites: Int[np.ndarray, "sites"],
     surface_kind: str,
     diploids_per_site: int,
     metadata: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Attach random fields to fixed geometry and sites using the local recipe.
-
-    ``sim`` is retained for the shared case-generator calling convention;
-    this generator only needs its already-resolved ``local`` settings.
-    """
+    """Attach random fields and diploid counts to fixed geometry and sites."""
     surface = draw_surface(rng, surface_kind=surface_kind, local=local)
     q_surface = draw_q_surface(rng, local)
     sample_nodes = np.repeat(
@@ -1150,8 +1152,8 @@ def draw_wolflike_case(
 ) -> dict[str, Any]:
     """Draw a synthetic corridor/coast mesh with path-biased sampling.
 
-    This does not load the empirical wolf graph. Sampled fractions use all
-    active graph nodes, unlike the land-only fractions of world-map crops.
+    The geometry is generated procedurally. Sampled fractions use all active
+    graph nodes; world-map crops use land nodes as their denominator.
     """
     source = choose_weighted_name(
         rng,
@@ -1230,7 +1232,6 @@ def draw_wolflike_case(
     )
     return draw_known_graph_case(
         rng,
-        sim,
         local,
         graph=graph,
         positions=positions,

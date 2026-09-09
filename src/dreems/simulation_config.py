@@ -1,13 +1,15 @@
-"""Validated synthetic-corpus configuration and random mixture draws."""
+"""Validate simulation settings and draw from the configured mixtures."""
 
 from __future__ import annotations
 
+# ruff: noqa: F722, F821, UP037
 from collections.abc import Mapping, Sequence
 from numbers import Integral, Real
 from typing import Any
 
 import numpy as np
 from beartype import beartype
+from jaxtyping import Float, Shaped, jaxtyped
 
 from dreems.validation import _integer_array
 
@@ -28,7 +30,7 @@ def _integer_setting(value: object, name: str, minimum: int = 1) -> int:
 
 @beartype
 def _finite_setting(value: object, name: str) -> float:
-    """Read a finite scalar number; a boolean is not a numeric setting."""
+    """Read a finite scalar number, rejecting booleans."""
     if isinstance(value, (bool, np.bool_)) or np.ndim(value) != 0:
         raise ValueError(f"{name} must be a finite scalar number")
     try:
@@ -58,8 +60,10 @@ def _positive_choices(choices: object, *, integer: bool) -> list[str]:
     return [str(number) for number in numbers]
 
 
-@beartype
-def _weight_probabilities(weights: np.ndarray) -> np.ndarray:
+@jaxtyped(typechecker=beartype)
+def _weight_probabilities(
+    weights: Shaped[np.ndarray, "*weight_axes"],
+) -> Float[np.ndarray, "*weight_axes"]:
     """Normalize finite, nonnegative weights with a positive total."""
     total = weights.sum()
     if (
@@ -536,7 +540,7 @@ def validate_simulation_settings(sim: Mapping[str, Any]) -> None:
     )
 
     # Extra weight names are allowed: a graph family may use a subset of a
-    # shared surface mixture. Missing surface weights still mean one, not zero.
+    # shared surface mixture. Missing surface weights default to one.
     for key, value in sim.items():
         if key.endswith("_weights"):
             weights = parse_weight_mapping(value)
@@ -667,7 +671,7 @@ def string_list(value: object, *, default: Sequence[str] = ()) -> list[str]:
 def parse_weight_mapping(value: object) -> dict[str, float]:
     """Read named weights from a mapping or the historical ``name=weight`` form.
 
-    Invalid entries are errors, not an instruction to change the distribution.
+    Invalid entries raise an error.
     Callers decide whether absent names receive zero or the default weight one.
     """
     if value is None:

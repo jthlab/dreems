@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+# ruff: noqa: F722, F821, UP037
 import argparse
 import json
 import time
@@ -11,6 +12,7 @@ from typing import Any
 
 import numpy as np
 from beartype import beartype
+from jaxtyping import Real, jaxtyped
 from scipy.stats import binomtest
 
 from dreems import features, feems, feems_benchmark, metrics
@@ -21,8 +23,6 @@ from dreems.benchmark_data import (
     _load_example,
 )
 from dreems.feems_benchmark import FEEMS_PINNED_COMMIT
-from dreems.feems_benchmark import run_feems_case as run_feems_case
-from dreems.feems_benchmark import run_feems_fold as run_feems_fold
 from dreems.inference import InferenceExample, load_model
 from dreems.refinement import DREEMSMapRefinementConfig
 from dreems.workflow_io import json_ready, sha256, write_csv, write_json, write_npz
@@ -36,8 +36,13 @@ FEEMS_CV_SOURCE = (
 )
 
 
-@beartype
-def _coverage(truth: np.ndarray, mean: np.ndarray, sd: np.ndarray, z: float) -> float:
+@jaxtyped(typechecker=beartype)
+def _coverage(
+    truth: Real[np.ndarray, "edges"],
+    mean: Real[np.ndarray, "edges"],
+    sd: Real[np.ndarray, "edges"],
+    z: float,
+) -> float:
     """Score pointwise neural intervals against the centered generating surface."""
     centered_truth = metrics.centered(truth)
     centered_mean = metrics.centered(mean)
@@ -173,14 +178,14 @@ def _read_rows(paths: Sequence[Path], expected_method: str) -> dict[int, dict[st
     return rows
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def _paired_bootstrap(
-    values: np.ndarray,
+    values: Real[np.ndarray, "cases"],
     *,
     rng: np.random.Generator,
     replicates: int,
 ) -> tuple[float, float]:
-    """Resample cases, not edges, to obtain an interval for the mean advantage."""
+    """Bootstrap whole cases to estimate an interval for the mean advantage."""
     finite = values[np.isfinite(values)]
     if finite.size == 0:
         return float("nan"), float("nan")

@@ -1533,7 +1533,7 @@ def append_edge_conditioner_features_for_checkpoint(
     *,
     fail_on_error: bool = True,
 ) -> list[PreparedExample]:
-    """Add missing conditioner columns, reporting failures instead of hiding them.
+    """Add missing conditioner columns and report failed solves.
 
     Inference raises on a failed solve by default. Corpus preparation may opt
     into zero features with a zero validity flag using ``fail_on_error=False``.

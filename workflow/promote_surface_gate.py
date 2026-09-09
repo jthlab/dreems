@@ -31,7 +31,7 @@ def read_archive(path: Path) -> tuple[dict[str, Any], bytes]:
 
 @beartype
 def read_json(path: Path) -> dict[str, Any]:
-    """Require a report object, not an arbitrary JSON value."""
+    """Read a JSON report and require a dictionary."""
     value = json.loads(path.read_text())
     if not isinstance(value, dict):
         raise TypeError(f"expected a JSON object in {path}")
@@ -120,7 +120,7 @@ def verified_training_stage(
     metric_name = training_run.get("early_stopping_metric")
     if not isinstance(metric_name, str):
         raise ValueError(f"{name} has no early-stopping metric name")
-    # Best checkpoints contain a snapshot, not necessarily the run's full history.
+    # A best checkpoint's history ends at the step when it was saved.
     # The legacy field best_validation_loss holds the chosen stopping metric.
     records = [record for record in history if record.get("step") == step]
     if len(records) != 1 or records[0].get(metric_name) != loss:

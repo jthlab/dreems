@@ -17,17 +17,72 @@ import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 import numpy as np
 from beartype import beartype
-from jaxtyping import Int, Real, jaxtyped
+from jaxtyping import Float, Int, Real, Shaped, jaxtyped
 
 from .validation import _integer_array, _real_array, validate_graph_arrays
-from .workflow_io import _atomic_output, json_ready, parse_nonnegative_integer, write_csv
-from .workflow_io import sha256 as sha256
-from .workflow_io import write_json as write_json
-from .workflow_io import write_npz as _atomic_npz
+from .workflow_io import (
+    _atomic_output,
+    json_ready,
+    parse_nonnegative_integer,
+    read_npz,
+    sha256,
+    write_csv,
+    write_json,
+    write_npz,
+)
+
+
+class BroadCaseArrays(TypedDict):
+    """Matched graph and edge predictions for one broad-benchmark case."""
+
+    positions: Float[np.ndarray, "nodes 2"]
+    edges: Int[np.ndarray, "edges 2"]
+    truth: Float[np.ndarray, "edges"]
+    core: Float[np.ndarray, "edges"]
+    gated: Float[np.ndarray, "edges"]
+    feems: Float[np.ndarray, "edges"]
+    sample_count: Float[np.ndarray, "nodes"]
+
+
+class ScenarioBundle(TypedDict):
+    """Twelve notebook cases, all on the same graph, stored in case order."""
+
+    index: Int[np.ndarray, "cases"]
+    truth_name: Shaped[np.ndarray, "cases"]
+    mask_name: Shaped[np.ndarray, "cases"]
+    sample_design: Shaped[np.ndarray, "cases"]
+    num_snps: Int[np.ndarray, "cases"]
+    positions: Float[np.ndarray, "cases nodes 2"]
+    edges: Int[np.ndarray, "cases edges 2"]
+    sample_count: Float[np.ndarray, "cases nodes"]
+    truth: Float[np.ndarray, "cases edges"]
+    core_neural: Float[np.ndarray, "cases edges"]
+    core_map: Float[np.ndarray, "cases edges"]
+    core_edge_sd: Float[np.ndarray, "cases edges"]
+    gated_neural: Float[np.ndarray, "cases edges"]
+    gated_map: Float[np.ndarray, "cases edges"]
+    gated_edge_sd: Float[np.ndarray, "cases edges"]
+    feems: Float[np.ndarray, "cases edges"]
+    gate_alpha_neural: Float[np.ndarray, "cases"]
+    gate_alpha_map: Float[np.ndarray, "cases"]
+    core_corr: Float[np.ndarray, "cases"]
+    core_mse: Float[np.ndarray, "cases"]
+    core_rms: Float[np.ndarray, "cases"]
+    gated_corr: Float[np.ndarray, "cases"]
+    gated_mse: Float[np.ndarray, "cases"]
+    gated_rms: Float[np.ndarray, "cases"]
+    feems_corr: Float[np.ndarray, "cases"]
+    feems_mse: Float[np.ndarray, "cases"]
+    feems_rms: Float[np.ndarray, "cases"]
+    source_notebook_sha256: Shaped[np.ndarray, ""]
+    core_checkpoint_sha256: Shaped[np.ndarray, ""]
+    gated_checkpoint_sha256: Shaped[np.ndarray, ""]
+    feems_protocol: Shaped[np.ndarray, ""]
+
 
 SCENARIO_TRUTHS = ("barrier", "anisotropy", "homogeneous")
 SCENARIO_MASKS = ("full", "random_10pct", "outer_slabs", "left_missing")
@@ -48,8 +103,8 @@ class EdgeMetrics:
     rms: float
 
 
-@beartype
-def centered(values: np.ndarray) -> np.ndarray:
+@jaxtyped(typechecker=beartype)
+def centered(values: Shaped[np.ndarray, "*input_axes"]) -> Float[np.ndarray, "edges"]:
     """Return a finite one-dimensional array with its mean removed."""
 
     array = _real_array(values, name="edge values")
@@ -58,8 +113,10 @@ def centered(values: np.ndarray) -> np.ndarray:
     return array - float(array.mean())
 
 
-@beartype
-def edge_metrics(truth: np.ndarray, estimate: np.ndarray) -> EdgeMetrics:
+@jaxtyped(typechecker=beartype)
+def edge_metrics(
+    truth: Shaped[np.ndarray, "*truth_axes"], estimate: Shaped[np.ndarray, "*estimate_axes"]
+) -> EdgeMetrics:
     """Measure centered pattern correlation and squared error."""
 
     target = centered(truth)
@@ -81,8 +138,10 @@ def edge_metrics(truth: np.ndarray, estimate: np.ndarray) -> EdgeMetrics:
     )
 
 
-@beartype
-def projected_alpha(core: np.ndarray, gated: np.ndarray) -> float:
+@jaxtyped(typechecker=beartype)
+def projected_alpha(
+    core: Shaped[np.ndarray, "*core_axes"], gated: Shaped[np.ndarray, "*gated_axes"]
+) -> float:
     """Project a gated surface onto its core; MAP may also change the pattern."""
 
     anchor = centered(core)
@@ -93,14 +152,6 @@ def projected_alpha(core: np.ndarray, gated: np.ndarray) -> float:
     if denominator <= np.finfo(np.float64).eps:
         return float("nan")
     return float(np.dot(anchor, candidate) / denominator)
-
-
-@beartype
-def load_npz(path: Path) -> dict[str, np.ndarray]:
-    """Load an NPZ archive without permitting pickled arrays."""
-
-    with np.load(path, allow_pickle=False) as archive:
-        return {name: archive[name] for name in archive.files}
 
 
 @beartype
@@ -116,8 +167,8 @@ def read_rows(path: Path) -> list[dict[str, Any]]:
         return list(csv.DictReader(stream))
 
 
-@beartype
-def _scalar_text(array: np.ndarray) -> str:
+@jaxtyped(typechecker=beartype)
+def _scalar_text(array: Shaped[np.ndarray, "*metadata_axes"]) -> str:
     """Read one archive metadata value without accepting an entire vector."""
     value = np.asarray(array)
     if value.size != 1:
@@ -125,10 +176,10 @@ def _scalar_text(array: np.ndarray) -> str:
     return str(value.reshape(()).item())
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def _validate_equal(
-    expected: np.ndarray,
-    observed: np.ndarray,
+    expected: Shaped[np.ndarray, "*expected_axes"],
+    observed: Shaped[np.ndarray, "*observed_axes"],
     *,
     name: str,
     example: int,
@@ -152,7 +203,7 @@ def build_scenario_bundle(
 
     core_hash = sha256(core_bundle_path)
     gate_checkpoint_hash = sha256(gated_checkpoint)
-    core = load_npz(core_bundle_path)
+    core = read_npz(core_bundle_path)
     indices = _integer_array(core["index"], name="index", dtype=np.int64)
     if not np.array_equal(indices, np.arange(12, dtype=np.int64)):
         raise ValueError("the core scenario bundle must contain examples 0 through 11")
@@ -184,7 +235,7 @@ def build_scenario_bundle(
         for name in ("truth", "dreems", "dreems_map", "edge_sd", "feems"):
             if core[name][example].shape != edge_shape:
                 raise ValueError(f"{name} must align with graph edges")
-        gated = load_npz(Path(gated_pattern.format(example=example)))
+        gated = read_npz(Path(gated_pattern.format(example=example)))
         if (
             "checkpoint_sha256" in gated
             and _scalar_text(gated["checkpoint_sha256"]) != gate_checkpoint_hash
@@ -215,7 +266,7 @@ def build_scenario_bundle(
     gated_map_array = np.stack(gated_map)
     gated_sd_array = np.stack(gated_sd)
 
-    metric_arrays: dict[str, np.ndarray] = {}
+    metric_arrays: dict[str, Float[np.ndarray, "cases"]] = {}
     rows: list[dict[str, Any]] = []
     metrics_by_method: dict[str, list[EdgeMetrics]] = {method: [] for method in METHODS}
     neural_alphas = []
@@ -263,7 +314,7 @@ def build_scenario_bundle(
         )
 
     core_checkpoint_hash = _scalar_text(core["checkpoint_sha256"])
-    bundle_arrays = {
+    bundle_arrays: ScenarioBundle = {
         "index": indices,
         "truth_name": np.asarray(core["truth_name"]),
         "mask_name": np.asarray(core["mask_name"]),
@@ -290,7 +341,7 @@ def build_scenario_bundle(
     }
     if sha256(core_bundle_path) != core_hash or sha256(gated_checkpoint) != gate_checkpoint_hash:
         raise ValueError("comparison input changed while building the scenario bundle")
-    _atomic_npz(output, **bundle_arrays)
+    write_npz(output, **bundle_arrays)
     write_rows(rows_output, rows)
     report = scenario_report(rows)
     report["provenance"] = {
@@ -433,7 +484,7 @@ def _save_figure(figure: Any, path: Path) -> None:
 
 
 @beartype
-def _metric_text(bundle: Mapping[str, np.ndarray], method: str, index: int) -> str:
+def _metric_text(bundle: ScenarioBundle, method: str, index: int) -> str:
     """Show output amplitude when a homogeneous truth has no defined correlation."""
     mse = float(bundle[f"{method}_mse"][index])
     correlation = float(bundle[f"{method}_corr"][index])
@@ -443,7 +494,7 @@ def _metric_text(bundle: Mapping[str, np.ndarray], method: str, index: int) -> s
 
 
 @beartype
-def scenario_family_figure(bundle: Mapping[str, np.ndarray], truth_name: str) -> Any:
+def scenario_family_figure(bundle: ScenarioBundle, truth_name: str) -> Any:
     """Draw raw edges for core, gated, and FEEMS estimates."""
 
     if truth_name not in SCENARIO_TRUTHS:
@@ -511,7 +562,7 @@ def scenario_family_figure(bundle: Mapping[str, np.ndarray], truth_name: str) ->
 
 
 @beartype
-def _scenario_summary_rows(bundle: Mapping[str, np.ndarray]) -> list[dict[str, Any]]:
+def _scenario_summary_rows(bundle: ScenarioBundle) -> list[dict[str, Any]]:
     """Summarize each named truth without weighting by graph size."""
     rows = []
     truth_names = np.asarray(bundle["truth_name"]).astype(str)
@@ -528,7 +579,7 @@ def _scenario_summary_rows(bundle: Mapping[str, np.ndarray]) -> list[dict[str, A
 
 
 @beartype
-def scenario_aggregate_figure(bundle: Mapping[str, np.ndarray]) -> Any:
+def scenario_aggregate_figure(bundle: ScenarioBundle) -> Any:
     """Plot method performance across sampling masks for each truth."""
 
     plt, _LineCollection, _TwoSlopeNorm, _matplotlib = _plot_imports()
@@ -609,7 +660,7 @@ code {{ background: #f1f1f1; padding: 0.1rem 0.25rem; }}
 def render_scenario_gallery(*, bundle_path: Path, report_path: Path, output_dir: Path) -> None:
     """Render the 12-case raw-edge comparison and aggregate table."""
 
-    bundle = load_npz(bundle_path)
+    bundle = read_npz(bundle_path)
     output_dir.mkdir(parents=True, exist_ok=True)
     aggregate = scenario_aggregate_figure(bundle)
     _save_figure(aggregate, output_dir / "aggregate.png")
@@ -704,11 +755,11 @@ def _broad_case_arrays(
     core_pattern: str,
     gated_pattern: str,
     feems_pattern: str,
-) -> dict[str, np.ndarray]:
+) -> BroadCaseArrays:
     """Load matching cached graphs; never use one method's geometry for another."""
-    core = load_npz(Path(core_pattern.format(example=example)))
-    gated = load_npz(Path(gated_pattern.format(example=example)))
-    feems = load_npz(Path(feems_pattern.format(example=example)))
+    core = read_npz(Path(core_pattern.format(example=example)))
+    gated = read_npz(Path(gated_pattern.format(example=example)))
+    feems = read_npz(Path(feems_pattern.format(example=example)))
     for name in ("positions", "edges", "truth", "sample_count"):
         _validate_equal(core[name], gated[name], name=name, example=example)
         _validate_equal(core[name], feems[name], name=name, example=example)

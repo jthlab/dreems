@@ -26,13 +26,13 @@ from IPython.display import display
 
 from dreems.surface_gate_comparison import (
     SCENARIO_TRUTHS,
-    load_npz,
     scenario_aggregate_figure,
     scenario_family_figure,
 )
+from dreems.workflow_io import read_npz
 
 BUNDLE_PATH = Path("__SCENARIO_BUNDLE__")
-bundle = load_npz(BUNDLE_PATH)
+bundle = read_npz(BUNDLE_PATH)
 
 print(f"Comparison bundle: {BUNDLE_PATH}")
 print(f"Core checkpoint:  {bundle['core_checkpoint_sha256'].item()}")

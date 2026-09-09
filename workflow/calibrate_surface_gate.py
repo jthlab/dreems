@@ -1,5 +1,7 @@
 """Calibrate the production surface gate from cached independent predictions."""
 
+# ruff: noqa: F722, F821, UP037
+
 from __future__ import annotations
 
 import argparse
@@ -11,6 +13,7 @@ from typing import Any
 
 import numpy as np
 from beartype import beartype
+from jaxtyping import Float, jaxtyped
 
 from dreems import calibration, checkpoints, metrics
 from dreems.validation import _real_array
@@ -62,10 +65,10 @@ def prediction_index(path: Path) -> int:
     return int(match.group(1))
 
 
-@beartype
-def load_predictions(paths: list[Path]) -> dict[int, dict[str, np.ndarray]]:
+@jaxtyped(typechecker=beartype)
+def load_predictions(paths: list[Path]) -> dict[int, dict[str, Float[np.ndarray, "_edges"]]]:
     """Read packed or individual edge predictions; offsets must partition the arrays."""
-    result: dict[int, dict[str, np.ndarray]] = {}
+    result: dict[int, dict[str, Float[np.ndarray, "_edges"]]] = {}
     for path in paths:
         with np.load(path, allow_pickle=False) as archive:
             if {"replicate", "edge_offsets", "edge_truth", "edge_mean", "edge_sd"} <= set(
@@ -113,7 +116,7 @@ def load_predictions(paths: list[Path]) -> dict[int, dict[str, np.ndarray]]:
 
 @beartype
 def split_examples(rows: dict[int, dict[str, Any]], seed: int) -> dict[str, list[int]]:
-    """Make deterministic, family- and density-balanced thirds."""
+    """Split each surface family and sampling bin into three reproducible groups."""
 
     groups: dict[tuple[str, str], list[int]] = defaultdict(list)
     for index, row in rows.items():
@@ -135,12 +138,14 @@ def split_examples(rows: dict[int, dict[str, Any]], seed: int) -> dict[str, list
     return splits
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def arrays_for(
     indices: list[int],
     rows: dict[int, dict[str, Any]],
-    predictions: dict[int, dict[str, np.ndarray]],
-) -> tuple[list[np.ndarray], list[np.ndarray], np.ndarray]:
+    predictions: dict[int, dict[str, Float[np.ndarray, "_edges"]]],
+) -> tuple[
+    list[Float[np.ndarray, "_edges"]], list[Float[np.ndarray, "_edges"]], Float[np.ndarray, "cases"]
+]:
     """Keep residuals, SDs, and sampling fractions aligned by example ID."""
     errors = [predictions[index]["error"] for index in indices]
     raw_sd = [predictions[index]["raw_sd"] for index in indices]

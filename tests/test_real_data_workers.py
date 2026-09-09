@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from beartype.roar import BeartypeCallHintParamViolation
+from jaxtyping import TypeCheckError
 from PIL import Image
 
 from dreems import workflow_io
@@ -109,11 +109,10 @@ def test_browser_json_uses_null_inside_arrays_and_accepts_numpy_booleans(workers
         "nested": [float("nan")],
     }
     expected = {"array": [None, None, None, 2.0], "flag": True, "nested": [None]}
-    assert workers.run_real_data.json_ready(value) == expected
-    assert workers.render_real_data_gallery.json_ready(value) == expected
+    assert workflow_io.json_finite(value) == expected
     for write in (
-        workers.run_real_data.write_json_atomic,
-        workers.render_real_data_gallery.atomic_write_json,
+        workers.run_real_data.write_json_finite,
+        workers.render_real_data_gallery.write_json_finite,
     ):
         path = tmp_path / "report.json"
         write(path, value)
@@ -127,7 +126,7 @@ def test_failed_json_write_preserves_previous_report(workers, tmp_path):
     path = tmp_path / "report.json"
     path.write_text("previous")
     with pytest.raises(TypeError):
-        workers.run_real_data.write_json_atomic(path, {"bad": object()})
+        workers.run_real_data.write_json_finite(path, {"bad": object()})
     assert path.read_text() == "previous"
     assert list(tmp_path.iterdir()) == [path]
 
@@ -223,7 +222,7 @@ def test_interpolation_is_clipped_to_graph_faces_and_accepts_integer_positions(w
     [{"grid_side": 0}, {"grid_side": 2.5}, {"neighbors": 0}, {"kernel_bandwidth_edges": -1.0}],
 )
 def test_interpolation_rejects_bad_controls(workers, changes):
-    with pytest.raises((ValueError, BeartypeCallHintParamViolation)):
+    with pytest.raises((ValueError, TypeCheckError)):
         workers.render_real_data_gallery.interpolate_edges(
             np.asarray([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]),
             np.asarray([[0, 1], [0, 2], [1, 2]]),

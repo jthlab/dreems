@@ -17,10 +17,7 @@ from beartype import beartype
 
 from dreems import DREEMSInput, DREEMSMapRefinementConfig, load_model
 from dreems.checkpoints import _read_checkpoint_archive
-from dreems.workflow_io import json_finite as json_ready
-from dreems.workflow_io import sha256 as sha256
-from dreems.workflow_io import write_json_finite as write_json_atomic
-from dreems.workflow_io import write_npz
+from dreems.workflow_io import json_finite, sha256, write_json_finite, write_npz
 
 
 @beartype
@@ -71,7 +68,7 @@ def sha256_member(path: Path, member: str) -> str:
 
 @beartype
 def run_prediction(args: argparse.Namespace) -> None:
-    """Infer the prior and MAP surfaces on the archived, already-QC'd covariance."""
+    """Infer neural and MAP surfaces from the archived, filtered covariance."""
     inputs = (args.prepared_npz, args.prepared_json, args.checkpoint)
     input_hashes = {path: sha256(path) for path in inputs}
     metadata = json.loads(args.prepared_json.read_text())
@@ -135,8 +132,8 @@ def run_prediction(args: argparse.Namespace) -> None:
         raw_edge_log_sd=np.asarray(result.raw_edge_log_sd, dtype=np.float64),
         surface_weight=np.asarray(result.surface_weight, dtype=np.float64),
     )
-    write_json_atomic(args.output_json, output_metadata)
-    print(json.dumps(json_ready({"event": "dreems_done", **output_metadata}), sort_keys=True))
+    write_json_finite(args.output_json, output_metadata)
+    print(json.dumps(json_finite({"event": "dreems_done", **output_metadata}), sort_keys=True))
 
 
 @beartype
@@ -146,7 +143,7 @@ def main() -> None:
     if args.command == "predict":
         run_prediction(args)
     else:
-        write_json_atomic(args.output, checkpoint_metadata(args.checkpoint))
+        write_json_finite(args.output, checkpoint_metadata(args.checkpoint))
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""Paired sampling-mask augmentation for DREEMS training."""
+"""Create several sampling views of the same training simulation."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from typing import Any
 
 import numpy as np
 from beartype import beartype
-from jaxtyping import Float, jaxtyped
+from jaxtyping import Float, Int, Shaped, jaxtyped
 from scipy.sparse import coo_array
 from scipy.sparse.csgraph import dijkstra
 
@@ -82,7 +82,7 @@ def select_base_examples(
     min_sampled_fraction: float = 0.99,
     min_sampled_nodes: int = 12,
 ) -> list[BaseExample]:
-    """Select a deterministic, surface- and SNP-balanced dense subset."""
+    """Balance dense examples across surfaces and SNP counts, using a fixed seed."""
 
     if count <= 0:
         raise ValueError("count must be positive")
@@ -184,8 +184,8 @@ def read_selection(path: Path) -> list[BaseExample]:
 @jaxtyped(typechecker=beartype)
 def topology_axis_scores(
     num_nodes: int,
-    edges: np.ndarray,
-    observed_nodes: np.ndarray,
+    edges: Shaped[np.ndarray, "*edge_axes"],
+    observed_nodes: Shaped[np.ndarray, "*observed_axes"],
     *,
     seed: int,
 ) -> "Float[np.ndarray, 'num_nodes']":
@@ -226,12 +226,12 @@ def topology_axis_scores(
     return distance_first - distance_second
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def counterfactual_node_sets(
     example: Mapping[str, Any],
     *,
     seed: int,
-) -> dict[str, np.ndarray]:
+) -> dict[str, Int[np.ndarray, "_selected_nodes"]]:
     """Keep all nodes, a random tenth, both ends, or one end of the sampled range."""
     sample_nodes = _integer_array(
         np.asarray(example["sample_nodes"]), name="sample_nodes", dtype=np.int32
@@ -259,16 +259,15 @@ def counterfactual_node_sets(
     }
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def subset_example_to_nodes(
     example: Mapping[str, Any],
-    selected_nodes: np.ndarray,
+    selected_nodes: Shaped[np.ndarray, "*selected_axes"],
 ) -> dict[str, Any]:
     """Subset every stored sample representation, keeping graph and truth intact.
 
     Covariance axes, genotype rows, and optional sample coordinates all use the
-    order of ``sample_nodes``. The SNP set and effective SNP count are retained;
-    this is a sampling mask, not a fresh round of genotype filtering.
+    order of ``sample_nodes``. The SNP set and effective SNP count are retained.
     """
 
     selected = _integer_array(selected_nodes, name="selected_nodes", dtype=np.int32)

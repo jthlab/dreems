@@ -625,8 +625,8 @@ def refine_prediction_result(
         node_coordinates=result.positions,
         edges=result.edges,
         initial_edge_logs=result.edge_log_mean,
-        # Calibration changes reported intervals, not the frozen MAP point
-        # estimator. Its trust radius was selected against raw model SDs.
+        # The MAP trust radius was selected against raw model SDs. Keep using
+        # those SDs even when reported intervals have been recalibrated.
         initial_edge_sd=(
             result.edge_log_sd if result.raw_edge_log_sd is None else result.raw_edge_log_sd
         ),

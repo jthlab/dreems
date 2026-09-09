@@ -8,12 +8,12 @@ import math
 from collections.abc import Mapping, Sequence
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, NotRequired, TypedDict
 
 import numpy as np
 import scipy.sparse as sp
 from beartype import beartype
-from jaxtyping import Bool, Float, Int, Real, jaxtyped
+from jaxtyping import Bool, Float, Int, Real, Shaped, jaxtyped
 from scipy.ndimage import label
 from scipy.sparse.csgraph import connected_components
 from scipy.spatial import cKDTree
@@ -27,9 +27,30 @@ from dreems.simulation_config import (
 from dreems.validation import validate_graph_arrays
 
 
-@beartype
-def largest_component_mask(mask: np.ndarray) -> Bool[np.ndarray, "height width"]:  # noqa: F722
-    """Keep the largest four-neighbor component, preserving the old tie-break."""
+class Graph(TypedDict):
+    """Generated graph with zero-based endpoints and optional grid indices."""
+
+    active_full: Int[np.ndarray, "nodes"]
+    edges: Int[np.ndarray, "edges 2"]
+    source_active_full: NotRequired[Int[np.ndarray, "nodes"]]
+    edge_kind: NotRequired[Int[np.ndarray, "edges"]]
+    edge_row: NotRequired[Int[np.ndarray, "edges"]]
+    edge_col: NotRequired[Int[np.ndarray, "edges"]]
+
+
+class FourierField(TypedDict):
+    """Saved frequencies, phases, and coefficients of a random spatial field."""
+
+    frequencies: Float[np.ndarray, "features 2"]
+    phases: Float[np.ndarray, "features"]
+    weights: Float[np.ndarray, "features"]
+
+
+@jaxtyped(typechecker=beartype)
+def largest_component_mask(
+    mask: Shaped[np.ndarray, "*mask_axes"],
+) -> Bool[np.ndarray, "height width"]:  # noqa: F722
+    """Keep the largest four-neighbor component."""
     if mask.ndim != 2:
         raise ValueError("mask must be two-dimensional")
     labels, count = label(mask)
@@ -50,13 +71,13 @@ def largest_component_mask(mask: np.ndarray) -> Bool[np.ndarray, "height width"]
     return labels == winner
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def random_mask(
     rng: np.random.Generator,
     height: int,
     width: int,
     kind: str,
-) -> np.ndarray:
+) -> Bool[np.ndarray, "height width"]:
     """Draw a connected habitat mask on a rectangular four-neighbor grid."""
     yy, xx = np.mgrid[0:height, 0:width]
     mask = np.ones((height, width), dtype=bool)
@@ -114,12 +135,12 @@ def random_mask(
     return largest_component_mask(mask)
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def random_corridor_mask(
     rng: np.random.Generator,
     height: int,
     width: int,
-) -> np.ndarray:
+) -> Bool[np.ndarray, "height width"]:
     """Rasterize a meandering corridor with a few connected side branches."""
     rows = np.linspace(0.08 * height, 0.92 * height, int(rng.integers(5, 8)))
     cols = np.cumsum(rng.normal(scale=0.10 * width, size=rows.shape[0]))
@@ -156,7 +177,7 @@ def random_corridor_mask(
     return largest_component_mask(mask)
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def unit_positions(height: int, width: int) -> Float[np.ndarray, "nodes 2"]:  # noqa: F722
     """Place row-major grid nodes in [0, 1] x [-1, 0]."""
     rows, cols = np.meshgrid(np.arange(height), np.arange(width), indexing="ij")
@@ -165,8 +186,10 @@ def unit_positions(height: int, width: int) -> Float[np.ndarray, "nodes 2"]:  # 
     return np.column_stack([x, y])
 
 
-@beartype
-def masked_grid_graph(mask: np.ndarray) -> tuple[dict[str, np.ndarray], np.ndarray]:
+@jaxtyped(typechecker=beartype)
+def masked_grid_graph(
+    mask: Bool[np.ndarray, "height width"],
+) -> tuple[Graph, Float[np.ndarray, "nodes 2"]]:
     """Number active nodes row-major; list horizontal edges before vertical edges."""
     height, width = mask.shape
     active_full = np.flatnonzero(mask.ravel()).astype(np.int32)
@@ -195,11 +218,11 @@ def masked_grid_graph(mask: np.ndarray) -> tuple[dict[str, np.ndarray], np.ndarr
     return graph, unit_positions(height, width)[active_full]
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def feems_triangular_lattice_graph(
     n_rows: int = 8,
     n_columns: int = 12,
-) -> tuple[dict[str, np.ndarray], np.ndarray]:
+) -> tuple[Graph, Float[np.ndarray, "nodes 2"]]:
     """Build the triangular lattice geometry used by `feems.sim.setup_graph`."""
     rows = _integer_setting(n_rows, "n_rows", minimum=2)
     columns = _integer_setting(n_columns, "n_columns", minimum=2)
@@ -236,11 +259,11 @@ def feems_triangular_lattice_graph(
     return graph, positions
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def graph_from_positions_edges(
-    positions: np.ndarray,
-    edges: np.ndarray,
-) -> tuple[dict[str, np.ndarray], np.ndarray]:
+    positions: Shaped[np.ndarray, "*position_axes"],
+    edges: Shaped[np.ndarray, "*edge_axes"],
+) -> tuple[Graph, Float[np.ndarray, "nodes 2"]]:
     """Validate an external mesh and retain its node and edge order."""
     validate_graph_arrays(positions=positions, edges=edges)
     return {
@@ -306,8 +329,10 @@ def project_geometry(geometry: Any, transformer: Any) -> Any:
     return polygonal_geometry(transform(transformer.transform, geometry))
 
 
-@beartype
-def points_in_geometry(points: np.ndarray, geometry: Any) -> Bool[np.ndarray, "nodes"]:  # noqa: F821, UP037
+@jaxtyped(typechecker=beartype)
+def points_in_geometry(
+    points: Real[np.ndarray, "nodes 2"], geometry: Any
+) -> Bool[np.ndarray, "nodes"]:  # noqa: F821, UP037
     """Test habitat membership, including points exactly on its boundary."""
     import shapely
 
@@ -424,15 +449,17 @@ def hex_candidates(
     return np.asarray(points, dtype=np.float64)
 
 
-@beartype
-def hex_points_in_geometry(geometry: Any, spacing: float) -> np.ndarray:
+@jaxtyped(typechecker=beartype)
+def hex_points_in_geometry(geometry: Any, spacing: float) -> Float[np.ndarray, "nodes 2"]:
     """Keep candidate hex-grid nodes covered by the habitat, including its boundary."""
     candidates = hex_candidates(geometry.bounds, spacing)
     return candidates[points_in_geometry(candidates, geometry)]
 
 
-@beartype
-def choose_hex_spacing(geometry: Any, target_nodes: int) -> tuple[float, np.ndarray]:
+@jaxtyped(typechecker=beartype)
+def choose_hex_spacing(
+    geometry: Any, target_nodes: int
+) -> tuple[float, Float[np.ndarray, "nodes 2"]]:
     """Search spacing geometrically for the closest attainable node count."""
     _integer_setting(target_nodes, "target_nodes")
     xmin, ymin, xmax, ymax = geometry.bounds
@@ -478,7 +505,9 @@ def edges_from_hex_points(
 def largest_graph_component(
     positions: Real[np.ndarray, "nodes 2"],
     edges: Int[np.ndarray, "edges 2"],
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[
+    Real[np.ndarray, "kept_nodes 2"], Int[np.ndarray, "kept_edges 2"], Int[np.ndarray, "kept_nodes"]
+]:
     """Keep the largest component and its original node IDs; ties use the first."""
     if not np.all(np.isfinite(positions)):
         raise ValueError("positions must contain finite coordinates")
@@ -547,8 +576,8 @@ def build_global_landscape_mesh(
     raise RuntimeError("could not build a global landscape mesh")
 
 
-@beartype
-def standardize(values: np.ndarray) -> np.ndarray:
+@jaxtyped(typechecker=beartype)
+def standardize(values: Real[np.ndarray, "*shape"]) -> Float[np.ndarray, "*shape"] | np.float64:
     """Center a field and give it unit SD; constant fields become zero."""
     values = np.asarray(values, dtype=np.float64)
     if values.size == 0:
@@ -558,8 +587,8 @@ def standardize(values: np.ndarray) -> np.ndarray:
     return values / sd if sd > 0.0 else values
 
 
-@beartype
-def scaled_positions(positions: np.ndarray) -> np.ndarray:
+@jaxtyped(typechecker=beartype)
+def scaled_positions(positions: Real[np.ndarray, "nodes 2"]) -> Float[np.ndarray, "nodes 2"]:
     """Center coordinates and scale the farthest node to unit radius."""
     coords = np.asarray(positions, dtype=np.float64) - np.mean(positions, axis=0, keepdims=True)
     scale = float(np.max(np.linalg.norm(coords, axis=1))) if coords.size else 0.0
@@ -572,7 +601,7 @@ def draw_rff_params(
     *,
     features_count: int,
     length_scale: float,
-) -> dict[str, np.ndarray | float]:
+) -> FourierField:
     """Draw a stationary field using random Fourier features."""
     features_count = max(int(features_count), 1)
     return {
@@ -582,8 +611,10 @@ def draw_rff_params(
     }
 
 
-@beartype
-def eval_rff_params(params: Mapping[str, Any], positions: np.ndarray) -> np.ndarray:
+@jaxtyped(typechecker=beartype)
+def eval_rff_params(
+    params: FourierField, positions: Real[np.ndarray, "nodes 2"]
+) -> Float[np.ndarray, "nodes"]:
     """Evaluate saved Fourier features and standardize over the supplied nodes."""
     coords = scaled_positions(positions)
     frequencies = np.asarray(params["frequencies"], dtype=np.float64)
@@ -595,8 +626,8 @@ def eval_rff_params(params: Mapping[str, Any], positions: np.ndarray) -> np.ndar
     return standardize(field)
 
 
-@beartype
-def box_scaled_positions(positions: np.ndarray) -> np.ndarray:
+@jaxtyped(typechecker=beartype)
+def box_scaled_positions(positions: Real[np.ndarray, "nodes 2"]) -> Float[np.ndarray, "nodes 2"]:
     """Scale each coordinate axis to [0, 1] for procedural surface features."""
     coords = np.asarray(positions, dtype=np.float64)
     lo = np.min(coords, axis=0, keepdims=True)
@@ -823,12 +854,12 @@ def draw_multiscale_surface(
     }
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def multiscale_edge_values(
     surface: Mapping[str, Any],
-    positions: np.ndarray,
-    edges: np.ndarray,
-) -> np.ndarray:
+    positions: Real[np.ndarray, "nodes 2"],
+    edges: Int[np.ndarray, "edges 2"],
+) -> Float[np.ndarray, "edges"]:
     """Combine smooth bands, thresholded regions, and oriented local features."""
     left = edges[:, 0]
     right = edges[:, 1]
@@ -861,12 +892,12 @@ def multiscale_edge_values(
     return values
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def landscape_edge_penalty(
     features: Sequence[Mapping[str, Any]],
-    positions: np.ndarray,
-    edges: np.ndarray,
-) -> np.ndarray:
+    positions: Real[np.ndarray, "nodes 2"],
+    edges: Int[np.ndarray, "edges 2"],
+) -> Float[np.ndarray, "edges"]:
     """Evaluate low-migration features at endpoints or edge midpoints."""
     coords = box_scaled_positions(positions)
     left = edges[:, 0]
@@ -976,12 +1007,12 @@ def draw_surface(
     return surface
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def edge_log_rates_from_surface(
     surface: Mapping[str, Any],
-    positions: np.ndarray,
-    edges: np.ndarray,
-) -> np.ndarray:
+    positions: Real[np.ndarray, "nodes 2"],
+    edges: Int[np.ndarray, "edges 2"],
+) -> Float[np.ndarray, "edges"]:
     """Evaluate centered log conductances in the supplied edge order.
 
     Generic fields are rescaled to the requested SD. FEEMS lattice motifs
@@ -1051,11 +1082,11 @@ def edge_log_rates_from_surface(
     return (standardize(values) * float(surface["std"])).astype(np.float32)
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def node_log_q_from_surface(
     q_surface: Mapping[str, Any] | None,
-    positions: np.ndarray,
-) -> np.ndarray:
+    positions: Real[np.ndarray, "nodes 2"],
+) -> Float[np.ndarray, "nodes"]:
     """Evaluate centered log coalescence rates; an absent field means constant q."""
     if q_surface is None:
         return np.zeros(positions.shape[0], dtype=np.float32)

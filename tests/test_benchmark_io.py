@@ -77,6 +77,28 @@ def test_failed_report_write_preserves_existing_output(
     assert list(tmp_path.iterdir()) == [path]
 
 
+def test_npz_reader_preserves_mixed_shapes_and_dtypes(tmp_path: Path) -> None:
+    arrays = {
+        "positions": np.arange(10.0).reshape(5, 2),
+        "edges": np.asarray([[0, 1], [1, 2]], dtype=np.int32),
+        "selected": np.asarray([True, False, True]),
+        "checkpoint": np.asarray("abc123"),
+    }
+    path = tmp_path / "case.npz"
+    workflow_io.write_npz(path, **arrays)
+    loaded = workflow_io.read_npz(path)
+    assert loaded.keys() == arrays.keys()
+    for name, expected in arrays.items():
+        np.testing.assert_array_equal(loaded[name], expected, strict=True)
+
+
+def test_npz_reader_rejects_pickled_objects(tmp_path: Path) -> None:
+    path = tmp_path / "objects.npz"
+    np.savez(path, value=np.asarray([{"x": 1}], dtype=object))
+    with pytest.raises(ValueError, match="Object arrays"):
+        workflow_io.read_npz(path)
+
+
 def test_numpy_boolean_and_path_metadata_are_json_safe(tmp_path: Path) -> None:
     value = {"converged": np.bool_(True), "path": tmp_path, "history": np.asarray([1.0, 2.0])}
     converted = workflow_io.json_ready(value)
@@ -108,8 +130,6 @@ def test_combined_cli_uses_standalone_feems_workers() -> None:
         ["feems-fold", "--input", "example.pkl", "--fold", "1", "--output-npz", "fold.npz"]
     )
     assert args.handler is feems_benchmark.run_feems_fold
-    assert h2h.run_feems_fold is feems_benchmark.run_feems_fold
-    assert h2h.run_feems_case is feems_benchmark.run_feems_case
 
 
 def test_feems_worker_uses_validated_arrays_and_official_loo(raw, tmp_path, monkeypatch) -> None:

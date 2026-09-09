@@ -152,7 +152,7 @@ class DREEMSOptimizerConfig:
     Patience counts validation checks. All supported stopping metrics
     are minimized. ``restore_best_validation`` controls which weights are
     returned; the history still records every logged step. Nonfinite losses,
-    updates, or validation metrics abort the run instead of using patience.
+    updates, or validation metrics abort the run immediately.
     """
 
     seed: int = 12001

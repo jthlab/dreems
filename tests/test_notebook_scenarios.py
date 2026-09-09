@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 import yaml
 
-from dreems import notebook_scenarios
+from dreems import notebook_scenarios, workflow_io
 
 
 def _config() -> dict[str, object]:
@@ -142,6 +142,6 @@ def test_exact_h2h_config_records_source_checksum() -> None:
     settings = config["notebook_scenarios"]
     source = Path(settings["source_notebook"])
     assert source.is_file()
-    assert notebook_scenarios._sha256(source) == settings["source_notebook_sha256"]
+    assert workflow_io.sha256(source) == settings["source_notebook_sha256"]
     assert config["example_count"] == 12
     assert config["feems_fold_runtime"] == "4h"

@@ -11,7 +11,6 @@ from dreems import workflow_io
 from dreems.surface_gate_comparison import (
     build_scenario_bundle,
     edge_metrics,
-    load_npz,
     projected_alpha,
     select_broad_examples,
     sha256,
@@ -100,7 +99,7 @@ def scenario_inputs(tmp_path: Path) -> dict:
 
 def test_build_scenario_bundle_matches_core_gate_and_feems(scenario_inputs: dict) -> None:
     build_scenario_bundle(**scenario_inputs)
-    bundle = load_npz(scenario_inputs["output"])
+    bundle = workflow_io.read_npz(scenario_inputs["output"])
     payload = json.loads(scenario_inputs["report_output"].read_text())
     assert bundle["index"].shape == (12,)
     assert np.allclose(bundle["gate_alpha_neural"][:8], 1.0)
@@ -110,12 +109,32 @@ def test_build_scenario_bundle_matches_core_gate_and_feems(scenario_inputs: dict
     assert scenario_inputs["rows_output"].exists()
 
 
+def test_comparison_notebook_runs_with_current_api(scenario_inputs: dict) -> None:
+    jupytext = pytest.importorskip("jupytext")
+    import matplotlib.pyplot as plt
+
+    build_scenario_bundle(**scenario_inputs)
+    source = Path(__file__).parents[1] / "workflow/notebooks/feems_comparison_surface_gate.md"
+    notebook = jupytext.read(source)
+    namespace = {"__name__": "__main__"}
+    try:
+        for cell in notebook.cells:
+            if cell.cell_type == "code":
+                code = cell.source.replace(
+                    'Path("__SCENARIO_BUNDLE__")', f"Path({str(scenario_inputs['output'])!r})"
+                )
+                exec(compile(code, str(source), "exec"), namespace)
+        np.testing.assert_array_equal(namespace["bundle"]["index"], np.arange(12))
+    finally:
+        plt.close("all")
+
+
 @pytest.mark.parametrize(
     "field", ["index", "edges", "num_snps", "truth", "edge_sd", "positions", "truth_name"]
 )
 def test_scenario_bundle_rejects_invalid_core_arrays(scenario_inputs, field):
     path = scenario_inputs["core_bundle_path"]
-    arrays = load_npz(path)
+    arrays = workflow_io.read_npz(path)
     if field in {"index", "edges", "num_snps"}:
         arrays[field] = arrays[field].astype(float) + 0.25
     elif field == "truth":
@@ -136,7 +155,7 @@ def test_scenario_bundle_rejects_invalid_core_arrays(scenario_inputs, field):
 @pytest.mark.parametrize("change", ["shape", "negative_sd", "checkpoint"])
 def test_scenario_bundle_rejects_invalid_gated_prediction(scenario_inputs, change):
     path = Path(scenario_inputs["gated_pattern"].format(example=0))
-    arrays = load_npz(path)
+    arrays = workflow_io.read_npz(path)
     if change == "shape":
         arrays["dreems"] = np.zeros(3)
     elif change == "negative_sd":
@@ -150,7 +169,7 @@ def test_scenario_bundle_rejects_invalid_gated_prediction(scenario_inputs, chang
 
 
 def test_writers_use_the_shared_atomic_implementation(tmp_path):
-    assert comparison._atomic_npz is workflow_io.write_npz
+    assert comparison.write_npz is workflow_io.write_npz
     assert comparison.sha256 is workflow_io.sha256
     path = tmp_path / "report.json"
     path.write_bytes(b"old report")

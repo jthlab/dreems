@@ -13,11 +13,11 @@ import os
 import shutil
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 import numpy as np
 from beartype import beartype
-from jaxtyping import Int, Real, jaxtyped
+from jaxtyping import Float, Int, Real, Shaped, jaxtyped
 from scipy import stats
 
 from .validation import _integer_array, _real_array, validate_graph_arrays
@@ -25,10 +25,26 @@ from .workflow_io import (
     _atomic_output,
     json_ready,
     parse_nonnegative_integer,
+    read_npz,
     read_pickle,
     write_csv,
     write_json,
 )
+
+
+class ScenarioArrays(TypedDict):
+    """Geometry, counts, and edge estimates for one matched simulation."""
+
+    positions: Float[np.ndarray, "nodes 2"]
+    edges: Int[np.ndarray, "edges 2"]
+    truth: Float[np.ndarray, "edges"]
+    sample_count: Float[np.ndarray, "nodes"]
+    edge_sd: Float[np.ndarray, "edges"]
+    conditioner: Float[np.ndarray, "edges"]
+    dreems: Float[np.ndarray, "edges"]
+    dreems_map: Float[np.ndarray, "edges"]
+    feems: Float[np.ndarray, "edges"]
+
 
 SNP_BINS = ((50, 128), (129, 512), (513, 2000), (2001, 10000))
 SELECTION_SEED = 20260827
@@ -43,7 +59,7 @@ def read_csv_rows(path: Path) -> list[dict[str, str]]:
 
 @beartype
 def numeric(row: Mapping[str, Any], key: str) -> float:
-    """Treat absent or unavailable metric cells as undefined, not zero."""
+    """Return NaN for absent or unavailable metrics."""
     value = row.get(key)
     try:
         return float(value)
@@ -106,8 +122,8 @@ def paired_stats(rows: Sequence[Mapping[str, Any]], *, label: str) -> dict[str, 
     corr_delta = new_corr - old_corr
     mse_advantage = old_mse - new_mse
 
-    @beartype
-    def delta_summary(values: np.ndarray) -> tuple[float, float, float, float]:
+    @jaxtyped(typechecker=beartype)
+    def delta_summary(values: Float[np.ndarray, "cases"]) -> tuple[float, float, float, float]:
         """Summarize a paired difference using the existing two-sided t test."""
         if not values.size:
             return (float("nan"),) * 4
@@ -323,8 +339,8 @@ def _plot_imports() -> tuple[Any, Any, Any, Any, Any]:
     return plt, mtri, LineCollection, TwoSlopeNorm, matplotlib
 
 
-@beartype
-def centered(values: np.ndarray) -> np.ndarray:
+@jaxtyped(typechecker=beartype)
+def centered(values: Shaped[np.ndarray, "*input_axes"]) -> Float[np.ndarray, "edges"]:
     """Center a finite edge field without changing its relative amplitude."""
     array = _real_array(values, name="edge values")
     if array.ndim != 1 or not array.size:
@@ -335,7 +351,7 @@ def centered(values: np.ndarray) -> np.ndarray:
 @jaxtyped(typechecker=beartype)
 def edge_to_node(
     values: Real[np.ndarray, "edges"], edges: Int[np.ndarray, "edges 2"], num_nodes: int
-) -> np.ndarray:
+) -> Float[np.ndarray, "nodes"]:
     """Average incident edges for display only; inference remains edge-valued."""
     if num_nodes < 1 or np.any(edges < 0) or np.any(edges >= num_nodes):
         raise ValueError("edge endpoints must index the supplied nodes")
@@ -436,8 +452,10 @@ def plot_surface(
     ax.set_yticks([])
 
 
-@beartype
-def prediction_slice(path: Path, replicate: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+@jaxtyped(typechecker=beartype)
+def prediction_slice(
+    path: Path, replicate: int
+) -> tuple[Float[np.ndarray, "edges"], Float[np.ndarray, "edges"], Float[np.ndarray, "edges"]]:
     """Read one case from a packed edge archive, validating its ragged offsets."""
     if isinstance(replicate, bool) or replicate < 0:
         raise ValueError("replicate must be a nonnegative integer")
@@ -471,24 +489,20 @@ def prediction_slice(path: Path, replicate: int) -> tuple[np.ndarray, np.ndarray
 
 
 @beartype
-def load_pickle_pack(path: str) -> list[dict[str, Any]]:
-    """Read a trusted local pack afresh so replacing a file cannot leave stale data."""
-    return read_pickle(Path(path))
-
-
-@beartype
 def raw_example(pattern: str, pack_size: int, replicate: int) -> Mapping[str, Any]:
     """Locate a global case ID in an ordered raw pack."""
     if isinstance(pack_size, bool) or pack_size < 1 or isinstance(replicate, bool) or replicate < 0:
         raise ValueError("pack size must be positive and replicate must be nonnegative")
     pack = replicate // pack_size
     local = replicate % pack_size
-    examples = load_pickle_pack(pattern.format(pack=pack))
+    examples = read_pickle(Path(pattern.format(pack=pack)))
     return examples[local]
 
 
-@beartype
-def example_geometry(example: Mapping[str, Any]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+@jaxtyped(typechecker=beartype)
+def example_geometry(
+    example: Mapping[str, Any],
+) -> tuple[Float[np.ndarray, "nodes 2"], Int[np.ndarray, "edges 2"], Float[np.ndarray, "nodes"]]:
     """Extract the graph and sample counts without changing edge order."""
     positions = _real_array(example["active_positions"], name="positions")
     edges = _integer_array(example["graph"]["edges"], name="edges", dtype=np.int32)
@@ -511,13 +525,13 @@ def save_figure(fig: Any, path: Path) -> None:
         fig.savefig(stream, format="pdf", bbox_inches="tight", facecolor="white")
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def _comparison_scatter(
-    left_corr: np.ndarray,
-    right_corr: np.ndarray,
-    left_mse: np.ndarray,
-    right_mse: np.ndarray,
-    colors: np.ndarray,
+    left_corr: Real[np.ndarray, "cases"],
+    right_corr: Real[np.ndarray, "cases"],
+    left_mse: Real[np.ndarray, "cases"],
+    right_mse: Real[np.ndarray, "cases"],
+    colors: Real[np.ndarray, "cases"],
     *,
     labels: tuple[str, str],
     color_label: str,
@@ -1463,23 +1477,16 @@ def _scenario_mask_label(mask: str) -> str:
     return mask.replace("_", "\n")
 
 
-@beartype
-def _scenario_archive(path: str) -> dict[str, np.ndarray]:
-    """Read the current archive, not a cached version of a reused filename."""
-    with np.load(path, allow_pickle=False) as archive:
-        return {key: archive[key] for key in archive.files}
-
-
-@beartype
+@jaxtyped(typechecker=beartype)
 def _matched_predictions(
     example: int,
     *,
     dreems_pattern: str,
     feems_pattern: str,
-) -> dict[str, np.ndarray]:
+) -> dict[str, Shaped[np.ndarray, "*_archive_axes"]]:
     """Check common graph metadata before putting cached methods side by side."""
-    dreems = _scenario_archive(dreems_pattern.format(example=example))
-    feems = _scenario_archive(feems_pattern.format(example=example))
+    dreems = read_npz(Path(dreems_pattern.format(example=example)))
+    feems = read_npz(Path(feems_pattern.format(example=example)))
     for archive in (dreems, feems):
         archive["edges"] = _integer_array(archive["edges"], name="edges", dtype=np.int32)
         for key in ("positions", "truth", "sample_count"):
@@ -1510,7 +1517,7 @@ def _scenario_arrays(
     *,
     dreems_pattern: str,
     feems_pattern: str,
-) -> dict[str, np.ndarray]:
+) -> ScenarioArrays:
     """Select the full scenario diagnostics from a validated method pair."""
     arrays = _matched_predictions(
         example, dreems_pattern=dreems_pattern, feems_pattern=feems_pattern
@@ -1853,8 +1860,8 @@ def _scenario_aggregate_figure(grouped: Sequence[Mapping[str, Any]], output: Pat
     plt.close(fig)
 
 
-@beartype
-def _pairwise_corr(left: np.ndarray, right: np.ndarray) -> float:
+@jaxtyped(typechecker=beartype)
+def _pairwise_corr(left: Real[np.ndarray, "edges"], right: Real[np.ndarray, "edges"]) -> float:
     """Compare centered patterns; a constant field has undefined correlation."""
     left = centered(left)
     right = centered(right)

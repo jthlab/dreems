@@ -1,5 +1,7 @@
 """Fit and verify edge posterior-SD calibration on held-out simulations."""
 
+# ruff: noqa: F722, F821, UP037
+
 from __future__ import annotations
 
 import argparse
@@ -12,6 +14,7 @@ from typing import Any
 
 import numpy as np
 from beartype import beartype
+from jaxtyping import Float, jaxtyped
 
 from dreems import calibration, checkpoints, corpus, metrics
 from dreems.validation import _real_array
@@ -35,8 +38,8 @@ def load_raw_example(path: Path, *, example_index: int = 0) -> dict[str, Any]:
     return payload
 
 
-@beartype
-def truth_edge_logs(example: Mapping[str, Any]) -> np.ndarray:
+@jaxtyped(typechecker=beartype)
+def truth_edge_logs(example: Mapping[str, Any]) -> Float[np.ndarray, "edges"]:
     """Read the simulator's edge log-conductances, including the older truth key."""
     value = example.get("edge_log_rates", example.get("truth"))
     if value is None:
@@ -102,13 +105,17 @@ def command_canonicalize(args: argparse.Namespace) -> None:
     )
 
 
-@beartype
-def load_cases(paths: Sequence[Path]) -> tuple[list[np.ndarray], list[np.ndarray], np.ndarray]:
-    """Load per-graph calibration observations in manifest order."""
+@jaxtyped(typechecker=beartype)
+def load_cases(
+    paths: Sequence[Path],
+) -> tuple[
+    list[Float[np.ndarray, "_edges"]], list[Float[np.ndarray, "_edges"]], Float[np.ndarray, "cases"]
+]:
+    """Read residuals and SDs for each graph, then one sampling fraction per graph."""
     if len(paths) != len({path.resolve() for path in paths}):
         raise ValueError("duplicate calibration case paths")
-    errors: list[np.ndarray] = []
-    raw_sd: list[np.ndarray] = []
+    errors: list[Float[np.ndarray, "_edges"]] = []
+    raw_sd: list[Float[np.ndarray, "_edges"]] = []
     density: list[float] = []
     for path in paths:
         with np.load(path, allow_pickle=False) as payload:
@@ -191,11 +198,11 @@ def density_label(value: float) -> str:
     return "dense >25%"
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def verification_rows(
-    errors: Sequence[np.ndarray],
-    raw_sd: Sequence[np.ndarray],
-    density: np.ndarray,
+    errors: Sequence[Float[np.ndarray, "_edges"]],
+    raw_sd: Sequence[Float[np.ndarray, "_edges"]],
+    density: Float[np.ndarray, "cases"],
     selected: calibration.SDCalibration,
 ) -> list[dict[str, Any]]:
     """Report held-out coverage overall and in each nonempty sampling bin."""

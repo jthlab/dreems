@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Render DREEMS real-data maps beside published FEEMS/EEMS figures."""
 
-# Shape annotations below are jaxtyping expressions, not Python expressions.
-# ruff: noqa: F722
+# ruff: noqa: F722, F821, UP037
 
 from __future__ import annotations
 
@@ -23,7 +22,7 @@ import matplotlib
 import numpy as np
 import requests
 from beartype import beartype
-from jaxtyping import Float, Int, Real, jaxtyped
+from jaxtyping import Bool, Float, Int, Real, Shaped, UInt8, jaxtyped
 from matplotlib import colors as mcolors
 from matplotlib import tri as mtri
 from matplotlib.collections import LineCollection
@@ -31,11 +30,7 @@ from PIL import Image
 from scipy.spatial import cKDTree
 
 from dreems.validation import _integer_array, _real_array, validate_graph_arrays
-from dreems.workflow_io import _atomic_output, load_config
-from dreems.workflow_io import json_finite as json_ready  # noqa: F401 -- public utility
-from dreems.workflow_io import sha256 as sha256
-from dreems.workflow_io import write_csv as write_csv
-from dreems.workflow_io import write_json_finite as atomic_write_json
+from dreems.workflow_io import _atomic_output, load_config, sha256, write_csv, write_json_finite
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
@@ -62,7 +57,7 @@ GEOGRAPHIC_CRS = ccrs.PlateCarree()
 class TopoBasemap:
     """A tile mosaic in Web Mercator, or the explicit stock-image fallback."""
 
-    image: np.ndarray | None
+    image: UInt8[np.ndarray, "height width 3"] | None
     image_extent: tuple[float, float, float, float] | None
     source: str
 
@@ -101,8 +96,8 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-@beartype
-def centered(values: np.ndarray) -> np.ndarray:
+@jaxtyped(typechecker=beartype)
+def centered(values: Real[np.ndarray, "*axes"]) -> Float[np.ndarray, "*axes"]:
     """Center finite values while preserving the missing-value mask."""
     values = np.asarray(values, dtype=np.float64)
     finite = np.isfinite(values)
@@ -120,16 +115,20 @@ def edge_midpoints(
     return 0.5 * (positions[edges[:, 0]] + positions[edges[:, 1]])
 
 
-@beartype
-def median_edge_length(positions: np.ndarray, edges: np.ndarray) -> float:
+@jaxtyped(typechecker=beartype)
+def median_edge_length(
+    positions: Real[np.ndarray, "nodes 2"], edges: Int[np.ndarray, "edges 2"]
+) -> float:
     """Set the interpolation length scale from nonzero geographic edge lengths."""
     lengths = np.linalg.norm(positions[edges[:, 0]] - positions[edges[:, 1]], axis=1)
     lengths = lengths[np.isfinite(lengths) & (lengths > 0.0)]
     return float(np.median(lengths)) if lengths.size else 1.0
 
 
-@beartype
-def graph_triangles(node_count: int, edges: np.ndarray) -> np.ndarray:
+@jaxtyped(typechecker=beartype)
+def graph_triangles(
+    node_count: int, edges: Shaped[np.ndarray, "*edge_axes"]
+) -> Int[np.ndarray, "triangles 3"]:
     """List each three-edge cycle once, in the graph's existing node order."""
     edges = _integer_array(np.asarray(edges), name="edges", dtype=np.int32)
     if node_count < 1 or edges.ndim != 2 or edges.shape[1] != 2:
@@ -154,11 +153,13 @@ def graph_triangles(node_count: int, edges: np.ndarray) -> np.ndarray:
     return np.asarray(triangles, dtype=np.int32).reshape((-1, 3))
 
 
-@beartype
-def graph_face_triangles(positions: np.ndarray, edges: np.ndarray) -> np.ndarray:
+@jaxtyped(typechecker=beartype)
+def graph_face_triangles(
+    positions: Real[np.ndarray, "nodes 2"], edges: Int[np.ndarray, "edges 2"]
+) -> Int[np.ndarray, "triangles 3"]:
     """Exclude degenerate cycles and cycles enclosing another graph node."""
     triangles = graph_triangles(positions.shape[0], edges)
-    faces: list[np.ndarray] = []
+    faces: list[Int[np.ndarray, "3"]] = []
     for triangle in triangles:
         vertices = positions[triangle]
         first = vertices[1] - vertices[0]
@@ -183,12 +184,12 @@ def graph_face_triangles(positions: np.ndarray, edges: np.ndarray) -> np.ndarray
     return np.asarray(faces, dtype=np.int32).reshape((-1, 3))
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def triangle_union_support_mask(
-    positions: np.ndarray,
-    triangles: np.ndarray,
-    query_points: np.ndarray,
-) -> np.ndarray:
+    positions: Real[np.ndarray, "nodes 2"],
+    triangles: Int[np.ndarray, "triangles 3"],
+    query_points: Real[np.ndarray, "points 2"],
+) -> Bool[np.ndarray, "points"]:
     """Find points inside any graph triangle when Matplotlib cannot index the mesh."""
     support = np.zeros(query_points.shape[0], dtype=bool)
     query_tree = cKDTree(query_points)
@@ -219,12 +220,12 @@ def triangle_union_support_mask(
     return support
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def graph_support_mask(
-    positions: np.ndarray,
-    edges: np.ndarray,
-    query_points: np.ndarray,
-) -> np.ndarray:
+    positions: Real[np.ndarray, "nodes 2"],
+    edges: Int[np.ndarray, "edges 2"],
+    query_points: Real[np.ndarray, "points 2"],
+) -> Bool[np.ndarray, "points"]:
     """Restrict a smoothed map to graph faces, or near edges if there are no faces."""
     triangles = graph_face_triangles(positions, edges)
     if triangles.size:
@@ -254,17 +255,17 @@ def graph_support_mask(
     return distances <= 0.75 * median_edge_length(positions, edges)
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def interpolate_edges(
-    positions: np.ndarray,
-    edges: np.ndarray,
-    values: np.ndarray,
+    positions: Real[np.ndarray, "nodes 2"],
+    edges: Int[np.ndarray, "edges 2"],
+    values: Real[np.ndarray, "edges"],
     *,
     grid_side: int,
     kernel_bandwidth_edges: float = 1.8,
     neighbors: int = 32,
     mask_radius_edges: float = 4.0,
-) -> tuple[np.ndarray, tuple[float, float, float, float]]:
+) -> tuple[Float[np.ndarray, "grid_side grid_side"], tuple[float, float, float, float]]:
     """Smooth edge values for display without inferring migration outside the graph."""
     if isinstance(grid_side, bool) or grid_side < 2:
         raise ValueError("grid_side must be at least 2")
@@ -310,10 +311,10 @@ def interpolate_edges(
     return interpolated.reshape(xx.shape), (xmin, xmax, ymin, ymax)
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def map_extent(
-    sample_lonlat: np.ndarray,
-    node_lonlat: np.ndarray,
+    sample_lonlat: Real[np.ndarray, "samples 2"],
+    node_lonlat: Real[np.ndarray, "nodes 2"],
 ) -> tuple[float, float, float, float]:
     """Pad the sample and graph bounds within the supported latitude range."""
     coordinates = np.vstack((sample_lonlat, node_lonlat))
@@ -331,9 +332,9 @@ def map_extent(
     )
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def projected_extent(
-    positions: np.ndarray,
+    positions: Real[np.ndarray, "nodes 2"],
 ) -> tuple[float, float, float, float]:
     """Pad a graph already expressed in projected coordinates."""
     xmin, ymin = np.nanmin(positions, axis=0)
@@ -473,7 +474,7 @@ def limit_topo_mosaic_size(
     return mosaic.resize(size, resample=Image.Resampling.LANCZOS)
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def fetch_esri_topo_mosaic(
     extent: tuple[float, float, float, float],
     *,
@@ -481,7 +482,7 @@ def fetch_esri_topo_mosaic(
     maximum_tiles: int,
     maximum_pixels: int,
     cache_dir: Path,
-) -> tuple[np.ndarray, tuple[float, float, float, float], int]:
+) -> tuple[UInt8[np.ndarray, "height width 3"], tuple[float, float, float, float], int]:
     """Fetch tiles concurrently, then assemble them in deterministic geographic order."""
     if maximum_pixels < 256:
         raise ValueError("maximum_pixels must be at least one tile width")
@@ -619,8 +620,10 @@ def add_topo_basemap(
     )
 
 
-@beartype
-def sample_counts(sample_nodes: np.ndarray, node_count: int) -> np.ndarray:
+@jaxtyped(typechecker=beartype)
+def sample_counts(
+    sample_nodes: Shaped[np.ndarray, "*sample_axes"], node_count: int
+) -> Float[np.ndarray, "node_count"]:
     """Count samples assigned to each node without changing graph order."""
     sample_nodes = _integer_array(np.asarray(sample_nodes), name="sample_nodes", dtype=np.int32)
     if (
@@ -633,13 +636,13 @@ def sample_counts(sample_nodes: np.ndarray, node_count: int) -> np.ndarray:
     return np.bincount(sample_nodes, minlength=node_count).astype(np.float64)
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def add_samples(
     ax: plt.Axes,
     *,
-    node_positions: np.ndarray,
-    edges: np.ndarray,
-    sample_nodes: np.ndarray,
+    node_positions: Real[np.ndarray, "nodes 2"],
+    edges: Int[np.ndarray, "edges 2"],
+    sample_nodes: Int[np.ndarray, "samples"],
     graph_alpha: float,
     data_crs: ccrs.CRS,
 ) -> None:
@@ -673,22 +676,22 @@ def add_samples(
     )
 
 
-@beartype
-def robust_limit(values: np.ndarray, percentile: float = 96.0) -> float:
+@jaxtyped(typechecker=beartype)
+def robust_limit(values: Real[np.ndarray, "*axes"], percentile: float = 96.0) -> float:
     """Set a nonzero color limit from the finite absolute values."""
     finite = np.asarray(values, dtype=np.float64)
     finite = finite[np.isfinite(finite)]
     return max(float(np.percentile(np.abs(finite), percentile)), 1.0e-6) if finite.size else 1.0
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def plot_raw_edges(
     ax: plt.Axes,
     *,
-    node_positions: np.ndarray,
-    edges: np.ndarray,
-    sample_nodes: np.ndarray,
-    values: np.ndarray,
+    node_positions: Real[np.ndarray, "nodes 2"],
+    edges: Int[np.ndarray, "edges 2"],
+    sample_nodes: Int[np.ndarray, "samples"],
+    values: Real[np.ndarray, "edges"],
     extent: tuple[float, float, float, float],
     vlim: float,
     basemap: TopoBasemap,
@@ -727,14 +730,14 @@ def plot_raw_edges(
     return basemap.source
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def plot_interpolated(
     ax: plt.Axes,
     *,
-    node_positions: np.ndarray,
-    edges: np.ndarray,
-    sample_nodes: np.ndarray,
-    values: np.ndarray,
+    node_positions: Real[np.ndarray, "nodes 2"],
+    edges: Int[np.ndarray, "edges 2"],
+    sample_nodes: Int[np.ndarray, "samples"],
+    values: Real[np.ndarray, "edges"],
     extent: tuple[float, float, float, float],
     grid_side: int,
     vmin: float,
@@ -1011,7 +1014,7 @@ def render_case(args: argparse.Namespace) -> None:
         "posterior_sd_median": float(np.median(edge_log_sd)),
         "posterior_sd_p95": float(np.percentile(edge_log_sd, 95.0)),
     }
-    atomic_write_json(args.output_json, row)
+    write_json_finite(args.output_json, row)
 
 
 @beartype
@@ -1107,7 +1110,7 @@ def assemble_index(args: argparse.Namespace) -> None:
             for row in rows
         ],
     )
-    atomic_write_json(
+    write_json_finite(
         args.output_manifest_json,
         {
             "comparison_scope": (

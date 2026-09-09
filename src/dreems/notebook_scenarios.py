@@ -7,6 +7,7 @@ structure so the expensive msprime simulations run exactly three times.
 
 from __future__ import annotations
 
+# ruff: noqa: F722, F821, UP037
 import argparse
 import json
 import time
@@ -21,11 +22,11 @@ import numpy as np
 import scipy.sparse as sp
 import xarray as xr
 from beartype import beartype
+from jaxtyping import Bool, Float, Int, Integer, Real, Shaped, UInt8, jaxtyped
 
 from dreems import corpus, features, genotypes, workflow_io
+from dreems.geography import Graph
 from dreems.validation import _integer_array, _real_array, validate_graph_arrays
-from dreems.workflow_io import sha256 as _sha256
-from dreems.workflow_io import write_npz as _atomic_npz
 
 TRUTHS = ("barrier", "anisotropy", "homogeneous")
 MASKS = ("full", "random_10pct", "outer_slabs", "left_missing")
@@ -93,8 +94,8 @@ def scenario_spec(config: Mapping[str, Any], example_id: int) -> NotebookScenari
     return NotebookScenarioSpec(index, TRUTHS[truth_index], MASKS[mask_index])
 
 
-@beartype
-def sampled_nodes(truth: str, mask: str) -> np.ndarray:
+@jaxtyped(typechecker=beartype)
+def sampled_nodes(truth: str, mask: str) -> Int[np.ndarray, "sampled_nodes"]:
     """Return the exact node IDs selected by one notebook cell."""
 
     if truth not in TRUTHS:
@@ -127,8 +128,8 @@ def observed_node_count(config: Mapping[str, Any], example_id: int) -> int:
     return int(sampled_nodes(spec.truth, spec.mask).size)
 
 
-@beartype
-def notebook_graph() -> tuple[dict[str, np.ndarray], np.ndarray]:
+@jaxtyped(typechecker=beartype)
+def notebook_graph() -> tuple[Graph, Float[np.ndarray, "nodes 2"]]:
     """Build the NetworkX lattice in the notebook's original edge order."""
 
     lattice = nx.generators.lattice.triangular_lattice_graph(
@@ -149,8 +150,10 @@ def notebook_graph() -> tuple[dict[str, np.ndarray], np.ndarray]:
     return graph, positions
 
 
-@beartype
-def edge_rates(truth: str, positions: np.ndarray, edges: np.ndarray) -> np.ndarray:
+@jaxtyped(typechecker=beartype)
+def edge_rates(
+    truth: str, positions: Real[np.ndarray, "nodes 2"], edges: Int[np.ndarray, "edges 2"]
+) -> Float[np.ndarray, "edges"]:
     """Return the raw migration rates assigned in the source notebook."""
 
     if truth == "barrier":
@@ -179,10 +182,10 @@ def edge_rates(truth: str, positions: np.ndarray, edges: np.ndarray) -> np.ndarr
     return rates.astype(np.float64)
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def _demography(
     truth: str,
-) -> tuple[msprime.Demography, dict[str, np.ndarray], np.ndarray, np.ndarray]:
+) -> tuple[msprime.Demography, Graph, Float[np.ndarray, "nodes 2"], Float[np.ndarray, "edges"]]:
     """Keep the notebook's deme order, symmetric migration, and ancestral split."""
     graph, positions = notebook_graph()
     edges = np.asarray(graph["edges"], dtype=np.int32)
@@ -219,7 +222,7 @@ def _source_provenance(config: Mapping[str, Any]) -> tuple[Path, str]:
     settings = _settings(config)
     source = Path(str(settings["source_notebook"])).expanduser().resolve()
     expected = str(settings["source_notebook_sha256"])
-    observed = _sha256(source)
+    observed = workflow_io.sha256(source)
     if observed != expected:
         raise ValueError(
             f"source notebook checksum changed: expected {expected}, observed {observed}"
@@ -245,7 +248,7 @@ def generate_base(
 
     demography, graph, positions, rates = _demography(truth)
     samples = {f"P{node}": DIPLOIDS_PER_NODE for node in range(NUM_NODES)}
-    haplotypes: list[np.ndarray] = []
+    haplotypes: list[UInt8[np.ndarray, "haploids"]] = []
     attempt = 1
     started = time.perf_counter()
     print(
@@ -291,7 +294,7 @@ def generate_base(
 
     edge_log_rates = np.log(rates)
     edge_log_rates -= edge_log_rates.mean()
-    _atomic_npz(
+    workflow_io.write_npz(
         output,
         truth=np.asarray(truth),
         positions=positions,
@@ -318,8 +321,10 @@ def generate_base(
     )
 
 
-@beartype
-def _calls_for_nodes(haplotypes: np.ndarray, nodes: np.ndarray) -> np.ndarray:
+@jaxtyped(typechecker=beartype)
+def _calls_for_nodes(
+    haplotypes: Shaped[np.ndarray, "*haplotype_axes"], nodes: Shaped[np.ndarray, "*node_axes"]
+) -> Integer[np.ndarray, "variants samples 2"]:
     """Select complete diploids in the notebook's fixed deme-major haplotype order."""
     if haplotypes.ndim != 2 or haplotypes.shape[1] != NUM_NODES * DIPLOIDS_PER_NODE * PLOIDY:
         raise ValueError("base haplotypes must contain every notebook diploid in deme order")
@@ -335,8 +340,10 @@ def _calls_for_nodes(haplotypes: np.ndarray, nodes: np.ndarray) -> np.ndarray:
     return selected.reshape(individuals.size, PLOIDY, selected.shape[1]).transpose(2, 0, 1)
 
 
-@beartype
-def maf_filtered_dosages(calls: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+@jaxtyped(typechecker=beartype)
+def maf_filtered_dosages(
+    calls: Shaped[np.ndarray, "*call_axes"],
+) -> tuple[Float[np.ndarray, "samples retained_snps"], Bool[np.ndarray, "variants"]]:
     """Apply the notebook's complete-data biallelic and MAF filter."""
 
     calls = np.asarray(calls)
@@ -356,18 +363,21 @@ def maf_filtered_dosages(calls: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return filtered, keep
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def select_model_snps(
-    calls: np.ndarray,
+    calls: Shaped[np.ndarray, "variants samples 2"],
     *,
     target_snps: int | None,
-) -> tuple[np.ndarray, np.ndarray, int]:
+) -> tuple[
+    Integer[np.ndarray, "selected_variants samples 2"],
+    Float[np.ndarray, "samples retained_snps"],
+    int,
+]:
     """Select a deterministic number of post-MAF SNPs for one sample mask.
 
-    The source notebook's ``num_snps`` is the number of simulated variant rows,
-    not the number entering inference. A target makes that distinction explicit:
-    filtering still happens after sample subsetting, and the first eligible SNPs
-    are retained in simulation order.
+    ``num_snps`` counts simulated variant rows. Subsetting samples and applying
+    the MAF filter reduces this count. When a target is supplied, retain the
+    first eligible SNPs in simulation order.
     """
 
     dosages, eligible = maf_filtered_dosages(calls)
@@ -385,13 +395,13 @@ def select_model_snps(
     return calls[selected], dosages[:, :target_snps], available
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def _notebook_dataset(
-    calls: np.ndarray,
+    calls: Shaped[np.ndarray, "variants samples 2"],
     *,
-    selected_nodes: np.ndarray,
-    raw_positions: np.ndarray,
-    edges: np.ndarray,
+    selected_nodes: Int[np.ndarray, "sampled_nodes"],
+    raw_positions: Real[np.ndarray, "nodes 2"],
+    edges: Int[np.ndarray, "edges 2"],
 ) -> xr.Dataset:
     """Reproduce the notebook's genotype-to-xarray path, including its projection."""
     # The archive uses unsigned bytes; the genotype API uses signed allele codes.
@@ -439,7 +449,7 @@ def derive_case(
     settings = _settings(config)
     _source, source_hash = _source_provenance(config)
     spec = scenario_spec(config, example_id)
-    base_hash = _sha256(base)
+    base_hash = workflow_io.sha256(base)
     with np.load(base, allow_pickle=False) as archive:
         base_truth = str(archive["truth"].item())
         raw_positions = _real_array(archive["positions"], name="positions")
@@ -556,7 +566,7 @@ def derive_case(
     }
     row = corpus.example_metadata(example, spec.example_id)
     row.update(scenario_metadata)
-    if _sha256(base) != base_hash:
+    if workflow_io.sha256(base) != base_hash:
         raise ValueError("base simulation changed while deriving its sampling case")
     workflow_io.write_pickle(output, [example])
     workflow_io.write_json(

@@ -69,6 +69,17 @@ def write_pickle(path: Path, payload: Any) -> None:
 
 
 @jaxtyped(typechecker=beartype)
+def read_npz(path: Path) -> dict[str, Shaped[np.ndarray, "*_stored_axes"]]:
+    """Read numeric and text arrays, closing the archive before returning.
+
+    Fields may have different dimensions. The caller validates the archive's
+    schema. Object arrays are rejected because they require unpickling.
+    """
+    with np.load(path, allow_pickle=False) as archive:
+        return {name: archive[name] for name in archive.files}
+
+
+@jaxtyped(typechecker=beartype)
 def write_npz(path: Path, **arrays: Shaped[np.ndarray, "*_stored_axes"]) -> None:
     """Replace a compressed NumPy archive only after every array is written."""
     with _atomic_output(path) as handle:

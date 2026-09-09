@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+# ruff: noqa: F722, F821, UP037
 import argparse
 import json
 from collections.abc import Mapping, Sequence
@@ -11,9 +12,10 @@ from typing import Any
 
 import numpy as np
 from beartype import beartype
+from jaxtyping import Float, Int, Real, jaxtyped
 
 from dreems import corpus, island_sim, workflow_io
-from dreems.geography import edge_log_rates_from_surface, feems_triangular_lattice_graph
+from dreems.geography import Graph, edge_log_rates_from_surface, feems_triangular_lattice_graph
 from dreems.validation import _integer_array, _real_array
 
 SURFACE_KINDS = {
@@ -145,15 +147,15 @@ def _surface(settings: Mapping[str, Any], truth: str) -> dict[str, Any]:
     }
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def _sampled_nodes(
     settings: Mapping[str, Any],
-    positions: np.ndarray,
+    positions: Real[np.ndarray, "nodes 2"],
     *,
     mask: str,
     replicate: int,
-) -> np.ndarray:
-    """Cross identical location masks with every truth, using a replicate-specific seed."""
+) -> Int[np.ndarray, "sampled_nodes"]:
+    """Apply the same sampling mask to every truth within a replicate."""
     num_nodes = int(positions.shape[0])
     start = settings.get("barrier_start", 2.5)
     end = settings.get("barrier_end", 8.5)
@@ -179,11 +181,17 @@ def _sampled_nodes(
     return sampled
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def scenario_components(
     config: Mapping[str, Any],
     example_id: int,
-) -> tuple[ScenarioSpec, dict[str, np.ndarray], np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[
+    ScenarioSpec,
+    Graph,
+    Float[np.ndarray, "nodes 2"],
+    Float[np.ndarray, "edges"],
+    Int[np.ndarray, "samples"],
+]:
     """Construct the graph, truth, and sample nodes without simulating SNPs."""
 
     settings = _settings(config)
@@ -221,7 +229,7 @@ def generate_example(
     output: Path,
     metadata: Path,
 ) -> None:
-    """Simulate one production-ascertained genotype matrix for the audit."""
+    """Simulate one genotype matrix using the production ascertainment settings."""
 
     config = workflow_io.load_config(config_path)
     settings = _settings(config)

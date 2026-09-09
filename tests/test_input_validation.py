@@ -30,30 +30,12 @@ def node_input() -> dict[str, Any]:
 
 
 @pytest.mark.parametrize(
-    "module",
-    [
-        "inference",
-        "linearized",
-        "benchmark_data",
-        "simulation",
-        "genotypes",
-        "refinement",
-        "calibration",
-        "features",
-        "model",
-        "train",
-        "pipeline",
-        "checkpoints",
-        "losses",
-        "feems",
-        "validation",
-        "metrics",
-        "cli",
-        "workflow_io",
-    ],
+    "source",
+    sorted((Path(__file__).parents[1] / "src/dreems").glob("*.py"))
+    + sorted((Path(__file__).parents[1] / "workflow").glob("*.py")),
+    ids=lambda path: f"{path.parent.name}/{path.name}",
 )
-def test_array_annotations_describe_dimensions(module: str) -> None:
-    source = Path(__file__).parents[1] / "src/dreems" / f"{module}.py"
+def test_array_annotations_describe_dimensions(source: Path) -> None:
     tree = ast.parse(source.read_text())
 
     def check(annotation: ast.AST) -> None:
@@ -70,8 +52,8 @@ def test_array_annotations_describe_dimensions(module: str) -> None:
                 assert isinstance(arguments[1], ast.Constant), ast.unparse(annotation)
                 assert isinstance(arguments[1].value, str), ast.unparse(annotation)
                 return
-        assert ast.unparse(annotation) not in {"np.ndarray", "jax.Array", "Array"}, (
-            f"{module}:{annotation.lineno}"
+        assert ast.unparse(annotation) not in {"np.ndarray", "jax.Array", "Array", "NDArray"}, (
+            f"{source}:{annotation.lineno}"
         )
         for child in ast.iter_child_nodes(annotation):
             check(child)

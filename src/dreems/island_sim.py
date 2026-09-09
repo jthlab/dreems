@@ -14,9 +14,8 @@ from typing import Literal
 
 import numpy as np
 from beartype import beartype
-from jaxtyping import Integer, jaxtyped
+from jaxtyping import Float64, Int32, Integer, UInt8, UInt32, jaxtyped
 from jaxtyping import Real as RealArray
-from numpy.typing import NDArray
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import breadth_first_order, connected_components
 
@@ -26,13 +25,13 @@ except ImportError:  # pragma: no cover - normal in source-only test environment
     _island_sim = None
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 @dataclass(frozen=True)
 class IslandSimulationResult:
     """Independent segregating SNPs simulated under a structured coalescent."""
 
-    genotypes: NDArray[np.uint8]
-    allele_counts: NDArray[np.uint32]
+    genotypes: UInt8[np.ndarray, "sample snp"]
+    allele_counts: UInt32[np.ndarray, "snp deme"]
     attempts: int
     used_rust: bool
 
@@ -59,12 +58,12 @@ def require_rust_backend() -> None:
         )
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 @dataclass(frozen=True)
 class IslandCovarianceResult:
     """Sample covariance accumulated directly from independent segregating SNPs."""
 
-    sample_covariance: NDArray[np.float64]
+    sample_covariance: Float64[np.ndarray, "sample sample"]
     effective_snps: int
     attempts: int
     used_rust: bool
@@ -81,7 +80,12 @@ def _check_inputs(
     num_snps: Integral,
     ploidy: Integral,
     mutation_rate: Real,
-) -> tuple[NDArray[np.int32], NDArray[np.float64], NDArray[np.int32], NDArray[np.float64]]:
+) -> tuple[
+    Int32[np.ndarray, "sample"],
+    Float64[np.ndarray, "deme"],
+    Int32[np.ndarray, "edge 2"],
+    Float64[np.ndarray, "edge"],
+]:
     """Check indices before narrowing them to the extension's int32 arrays."""
     if sample_nodes.size == 0:
         raise ValueError("sample_nodes must not be empty")
@@ -156,9 +160,9 @@ def _check_ascertainment(
     return min_frequency, max_frequency, resolved
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def _counts_pass_allele_frequency(
-    counts: NDArray[np.uint32],
+    counts: UInt32[np.ndarray, "deme"],
     *,
     total_haploids: int,
     min_allele_frequency: float,
@@ -169,12 +173,12 @@ def _counts_pass_allele_frequency(
     return min_allele_frequency <= frequency <= max_allele_frequency
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def _directed_adjacency(
     *,
     num_demes: int,
-    migration_edges: NDArray[np.int32],
-    migration_rates: NDArray[np.float64],
+    migration_edges: Int32[np.ndarray, "edge 2"],
+    migration_rates: Float64[np.ndarray, "edge"],
     symmetric: bool,
 ) -> list[list[tuple[int, float]]]:
     """Collect outgoing rates, adding reverse edges only in symmetric mode."""
@@ -209,22 +213,22 @@ def _remove_active(active: list[int], active_pos: list[int], lineage: int) -> No
     active_pos[lineage] = -1
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def _simulate_counts_python(
     *,
-    sample_nodes: NDArray[np.int32],
+    sample_nodes: Int32[np.ndarray, "sample"],
     num_demes: int,
-    q: NDArray[np.float64],
+    q: Float64[np.ndarray, "deme"],
     adjacency: list[list[tuple[int, float]]],
     ploidy: int,
     mutation_rate: float,
     marker_model: MarkerModel,
     rng: np.random.Generator,
-) -> NDArray[np.uint32] | None:
+) -> UInt32[np.ndarray, "deme"] | None:
     """Run one genealogy attempt, returning descendant counts by sampling deme.
 
     First-mutation mode samples the competing event directly. The other modes
-    keep one branch-length-weighted reservoir sample while completing the tree.
+    keep one branch in a reservoir, weighted by length, while completing the tree.
     Event and RNG order match the original separate Python implementations.
     """
     deme_lineages: list[list[int]] = [[] for _ in range(num_demes)]
@@ -333,14 +337,14 @@ def _simulate_counts_python(
     return None
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def _counts_to_genotypes(
     *,
-    allele_counts: NDArray[np.uint32],
-    sample_nodes: NDArray[np.int32],
+    allele_counts: UInt32[np.ndarray, "snp deme"],
+    sample_nodes: Int32[np.ndarray, "sample"],
     ploidy: int,
     rng: np.random.Generator,
-) -> NDArray[np.uint8]:
+) -> UInt8[np.ndarray, "sample snp"]:
     """Assign allele copies without replacement within each sampling deme."""
     genotypes = np.zeros((sample_nodes.shape[0], allele_counts.shape[0]), dtype=np.uint8)
     samples_by_deme = [
@@ -361,14 +365,14 @@ def _counts_to_genotypes(
     return genotypes
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def _simulate_python(
     *,
-    sample_nodes: NDArray[np.int32],
+    sample_nodes: Int32[np.ndarray, "sample"],
     num_demes: int,
-    q: NDArray[np.float64],
-    migration_edges: NDArray[np.int32],
-    migration_rates: NDArray[np.float64],
+    q: Float64[np.ndarray, "deme"],
+    migration_edges: Int32[np.ndarray, "edge 2"],
+    migration_rates: Float64[np.ndarray, "edge"],
     num_snps: int,
     ploidy: int,
     mutation_rate: float,
@@ -459,12 +463,12 @@ def _simulate_python(
     )
 
 
-@beartype
+@jaxtyped(typechecker=beartype)
 def _check_coalescence(
-    sample_nodes: NDArray[np.int32],
-    q: NDArray[np.float64],
-    edges: NDArray[np.int32],
-    rates: NDArray[np.float64],
+    sample_nodes: Int32[np.ndarray, "sample"],
+    q: Float64[np.ndarray, "deme"],
+    edges: Int32[np.ndarray, "edge 2"],
+    rates: Float64[np.ndarray, "edge"],
     *,
     symmetric: bool,
 ) -> None:
