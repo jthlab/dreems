@@ -16,8 +16,8 @@ import numpy as np
 from beartype import beartype
 
 from dreems import DREEMSInput, DREEMSMapRefinementConfig, load_model
-from dreems.checkpoints import _read_checkpoint_archive
-from dreems.workflow_io import json_finite, sha256, write_json_finite, write_npz
+from dreems.neural.checkpoints import _read_checkpoint_archive
+from dreems.utils.workflow_io import json_finite, sha256, write_json_finite, write_npz
 
 
 @beartype

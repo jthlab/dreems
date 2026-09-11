@@ -15,9 +15,9 @@ import numpy as np
 import pytest
 import yaml
 
-from dreems import checkpoints
-from dreems.calibration import SDCalibration
-from dreems.workflow_io import sha256, write_pickle
+from dreems.inference.calibration import SDCalibration
+from dreems.neural import checkpoints
+from dreems.utils.workflow_io import sha256, write_pickle
 
 ROOT = Path(__file__).resolve().parents[1]
 WEIGHTS = ROOT / "src/dreems/data/dreems_diffusion_bands.dreems.zip"

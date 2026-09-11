@@ -5,7 +5,8 @@ import os
 import numpy as np
 import pytest
 
-from dreems import features, island_sim, simulation, simulation_config
+from dreems.data import island_sim, simulation, simulation_config
+from dreems.neural import features
 
 
 def _require_rust_extension() -> None:

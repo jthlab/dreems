@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import math
+from importlib import import_module
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
-from dreems import checkpoints
+import dreems
+from dreems.data import datasets, genotypes, island_sim
+from dreems.evaluation.metrics import centered, edge_log_metrics
 from dreems.feems import (
     FEEMS_RECOMMENDED_CV_FOLDS,
     FEEMS_RECOMMENDED_LAMBDAS,
@@ -15,7 +18,37 @@ from dreems.feems import (
     feems_edge_log_rates,
     polymorphic_snp_mask,
 )
-from dreems.metrics import centered, edge_log_metrics
+from dreems.inference import api, refinement
+from dreems.neural import checkpoints
+
+
+def test_public_api_uses_the_organized_modules() -> None:
+    assert dreems.create_dataset is datasets.create_dataset
+    assert dreems.infer is datasets.infer
+    assert dreems.from_vcf_zarr is genotypes.from_vcf_zarr
+    assert dreems.load_model is api.load_model
+    assert dreems.predict is api.predict
+    assert dreems.DREEMSInput is api.DREEMSInput
+    assert dreems.DREEMSMapRefinementConfig is refinement.DREEMSMapRefinementConfig
+    assert dreems.simulate_island_model is island_sim.simulate_island_model
+
+
+@pytest.mark.parametrize(
+    "module_name",
+    [
+        "dreems.data.corpus",
+        "dreems.training.pipeline",
+        "dreems.evaluation.h2h",
+        "dreems.evaluation.feems_benchmark",
+        "dreems.evaluation.benchmark_data",
+        "dreems.evaluation.benchmark_gallery",
+        "dreems.evaluation.notebook_scenarios",
+        "dreems.evaluation.scenario_audit",
+        "dreems.evaluation.surface_gate_comparison",
+    ],
+)
+def test_workflow_entrypoints_are_importable(module_name: str) -> None:
+    assert callable(import_module(module_name).main)
 
 
 def test_edge_log_metrics_are_centered_and_scale_aware() -> None:

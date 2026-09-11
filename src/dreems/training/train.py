@@ -19,8 +19,9 @@ import optax
 from beartype import beartype
 from jaxtyping import Array, Bool, Float
 
-from dreems import checkpoints, features, losses
-from dreems import model as dreems_model
+from dreems.neural import checkpoints, features
+from dreems.neural import model as dreems_model
+from dreems.training import losses
 
 CheckpointCallback: TypeAlias = Callable[
     [int, dreems_model.DREEMS, list[float], dict[str, object]], None
@@ -99,7 +100,7 @@ class LinearizedResistanceConfig:
 @beartype
 @dataclass(frozen=True)
 class DREEMSLossConfig:
-    """Weights and thresholds for the supervised losses in :mod:`dreems.losses`."""
+    """Weights and thresholds for the supervised losses in :mod:`dreems.training.losses`."""
 
     min_logvar: float = -7.0
     max_logvar: float = 5.0

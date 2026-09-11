@@ -2,7 +2,7 @@
 
 Raw and prepared packs are trusted pickle files. Preparation keeps graph arrays
 unpadded; normalization statistics use training packs only. Training pads each
-batch to fixed dimensions and delegates model updates to ``dreems.train``.
+batch to fixed dimensions and delegates model updates to ``dreems.training.train``.
 """
 
 # ruff: noqa: F722, F821, UP037
@@ -23,10 +23,13 @@ import numpy as np
 from beartype import beartype
 from jaxtyping import Float, Shaped, jaxtyped
 
-from dreems import checkpoints, corpus, counterfactual, features, metrics, simulation, train
-from dreems import model as dreems_model
-from dreems.validation import _integer_array
-from dreems.workflow_io import (
+from dreems.data import corpus, simulation
+from dreems.evaluation import metrics
+from dreems.neural import checkpoints, features
+from dreems.neural import model as dreems_model
+from dreems.training import counterfactual, train
+from dreems.utils.validation import _integer_array
+from dreems.utils.workflow_io import (
     json_ready,
     load_config,
     optional_input_paths,

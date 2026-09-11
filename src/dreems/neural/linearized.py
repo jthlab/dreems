@@ -14,8 +14,8 @@ import scipy.sparse.linalg as spla
 from beartype import beartype
 from jaxtyping import Float, Int, Real, jaxtyped
 
-from dreems import features
-from dreems.features import geometry_conductance as _baseline_conductance
+from dreems.neural import features
+from dreems.neural.features import geometry_conductance as _baseline_conductance
 
 
 @jaxtyped(typechecker=beartype)

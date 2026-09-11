@@ -14,9 +14,9 @@ import jax
 import numpy as np
 from beartype import beartype
 
-from dreems import calibration as sd_calibration
-from dreems import checkpoints
-from dreems.workflow_io import _atomic_output, sha256
+from dreems.inference import calibration as sd_calibration
+from dreems.neural import checkpoints
+from dreems.utils.workflow_io import _atomic_output, sha256
 
 ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 SURFACE_GATE_FIELDS = {"surface_gate_hidden", "surface_gate_out"}

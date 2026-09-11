@@ -19,9 +19,10 @@ import numpy as np
 from beartype import beartype
 from jaxtyping import Float, Int, Real, jaxtyped
 
-from dreems import feems, metrics
-from dreems.validation import _integer_array, _real_array, validate_genotype_arrays
-from dreems.workflow_io import _atomic_output, read_pickle, sha256, write_json
+from dreems import feems
+from dreems.evaluation import metrics
+from dreems.utils.validation import _integer_array, _real_array, validate_genotype_arrays
+from dreems.utils.workflow_io import _atomic_output, read_pickle, sha256, write_json
 
 CASE_METADATA_KEYS = (
     "simulator",

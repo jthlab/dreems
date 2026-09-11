@@ -5,7 +5,7 @@ from argparse import Namespace
 import numpy as np
 import pytest
 
-from dreems import benchmark_gallery, scenario_audit
+from dreems.evaluation import benchmark_gallery, scenario_audit
 
 
 @pytest.mark.parametrize(

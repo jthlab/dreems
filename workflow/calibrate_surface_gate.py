@@ -15,9 +15,11 @@ import numpy as np
 from beartype import beartype
 from jaxtyping import Float, jaxtyped
 
-from dreems import calibration, checkpoints, metrics
-from dreems.validation import _real_array
-from dreems.workflow_io import json_ready, sha256, write_csv, write_json
+from dreems.evaluation import metrics
+from dreems.inference import calibration
+from dreems.neural import checkpoints
+from dreems.utils.validation import _real_array
+from dreems.utils.workflow_io import json_ready, sha256, write_csv, write_json
 
 
 @beartype

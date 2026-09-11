@@ -15,16 +15,19 @@ import numpy as np
 from beartype import beartype
 from jaxtyping import Shaped, jaxtyped
 
-from dreems import features, feems, metrics, refinement
-from dreems.inference import (
+from dreems import feems
+from dreems.evaluation import metrics
+from dreems.inference import refinement
+from dreems.inference.api import (
     DREEMSInput,
     DREEMSResult,
     _edge_records,
     genotype_covariance,
     load_model,
 )
-from dreems.validation import _integer_array, _real_array, validate_graph_arrays
-from dreems.workflow_io import _atomic_output, json_ready
+from dreems.neural import features
+from dreems.utils.validation import _integer_array, _real_array, validate_graph_arrays
+from dreems.utils.workflow_io import _atomic_output, json_ready
 
 
 @jaxtyped(typechecker=beartype)

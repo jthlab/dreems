@@ -328,26 +328,34 @@ dreems --feems \
 
 ## Package Layout
 
-- Inputs and predictions: `datasets`, `genotypes`, `inference`, and `cli`.
-  Shared array checks live in `validation`.
-- Neural model: `features` constructs inputs, `linearized` supplies the
-  conductance estimate, and `model` defines the Equinox GNN. `refinement`
-  fits the predicted surface to the observed covariance.
-- Training: `train` and `losses` implement single-device JAX training.
-  `checkpoints` handles serialization and prediction from saved weights;
-  `calibration` fits SD corrections.
-- Simulation: `simulation` assembles examples using the graph and surface
-  generators in `geography` and `motifs`. `island_sim` provides the Rust and
-  Python coalescent backends; `simulation_config` validates their settings.
-- Workers: `corpus`, `counterfactual`, and `pipeline` generate raw data,
-  prepare sampling views and features, train, and evaluate. `workflow_io`
-  reads artifacts and writes complete files atomically.
-- Benchmarks: `h2h` runs DREEMS and joins results; `feems_benchmark` runs FEEMS.
-  Their separate Snakemake dependencies allow neural changes to reuse FEEMS
-  fits. `benchmark_data` validates inputs and saved result archives.
-- Reports: `metrics`, `benchmark_gallery`, and `surface_gate_comparison` score
-  and plot matched cases. `scenario_audit` and `notebook_scenarios` reproduce
-  the focused sampling tests. The workflow README describes these protocols.
+```text
+src/dreems/
+    data/          Genotype inputs, graph and surface generation, simulations
+    neural/        Equinox model, features, linear initializer, checkpoints
+    training/      Losses, optimizer loop, sampling views, training workers
+    inference/     Prediction API, covariance refinement, SD calibration
+    evaluation/    FEEMS comparisons, metrics, scenarios, galleries
+    utils/         Array validation and file I/O
+    feems.py       Adapter for the official FEEMS package
+    cli.py         The dreems command
+    __init__.py    Public Python API
+```
+
+Start with `neural/model.py` for the architecture, `training/train.py` for
+training, or `inference/api.py` for predictions. `data/simulation.py` assembles
+training examples; `data/island_sim.py` provides the Rust and Python coalescent
+backends. The packaged weights remain in `data/dreems_diffusion_bands.dreems.zip`.
+
+Use the top-level API in application code: `dreems.create_dataset`,
+`dreems.from_vcf_zarr`, `dreems.infer`, and `dreems.load_model`. Internal imports
+use the subpackages, such as `from dreems.training.train import DREEMSTrainConfig`.
+The CLI and `dreems.feems` adapter retain their existing interfaces.
+
+Snakemake workers use the same layout, for example
+`python -m dreems.training.pipeline` and `python -m dreems.evaluation.h2h`.
+Separate FEEMS and neural dependencies let model changes reuse saved FEEMS
+fits. The [workflow guide](workflow/README.md) describes the training and
+evaluation protocols.
 
 Array annotations name their dimensions: positions are `(nodes, 2)`, endpoints
 are `(edges, 2)`, and migration estimates are `(edges,)`. `Graph`, `PreparedExample`,

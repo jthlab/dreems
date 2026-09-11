@@ -1,17 +1,25 @@
 """Estimate effective migration surfaces from genetic data."""
 
-from dreems.calibration import SDCalibration
-from dreems.datasets import (
+from dreems.data.datasets import (
     create_dataset,
     infer,
     validate_dataset,
 )
-from dreems.genotypes import (
+from dreems.data.genotypes import (
     attach_sample_coordinates,
     from_genotype_dataset,
     from_vcf_zarr,
 )
-from dreems.inference import (
+from dreems.data.island_sim import (
+    IslandCovarianceResult,
+    IslandSimulationResult,
+    require_rust_backend,
+    rust_backend_available,
+    simulate_island_covariance,
+    simulate_island_model,
+)
+from dreems.evaluation.metrics import EdgeLogMetrics, centered, edge_log_metrics
+from dreems.inference.api import (
     DREEMSInput,
     DREEMSPredictor,
     DREEMSResult,
@@ -21,20 +29,8 @@ from dreems.inference import (
     load_model,
     predict,
 )
-from dreems.island_sim import (
-    IslandCovarianceResult,
-    IslandSimulationResult,
-    require_rust_backend,
-    rust_backend_available,
-    simulate_island_covariance,
-    simulate_island_model,
-)
-from dreems.linearized import (
-    LinearizedConductanceEstimate,
-    all_pair_adjoint_conductance_initializer,
-)
-from dreems.metrics import EdgeLogMetrics, centered, edge_log_metrics
-from dreems.refinement import (
+from dreems.inference.calibration import SDCalibration
+from dreems.inference.refinement import (
     CovarianceFit,
     CovarianceScales,
     DREEMSMapRefinementConfig,
@@ -42,6 +38,10 @@ from dreems.refinement import (
     edge_line_roughness,
     q_covariance_at_observed_nodes,
     refine_edge_log_conductance,
+)
+from dreems.neural.linearized import (
+    LinearizedConductanceEstimate,
+    all_pair_adjoint_conductance_initializer,
 )
 
 __all__ = [

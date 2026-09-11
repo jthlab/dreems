@@ -1,6 +1,6 @@
 # DREEMS Island Simulator Extension
 
-This is the optional Rust/PyO3 backend for `dreems.island_sim`.
+This is the optional Rust/PyO3 backend for `dreems.data.island_sim`.
 
 Build it into the active Python environment with:
 

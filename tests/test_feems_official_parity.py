@@ -5,7 +5,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from dreems import feems, geography, island_sim
+from dreems import feems
+from dreems.data import geography, island_sim
 
 
 def _small_feems_case() -> dict[str, object]:

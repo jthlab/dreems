@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from dreems.linearized import all_pair_adjoint_conductance_initializer
+from dreems.neural.linearized import all_pair_adjoint_conductance_initializer
 
 
 def test_all_pair_adjoint_initializer_returns_edge_field() -> None:

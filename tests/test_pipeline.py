@@ -8,19 +8,11 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from dreems import (
-    calibration,
-    checkpoints,
-    corpus,
-    features,
-    geography,
-    motifs,
-    pipeline,
-    simulation,
-    simulation_config,
-    train,
-    workflow_io,
-)
+from dreems.data import corpus, geography, motifs, simulation, simulation_config
+from dreems.inference import calibration
+from dreems.neural import checkpoints, features
+from dreems.training import pipeline, train
+from dreems.utils import workflow_io
 
 
 def test_load_config_preserves_json_exponent_numbers(tmp_path) -> None:

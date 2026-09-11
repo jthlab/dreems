@@ -7,8 +7,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from dreems import counterfactual
-from dreems.geography import feems_triangular_lattice_graph
+from dreems.data.geography import feems_triangular_lattice_graph
+from dreems.training import counterfactual
 
 
 def dense_example() -> dict[str, object]:

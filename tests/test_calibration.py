@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from dreems.calibration import SDCalibration, candidates, summarize
+from dreems.inference.calibration import SDCalibration, candidates, summarize
 
 
 def test_graph_balanced_fit_does_not_overweight_large_graphs() -> None:

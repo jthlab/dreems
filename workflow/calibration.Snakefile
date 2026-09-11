@@ -18,10 +18,10 @@ if isinstance(RAW_PACK_SIZE, bool) or not isinstance(RAW_PACK_SIZE, Integral) or
 PROJECT_ROOT = Path(workflow.current_basedir).parent.resolve()
 SCRIPT = str(PROJECT_ROOT / "workflow/calibrate_checkpoint.py")
 ENVIRONMENT = [str(PROJECT_ROOT / name) for name in ("pyproject.toml", "uv.lock")]
-CALIBRATION_CODE = [str(PROJECT_ROOT / "src/dreems" / name) for name in ("calibration.py", "validation.py", "workflow_io.py")]
-CHECKPOINT_CODE = CALIBRATION_CODE + [str(PROJECT_ROOT / "src/dreems" / name) for name in ("checkpoints.py", "model.py")]
+CALIBRATION_CODE = [str(PROJECT_ROOT / "src/dreems" / name) for name in ("inference/calibration.py", "utils/validation.py", "utils/workflow_io.py")]
+CHECKPOINT_CODE = CALIBRATION_CODE + [str(PROJECT_ROOT / "src/dreems" / name) for name in ("neural/checkpoints.py", "neural/model.py")]
 CASE_CODE = CHECKPOINT_CODE + [str(PROJECT_ROOT / "src/dreems" / name) for name in (
-    "features.py", "linearized.py", "corpus.py", "metrics.py",
+    "neural/features.py", "neural/linearized.py", "data/corpus.py", "evaluation/metrics.py",
 )]
 INTERVALS = {}
 for role, start, stop in (("fit", 1024, 2048), ("selection", 2048, 3072), ("verification", 3072, 4096)):

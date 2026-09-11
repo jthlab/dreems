@@ -11,8 +11,8 @@ import numpy as np
 from beartype import beartype
 from jaxtyping import Bool, Float, Integer, Real, jaxtyped
 
-from dreems import island_sim
-from dreems.motifs import (
+from dreems.data import island_sim
+from dreems.data.motifs import (
     apply_migration_associated_sampling,
     choose_sample_regime,
     draw_earth_like_case,
@@ -21,7 +21,7 @@ from dreems.motifs import (
     draw_grid_case,
     draw_wolflike_case,
 )
-from dreems.simulation_config import (
+from dreems.data.simulation_config import (
     choose_case_kind,
     choose_weighted_name,
     draw_num_snps,

@@ -7,7 +7,7 @@ from numbers import Integral
 
 from snakemake.utils import update_config
 
-from dreems.workflow_io import load_config
+from dreems.utils.workflow_io import load_config
 
 
 HERE = Path(workflow.current_basedir).resolve()

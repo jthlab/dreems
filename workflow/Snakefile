@@ -8,7 +8,7 @@ from pathlib import Path
 
 from snakemake.exceptions import WorkflowError
 
-from dreems import island_sim, simulation_config
+from dreems.data import island_sim, simulation_config
 
 
 PROJECT_ROOT = str(Path(workflow.basedir).parent.resolve())
@@ -33,37 +33,37 @@ def source_paths(*names):
 
 
 SIMULATION_SOURCES = source_paths(
-    "corpus.py",
-    "geography.py",
-    "island_sim.py",
-    "motifs.py",
-    "simulation.py",
-    "simulation_config.py",
-    "validation.py",
-    "workflow_io.py",
+    "data/corpus.py",
+    "data/geography.py",
+    "data/island_sim.py",
+    "data/motifs.py",
+    "data/simulation.py",
+    "data/simulation_config.py",
+    "utils/validation.py",
+    "utils/workflow_io.py",
 ) + [
     str(Path(PROJECT_ROOT, "rust", "island_sim", name).resolve())
     for name in ("Cargo.toml", "Cargo.lock", "src/lib.rs")
 ]
 PREPARATION_SOURCES = source_paths(
-    "pipeline.py", "corpus.py", "features.py", "linearized.py", "train.py", "validation.py", "workflow_io.py"
+    "training/pipeline.py", "data/corpus.py", "neural/features.py", "neural/linearized.py", "training/train.py", "utils/validation.py", "utils/workflow_io.py"
 )
-NORMALIZATION_SOURCES = source_paths("pipeline.py", "workflow_io.py")
-PACKING_SOURCES = source_paths("pipeline.py", "workflow_io.py")
+NORMALIZATION_SOURCES = source_paths("training/pipeline.py", "utils/workflow_io.py")
+PACKING_SOURCES = source_paths("training/pipeline.py", "utils/workflow_io.py")
 TRAINING_SOURCES = source_paths(
-    "pipeline.py",
-    "checkpoints.py",
-    "features.py",
-    "linearized.py",
-    "losses.py",
-    "model.py",
-    "train.py",
-    "validation.py",
-    "workflow_io.py",
+    "training/pipeline.py",
+    "neural/checkpoints.py",
+    "neural/features.py",
+    "neural/linearized.py",
+    "training/losses.py",
+    "neural/model.py",
+    "training/train.py",
+    "utils/validation.py",
+    "utils/workflow_io.py",
 )
 EVALUATION_SOURCES = source_paths(
-    "pipeline.py", "checkpoints.py", "features.py", "linearized.py", "calibration.py",
-    "metrics.py", "model.py", "validation.py", "workflow_io.py"
+    "training/pipeline.py", "neural/checkpoints.py", "neural/features.py", "neural/linearized.py", "inference/calibration.py",
+    "evaluation/metrics.py", "neural/model.py", "utils/validation.py", "utils/workflow_io.py"
 )
 
 
@@ -697,7 +697,7 @@ rule generate_raw_example:
         export OPENBLAS_NUM_THREADS={threads}
         export MKL_NUM_THREADS={threads}
         export NUMEXPR_NUM_THREADS={threads}
-        {UV_RUN} python -m dreems.corpus generate \
+        {UV_RUN} python -m dreems.data.corpus generate \
             --config {input.config:q} \
             --split {wildcards.split} \
             --example-id {wildcards.chunk} \
@@ -730,7 +730,7 @@ rule pack_raw_examples:
         """
         export JAX_PLATFORMS=cpu
         export CUDA_VISIBLE_DEVICES=""
-        {UV_RUN} python -m dreems.corpus pack \
+        {UV_RUN} python -m dreems.data.corpus pack \
             --inputs {input.examples:q} \
             --output {output.packed:q} \
             --metadata {output.metadata:q} \
@@ -764,7 +764,7 @@ rule prepare_chunk:
         export OPENBLAS_NUM_THREADS={threads}
         export MKL_NUM_THREADS={threads}
         export NUMEXPR_NUM_THREADS={threads}
-        {UV_RUN} python -m dreems.pipeline prepare-shard \
+        {UV_RUN} python -m dreems.training.pipeline prepare-shard \
             --config {input.config:q} \
             --input {input.raw:q} \
             --output {output.prepared:q} \
@@ -799,7 +799,7 @@ rule pack_prepared:
         export OPENBLAS_NUM_THREADS={threads}
         export MKL_NUM_THREADS={threads}
         export NUMEXPR_NUM_THREADS={threads}
-        {UV_RUN} python -m dreems.pipeline pack-prepared \
+        {UV_RUN} python -m dreems.training.pipeline pack-prepared \
             --inputs {input.prepared:q} \
             --output {output.packed:q} \
             --metadata {output.metadata:q}
@@ -835,7 +835,7 @@ rule prepare_batch:
         export OPENBLAS_NUM_THREADS={threads}
         export MKL_NUM_THREADS={threads}
         export NUMEXPR_NUM_THREADS={threads}
-        {UV_RUN} python -m dreems.pipeline prepare-batch \
+        {UV_RUN} python -m dreems.training.pipeline prepare-batch \
             --config {input.config:q} \
             --inputs {input.raw:q} \
             --output {output.packed:q} \
@@ -897,7 +897,7 @@ rule normalization_group_stats:
         export OPENBLAS_NUM_THREADS={threads}
         export MKL_NUM_THREADS={threads}
         export NUMEXPR_NUM_THREADS={threads}
-        {UV_RUN} python -m dreems.pipeline normalization-shard-stats \
+        {UV_RUN} python -m dreems.training.pipeline normalization-shard-stats \
             --inputs {input.prepared:q} \
             --output {output.stats:q}
         """
@@ -966,7 +966,7 @@ rule merge_normalization:
         """
         export JAX_PLATFORMS=cpu
         export CUDA_VISIBLE_DEVICES=""
-        {UV_RUN} python -m dreems.pipeline merge-normalization \
+        {UV_RUN} python -m dreems.training.pipeline merge-normalization \
             --config {input.config:q} \
             --input-manifest {input.manifest:q} \
             --output {output.stats:q}
@@ -1040,7 +1040,7 @@ rule train:
         if (( ${{#init[@]}} )); then
             init_args=(--init-checkpoint "${{init[0]}}")
         fi
-        {UV_RUN} python -m dreems.pipeline train \
+        {UV_RUN} python -m dreems.training.pipeline train \
             --config {input.config:q} \
             --normalization {input.normalization:q} \
             --input-manifest {input.train_manifest:q} \
@@ -1159,7 +1159,7 @@ rule evaluate_chunk:
         export OMP_NUM_THREADS={threads}
         export OPENBLAS_NUM_THREADS={threads}
         export MKL_NUM_THREADS={threads}
-        {UV_RUN} python -m dreems.pipeline evaluate \
+        {UV_RUN} python -m dreems.training.pipeline evaluate \
             --checkpoint {input.checkpoint:q} \
             --inputs {input.prepared:q} \
             --output-dir {params.outdir:q} \
@@ -1184,7 +1184,7 @@ rule aggregate_evaluations:
         slurm_partition=str(config.get("eval_partition", "standard")),
     shell:
         """
-        {UV_RUN} python -m dreems.pipeline aggregate-evaluations \
+        {UV_RUN} python -m dreems.training.pipeline aggregate-evaluations \
             --inputs {input.summaries:q} \
             --output-dir {OUTDIR}/eval
         """

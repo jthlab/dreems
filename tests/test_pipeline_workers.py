@@ -13,7 +13,8 @@ import pytest
 from beartype.roar import BeartypeCallHintParamViolation
 from jaxtyping import TypeCheckError
 
-from dreems import pipeline, workflow_io
+from dreems.training import pipeline
+from dreems.utils import workflow_io
 
 STATS = {
     "node_mean": [0.0, 0.0],

@@ -23,13 +23,13 @@ import numpy as np
 from beartype import beartype
 from jaxtyping import Bool, Float, Int, Real, Shaped, jaxtyped
 
-from dreems.validation import (
+from dreems.utils.validation import (
     _integer_array,
     _real_array,
     validate_diploid_dosages,
     validate_genotype_arrays,
 )
-from dreems.workflow_io import _atomic_output
+from dreems.utils.workflow_io import _atomic_output
 
 FEEMSMode = Literal["free_q", "fixed_q", "scalar_q"]
 FEEMSCVMode = Literal["node_cv", "replicate_holdout"]

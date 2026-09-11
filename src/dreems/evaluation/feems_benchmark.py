@@ -1,7 +1,7 @@
 """Independent FEEMS workers for the paired simulation benchmark.
 
 The workflow calls this module directly so DREEMS code and plotting changes do
-not invalidate fitted FEEMS cases. The combined ``dreems.h2h`` CLI also exposes
+not invalidate fitted FEEMS cases. The combined ``dreems.evaluation.h2h`` CLI also exposes
 these commands.
 """
 
@@ -15,14 +15,15 @@ from pathlib import Path
 import numpy as np
 from beartype import beartype
 
-from dreems import feems, metrics
-from dreems.benchmark_data import (
+from dreems import feems
+from dreems.evaluation import metrics
+from dreems.evaluation.benchmark_data import (
     _base_row,
     _centered_rms,
     _example_arrays,
     _load_example,
 )
-from dreems.workflow_io import json_ready, sha256, write_json, write_npz
+from dreems.utils.workflow_io import json_ready, sha256, write_json, write_npz
 
 FEEMS_PINNED_COMMIT = "aa890b0e8ef583dd657a6a696af591b732d1d8be"
 

@@ -14,7 +14,10 @@ import pytest
 import xarray as xr
 from jaxtyping import TypeCheckError
 
-from dreems import cli, datasets, features, feems, inference, linearized
+from dreems import cli, feems
+from dreems.data import datasets
+from dreems.inference import api as inference
+from dreems.neural import features, linearized
 
 
 @pytest.fixture
@@ -31,7 +34,7 @@ def node_input() -> dict[str, Any]:
 
 @pytest.mark.parametrize(
     "source",
-    sorted((Path(__file__).parents[1] / "src/dreems").glob("*.py"))
+    sorted((Path(__file__).parents[1] / "src/dreems").rglob("*.py"))
     + sorted((Path(__file__).parents[1] / "workflow").glob("*.py")),
     ids=lambda path: f"{path.parent.name}/{path.name}",
 )

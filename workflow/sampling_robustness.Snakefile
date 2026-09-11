@@ -7,7 +7,8 @@ from pathlib import Path
 
 import numpy as np
 
-from dreems import counterfactual, workflow_io
+from dreems.training import counterfactual
+from dreems.utils import workflow_io
 
 
 PROJECT_ROOT = Path(workflow.basedir).parent.resolve()
@@ -22,8 +23,8 @@ UV_RUN = (
 PREPARE_SOURCES = [
     str(PROJECT_ROOT / "src" / "dreems" / name)
     for name in (
-        "counterfactual.py", "corpus.py", "features.py", "linearized.py",
-        "pipeline.py", "simulation.py", "train.py", "validation.py", "workflow_io.py",
+        "training/counterfactual.py", "data/corpus.py", "neural/features.py", "neural/linearized.py",
+        "training/pipeline.py", "data/simulation.py", "training/train.py", "utils/validation.py", "utils/workflow_io.py",
     )
 ]
 AUGMENTATION = config["counterfactual_augmentation"]
@@ -120,7 +121,7 @@ checkpoint write_selection:
     input:
         metadata=lambda wc: [path.with_suffix(".metadata.json") for path in SOURCE_PACKS[wc.split]],
         raw=lambda wc: SOURCE_PACKS[wc.split],
-        code=[str(PROJECT_ROOT / "src/dreems" / name) for name in ("counterfactual.py", "workflow_io.py")],
+        code=[str(PROJECT_ROOT / "src/dreems" / name) for name in ("training/counterfactual.py", "utils/workflow_io.py")],
     output:
         SELECTION,
     wildcard_constraints:
@@ -184,7 +185,7 @@ rule prepare_counterfactual_group:
         export OMP_NUM_THREADS={threads}
         export OPENBLAS_NUM_THREADS={threads}
         export MKL_NUM_THREADS={threads}
-        {params.runner} python -m dreems.pipeline prepare-counterfactual \
+        {params.runner} python -m dreems.training.pipeline prepare-counterfactual \
             --config {input.config:q} --selection {input.selection:q} \
             --slot {wildcards.slot} --seed {params.seed} \
             --output {output.prepared:q} --metadata {output.metadata:q}
@@ -194,7 +195,7 @@ rule prepare_counterfactual_group:
 rule pack_counterfactual:
     input:
         prepared=group_inputs,
-        code=[str(PROJECT_ROOT / "src/dreems" / name) for name in ("pipeline.py", "workflow_io.py")],
+        code=[str(PROJECT_ROOT / "src/dreems" / name) for name in ("training/pipeline.py", "utils/workflow_io.py")],
     output:
         packed=PAIRED_PACK,
         metadata=PAIRED_METADATA,
@@ -214,7 +215,7 @@ rule pack_counterfactual:
         """
         export JAX_PLATFORMS=cpu
         export CUDA_VISIBLE_DEVICES=""
-        {params.runner} python -m dreems.pipeline pack-prepared \
+        {params.runner} python -m dreems.training.pipeline pack-prepared \
             --inputs {input.prepared:q} --output {output.packed:q} \
             --metadata {output.metadata:q}
         """
@@ -247,7 +248,7 @@ rule prepare_replay_pack:
         export OMP_NUM_THREADS={threads}
         export OPENBLAS_NUM_THREADS={threads}
         export MKL_NUM_THREADS={threads}
-        {params.runner} python -m dreems.pipeline prepare-batch \
+        {params.runner} python -m dreems.training.pipeline prepare-batch \
             --config {input.config:q} --inputs {input.raw:q} \
             --output {output.packed:q} --metadata {output.metadata:q}
         """

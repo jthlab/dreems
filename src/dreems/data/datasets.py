@@ -11,15 +11,16 @@ import xarray as xr
 from beartype import beartype
 from numpy.typing import ArrayLike
 
-from dreems import checkpoints, refinement
-from dreems.inference import (
+from dreems.inference import refinement
+from dreems.inference.api import (
     DREEMSPredictor,
     DREEMSResult,
     NodeCovarianceInput,
     predict,
 )
-from dreems.validation import _integer_array
-from dreems.workflow_io import json_ready
+from dreems.neural import checkpoints
+from dreems.utils.validation import _integer_array
+from dreems.utils.workflow_io import json_ready
 
 SCHEMA_VERSION = "1.0"
 NODE_DIM = "nodes"

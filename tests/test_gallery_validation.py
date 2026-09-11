@@ -6,8 +6,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from dreems import benchmark_gallery as gallery
-from dreems.workflow_io import read_npz, read_pickle, write_pickle
+from dreems.evaluation import benchmark_gallery as gallery
+from dreems.utils.workflow_io import read_npz, read_pickle, write_pickle
 
 
 @pytest.mark.parametrize("value", [True, -1, "1.5", "nan", "inf", None])

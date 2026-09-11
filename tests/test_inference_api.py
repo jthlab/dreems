@@ -7,8 +7,10 @@ import numpy as np
 import pytest
 
 import dreems
-from dreems import checkpoints, cli, features, model, train
-from dreems.calibration import SDCalibration
+from dreems import cli
+from dreems.inference.calibration import SDCalibration
+from dreems.neural import checkpoints, features, model
+from dreems.training import train
 
 
 def small_raw_example() -> dict[str, object]:

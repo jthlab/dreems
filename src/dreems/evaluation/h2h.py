@@ -15,17 +15,19 @@ from beartype import beartype
 from jaxtyping import Real, jaxtyped
 from scipy.stats import binomtest
 
-from dreems import features, feems, feems_benchmark, metrics
-from dreems.benchmark_data import (
+from dreems import feems
+from dreems.evaluation import feems_benchmark, metrics
+from dreems.evaluation.benchmark_data import (
     _base_row,
     _centered_rms,
     _example_arrays,
     _load_example,
 )
-from dreems.feems_benchmark import FEEMS_PINNED_COMMIT
-from dreems.inference import InferenceExample, load_model
-from dreems.refinement import DREEMSMapRefinementConfig
-from dreems.workflow_io import json_ready, sha256, write_csv, write_json, write_npz
+from dreems.evaluation.feems_benchmark import FEEMS_PINNED_COMMIT
+from dreems.inference.api import InferenceExample, load_model
+from dreems.inference.refinement import DREEMSMapRefinementConfig
+from dreems.neural import features
+from dreems.utils.workflow_io import json_ready, sha256, write_csv, write_json, write_npz
 
 FEEMS_CV_NOTEBOOK = (
     "https://github.com/NovembreLab/feems/blob/main/docsrc/notebooks/cross-validation.ipynb"

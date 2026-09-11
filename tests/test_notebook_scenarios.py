@@ -7,7 +7,8 @@ import numpy as np
 import pytest
 import yaml
 
-from dreems import notebook_scenarios, workflow_io
+from dreems.evaluation import notebook_scenarios
+from dreems.utils import workflow_io
 
 
 def _config() -> dict[str, object]:

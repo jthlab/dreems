@@ -18,13 +18,13 @@ from scipy.ndimage import label
 from scipy.sparse.csgraph import connected_components
 from scipy.spatial import cKDTree
 
-from dreems.simulation_config import (
+from dreems.data.simulation_config import (
     _integer_setting,
     choose_weighted_name,
     draw_weighted_positive_float,
     draw_weighted_positive_int,
 )
-from dreems.validation import validate_graph_arrays
+from dreems.utils.validation import validate_graph_arrays
 
 
 class Graph(TypedDict):

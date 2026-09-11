@@ -7,7 +7,7 @@ import pytest
 from beartype import beartype
 from jaxtyping import jaxtyped
 
-from dreems import features, linearized
+from dreems.neural import features, linearized
 
 
 @pytest.mark.parametrize(

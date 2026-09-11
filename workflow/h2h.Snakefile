@@ -7,16 +7,16 @@ from pathlib import Path
 
 import numpy as np
 
-from dreems.validation import _integer_array
+from dreems.utils.validation import _integer_array
 
 
 PROJECT = Path(workflow.current_basedir).parent.resolve()
 INFERENCE_CODE = [str(PROJECT / "src/dreems" / name) for name in (
-    "inference.py", "checkpoints.py", "model.py", "features.py", "linearized.py",
-    "refinement.py", "calibration.py", "validation.py", "metrics.py",
+    "inference/api.py", "neural/checkpoints.py", "neural/model.py", "neural/features.py", "neural/linearized.py",
+    "inference/refinement.py", "inference/calibration.py", "utils/validation.py", "evaluation/metrics.py",
 )]
 BENCHMARK_CODE = [str(PROJECT / "src/dreems" / name) for name in (
-    "benchmark_data.py", "validation.py", "metrics.py", "workflow_io.py",
+    "evaluation/benchmark_data.py", "utils/validation.py", "evaluation/metrics.py", "utils/workflow_io.py",
 )]
 ENVIRONMENT = [str(PROJECT / "pyproject.toml"), str(PROJECT / "uv.lock")]
 
@@ -80,14 +80,14 @@ if GALLERY_COMMAND not in {"h2h-gallery", "scenario-gallery"}:
 if SCENARIO_CONFIG and NOTEBOOK_SCENARIO_CONFIG:
     raise ValueError("scenario_config and notebook_scenario_config are mutually exclusive")
 if SCENARIO_CONFIG:
-    from dreems.scenario_audit import observed_node_count, scenario_count
+    from dreems.evaluation.scenario_audit import observed_node_count, scenario_count
 
     if EXAMPLES != list(range(scenario_count(config))):
         raise ValueError(
             "scenario audit example IDs must cover the complete zero-based crossed design"
         )
 if NOTEBOOK_SCENARIO_CONFIG:
-    from dreems.notebook_scenarios import (
+    from dreems.evaluation.notebook_scenarios import (
         observed_node_count as notebook_observed_node_count,
         scenario_count as notebook_scenario_count,
         scenario_spec as notebook_scenario_spec,
@@ -172,9 +172,9 @@ if SCENARIO_CONFIG:
     rule generate_scenario_case:
         input:
             config=str(SCENARIO_CONFIG),
-            runner=str(PROJECT / "src/dreems/scenario_audit.py"),
+            runner=str(PROJECT / "src/dreems/evaluation/scenario_audit.py"),
             code=[str(PROJECT / "src/dreems" / name) for name in (
-                "geography.py", "corpus.py", "island_sim.py", "validation.py", "workflow_io.py",
+                "data/geography.py", "data/corpus.py", "data/island_sim.py", "utils/validation.py", "utils/workflow_io.py",
             )] + [str(PROJECT / "rust/island_sim" / name) for name in (
                 "Cargo.toml", "Cargo.lock", "src/lib.rs",
             )],
@@ -200,7 +200,7 @@ if SCENARIO_CONFIG:
             export OMP_NUM_THREADS={threads}
             export OPENBLAS_NUM_THREADS={threads}
             export MKL_NUM_THREADS={threads}
-            uv --project {params.project:q} run --frozen --no-sync python -m dreems.scenario_audit \
+            uv --project {params.project:q} run --frozen --no-sync python -m dreems.evaluation.scenario_audit \
                 --config {input.config:q} \
                 --example-id {wildcards.example} \
                 --output {output.example:q} \
@@ -219,8 +219,8 @@ if NOTEBOOK_SCENARIO_CONFIG and not NOTEBOOK_BASES_PRECOMPUTED:
         input:
             config=str(NOTEBOOK_SCENARIO_CONFIG),
             notebook=lambda _wildcards: str(config["notebook_scenarios"]["source_notebook"]),
-            runner=str(PROJECT / "src/dreems/notebook_scenarios.py"),
-            code=[str(PROJECT / "src/dreems" / name) for name in ("validation.py", "workflow_io.py")],
+            runner=str(PROJECT / "src/dreems/evaluation/notebook_scenarios.py"),
+            code=[str(PROJECT / "src/dreems" / name) for name in ("utils/validation.py", "utils/workflow_io.py")],
             environment=ENVIRONMENT,
         output:
             NOTEBOOK_BASE_PATTERN
@@ -242,7 +242,7 @@ if NOTEBOOK_SCENARIO_CONFIG and not NOTEBOOK_BASES_PRECOMPUTED:
             export OMP_NUM_THREADS={threads}
             export OPENBLAS_NUM_THREADS={threads}
             export MKL_NUM_THREADS={threads}
-            uv --project {params.project:q} run --frozen --no-sync python -m dreems.notebook_scenarios generate-base \
+            uv --project {params.project:q} run --frozen --no-sync python -m dreems.evaluation.notebook_scenarios generate-base \
                 --config {input.config:q} \
                 --truth {wildcards.truth:q} \
                 --output {output:q}
@@ -254,10 +254,10 @@ if NOTEBOOK_SCENARIO_CONFIG and not NOTEBOOK_CASES_PRECOMPUTED:
         input:
             base=lambda wildcards: notebook_base_for_example(wildcards.example),
             config=str(NOTEBOOK_SCENARIO_CONFIG),
-            runner=str(PROJECT / "src/dreems/notebook_scenarios.py"),
+            runner=str(PROJECT / "src/dreems/evaluation/notebook_scenarios.py"),
             code=[str(PROJECT / "src/dreems" / name) for name in (
-                "corpus.py", "features.py", "genotypes.py", "datasets.py", "inference.py",
-                "validation.py", "workflow_io.py",
+                "data/corpus.py", "neural/features.py", "data/genotypes.py", "data/datasets.py", "inference/api.py",
+                "utils/validation.py", "utils/workflow_io.py",
             )],
             environment=ENVIRONMENT,
         output:
@@ -281,7 +281,7 @@ if NOTEBOOK_SCENARIO_CONFIG and not NOTEBOOK_CASES_PRECOMPUTED:
             export OMP_NUM_THREADS=1
             export OPENBLAS_NUM_THREADS=1
             export MKL_NUM_THREADS=1
-            uv --project {params.project:q} run --frozen --no-sync python -m dreems.notebook_scenarios derive-case \
+            uv --project {params.project:q} run --frozen --no-sync python -m dreems.evaluation.notebook_scenarios derive-case \
                 --config {input.config:q} \
                 --example-id {wildcards.example} \
                 --base {input.base:q} \
@@ -322,7 +322,7 @@ rule feems_cv_fold:
     input:
         example=lambda wildcards: source_path(INPUT_PATTERN, wildcards.example),
         metadata=lambda wildcards: source_path(METADATA_PATTERN, wildcards.example),
-        runner=str(PROJECT / "src/dreems/feems_benchmark.py"),
+        runner=str(PROJECT / "src/dreems/evaluation/feems_benchmark.py"),
         adapter=str(PROJECT / "src/dreems/feems.py"),
         code=BENCHMARK_CODE,
         environment=ENVIRONMENT,
@@ -349,7 +349,7 @@ rule feems_cv_fold:
         export OPENBLAS_NUM_THREADS=1
         export MKL_NUM_THREADS=1
         export NUMEXPR_NUM_THREADS=1
-        uv --project {params.project:q} run --frozen --no-sync python -m dreems.feems_benchmark feems-fold \
+        uv --project {params.project:q} run --frozen --no-sync python -m dreems.evaluation.feems_benchmark feems-fold \
             --input {input.example:q} \
             --fold {params.fold} \
             --output-npz {output:q}
@@ -362,7 +362,7 @@ if FEEMS_ARCHIVE:
             archive=FEEMS_ARCHIVE,
             checksum=FEEMS_ARCHIVE_CHECKSUM,
             examples=[source_path(INPUT_PATTERN, example) for example in EXAMPLES],
-            runner=str(PROJECT / "src/dreems/benchmark_data.py"),
+            runner=str(PROJECT / "src/dreems/evaluation/benchmark_data.py"),
             adapter=str(PROJECT / "src/dreems/feems.py"),
             code=BENCHMARK_CODE,
             environment=ENVIRONMENT,
@@ -387,7 +387,7 @@ if FEEMS_ARCHIVE:
         shell:
             """
             set -euo pipefail
-            uv --project {params.project:q} run --frozen --no-sync python -m dreems.benchmark_data restore \
+            uv --project {params.project:q} run --frozen --no-sync python -m dreems.evaluation.benchmark_data restore \
                 --archive {input.archive:q} --checksum {input.checksum:q} \
                 --results-dir {params.target:q} --input-pattern {params.input_pattern:q} \
                 --examples {params.examples:q} --verification {output.verification:q} {params.legacy:q}
@@ -398,7 +398,7 @@ else:
             example=lambda wildcards: source_path(INPUT_PATTERN, wildcards.example),
             metadata=lambda wildcards: source_path(METADATA_PATTERN, wildcards.example),
             folds=feems_cv_folds,
-            runner=str(PROJECT / "src/dreems/feems_benchmark.py"),
+            runner=str(PROJECT / "src/dreems/evaluation/feems_benchmark.py"),
             adapter=str(PROJECT / "src/dreems/feems.py"),
             code=BENCHMARK_CODE,
             environment=ENVIRONMENT,
@@ -427,7 +427,7 @@ else:
             export OPENBLAS_NUM_THREADS=1
             export MKL_NUM_THREADS=1
             export NUMEXPR_NUM_THREADS=1
-            uv --project {params.project:q} run --frozen --no-sync python -m dreems.feems_benchmark feems-case \
+            uv --project {params.project:q} run --frozen --no-sync python -m dreems.evaluation.feems_benchmark feems-case \
                 --input {input.example:q} \
                 --index {wildcards.example} \
                 --cv-jobs 1 \
@@ -442,7 +442,7 @@ rule dreems_case:
         example=lambda wildcards: source_path(INPUT_PATTERN, wildcards.example),
         metadata=lambda wildcards: source_path(METADATA_PATTERN, wildcards.example),
         checkpoint=CHECKPOINT,
-        runner=str(PROJECT / "src/dreems/h2h.py"),
+        runner=str(PROJECT / "src/dreems/evaluation/h2h.py"),
         code=INFERENCE_CODE + BENCHMARK_CODE,
         environment=ENVIRONMENT,
     output:
@@ -470,7 +470,7 @@ rule dreems_case:
         export OMP_NUM_THREADS={threads}
         export OPENBLAS_NUM_THREADS={threads}
         export MKL_NUM_THREADS={threads}
-        uv --project {params.project:q} run --frozen --no-sync python -m dreems.h2h dreems-case \
+        uv --project {params.project:q} run --frozen --no-sync python -m dreems.evaluation.h2h dreems-case \
             --input {input.example:q} \
             --index {wildcards.example} \
             --checkpoint {input.checkpoint:q} \
@@ -485,7 +485,7 @@ rule aggregate:
         dreems=[dreems_json(example) for example in EXAMPLES],
         parity=f"{OUTDIR}/protocol_checks/official_cv_parity.ok",
         checkpoint=CHECKPOINT,
-        runner=str(PROJECT / "src/dreems/h2h.py"),
+        runner=str(PROJECT / "src/dreems/evaluation/h2h.py"),
         adapter=str(PROJECT / "src/dreems/feems.py"),
         code=BENCHMARK_CODE,
         environment=ENVIRONMENT,
@@ -516,7 +516,7 @@ rule aggregate:
         export OMP_NUM_THREADS=1
         export OPENBLAS_NUM_THREADS=1
         export MKL_NUM_THREADS=1
-        uv --project {params.project:q} run --frozen --no-sync python -m dreems.h2h aggregate \
+        uv --project {params.project:q} run --frozen --no-sync python -m dreems.evaluation.h2h aggregate \
             --feems-json {input.feems:q} \
             --dreems-json {input.dreems:q} \
             --checkpoint {input.checkpoint:q} \
@@ -538,7 +538,7 @@ if not ARCHIVE_IS_PUBLISHED:
             json=[feems_json(example) for example in EXAMPLES],
             npz=[feems_npz(example) for example in EXAMPLES],
             examples=[source_path(INPUT_PATTERN, example) for example in EXAMPLES],
-            runner=str(PROJECT / "src/dreems/benchmark_data.py"),
+            runner=str(PROJECT / "src/dreems/evaluation/benchmark_data.py"),
             adapter=str(PROJECT / "src/dreems/feems.py"),
             code=BENCHMARK_CODE,
             environment=ENVIRONMENT,
@@ -562,7 +562,7 @@ if not ARCHIVE_IS_PUBLISHED:
         shell:
             """
             set -euo pipefail
-            uv --project {params.project:q} run --frozen --no-sync python -m dreems.benchmark_data pack \
+            uv --project {params.project:q} run --frozen --no-sync python -m dreems.evaluation.benchmark_data pack \
                 --archive {output.archive:q} --checksum {output.checksum:q} \
                 --results-dir {params.results_dir:q} --input-pattern {params.input_pattern:q} \
                 --examples {params.examples:q} {params.legacy:q}
@@ -575,7 +575,7 @@ rule gallery:
         summary=f"{PUBLISH_DIR}/summary.json",
         dreems=[dreems_npz(example) for example in EXAMPLES],
         feems=[feems_npz(example) for example in EXAMPLES],
-        renderer=str(PROJECT / "src/dreems/benchmark_gallery.py"),
+        renderer=str(PROJECT / "src/dreems/evaluation/benchmark_gallery.py"),
         environment=ENVIRONMENT,
     output:
         directory(f"{PUBLISH_DIR}/gallery"),
@@ -599,7 +599,7 @@ rule gallery:
         export OMP_NUM_THREADS={threads}
         export OPENBLAS_NUM_THREADS={threads}
         export MKL_NUM_THREADS={threads}
-        uv --project {params.project:q} run --frozen --no-sync python -m dreems.benchmark_gallery {params.command:q} \
+        uv --project {params.project:q} run --frozen --no-sync python -m dreems.evaluation.benchmark_gallery {params.command:q} \
             --rows {input.rows:q} \
             --dreems-pattern {params.dreems_pattern:q} \
             --feems-pattern {params.feems_pattern:q} \

@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from dreems import genotypes
+from dreems.data import genotypes
 
 
 @pytest.fixture

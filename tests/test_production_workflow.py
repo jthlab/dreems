@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 import yaml
 
-from dreems import pipeline, train
+from dreems.training import pipeline, train
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PRODUCTION_CONFIG = REPO_ROOT / "workflow" / "config.production.yaml"
@@ -54,7 +54,7 @@ def test_validation_is_a_dependency_of_every_array_consuming_stage() -> None:
         compile(ast.Module(body=definitions, type_ignores=[]), "workflow/Snakefile", "exec"),
         namespace,
     )
-    validator = str(REPO_ROOT / "src/dreems/validation.py")
+    validator = str(REPO_ROOT / "src/dreems/utils/validation.py")
     for name in (
         "SIMULATION_SOURCES",
         "PREPARATION_SOURCES",

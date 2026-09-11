@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from dreems.metrics import centered, edge_log_metrics
+from dreems.evaluation.metrics import centered, edge_log_metrics
 
 
 def test_edge_metrics_reports_signed_correlation() -> None:

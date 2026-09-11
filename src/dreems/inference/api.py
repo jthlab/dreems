@@ -14,8 +14,10 @@ import numpy as np
 from beartype import beartype
 from jaxtyping import Float, Int, Shaped, jaxtyped
 
-from dreems import checkpoints, features, metrics, refinement
-from dreems.validation import (
+from dreems.evaluation import metrics
+from dreems.inference import refinement
+from dreems.neural import checkpoints, features
+from dreems.utils.validation import (
     _effective_snp_count,
     _integer_array,
     _real_array,

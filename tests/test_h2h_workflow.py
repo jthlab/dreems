@@ -8,7 +8,8 @@ from typing import Any
 import pytest
 import yaml
 
-from dreems import feems, h2h
+from dreems import feems
+from dreems.evaluation import h2h
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 H2H_CONFIG = REPO_ROOT / "workflow" / "config.h2h.yaml"
@@ -73,7 +74,7 @@ def test_h2h_config_exposes_resources_but_not_feems_statistics() -> None:
     assert "snakemake_one_job_per_observed_deme" in snakefile
     assert "--cv-checkpoint-dir" in snakefile
     assert "feems_archive_checksum" in snakefile
-    assert "dreems.benchmark_data restore" in snakefile
+    assert "dreems.evaluation.benchmark_data restore" in snakefile
     assert "rule extract_feems_archive:" in snakefile
     assert "localrules: all" in snakefile
     assert "rm -rf" not in snakefile

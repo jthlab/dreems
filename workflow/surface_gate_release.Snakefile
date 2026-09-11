@@ -48,8 +48,8 @@ VERIFICATION = PUBLISH_DIR / "sd_calibration_verification.json"
 VERIFICATION_CSV = PUBLISH_DIR / "sd_calibration_verification.csv"
 CALIBRATION_SCRIPT = PROJECT_ROOT / "workflow" / "calibrate_surface_gate.py"
 PROMOTION_SCRIPT = PROJECT_ROOT / "workflow" / "promote_surface_gate.py"
-CALIBRATION_CODE = [str(PROJECT_ROOT / "src/dreems" / name) for name in ("calibration.py", "checkpoints.py", "metrics.py", "validation.py", "workflow_io.py")]
-PROMOTION_CODE = [str(PROJECT_ROOT / "src/dreems" / name) for name in ("calibration.py", "checkpoints.py", "model.py", "validation.py", "workflow_io.py")]
+CALIBRATION_CODE = [str(PROJECT_ROOT / "src/dreems" / name) for name in ("inference/calibration.py", "neural/checkpoints.py", "evaluation/metrics.py", "utils/validation.py", "utils/workflow_io.py")]
+PROMOTION_CODE = [str(PROJECT_ROOT / "src/dreems" / name) for name in ("inference/calibration.py", "neural/checkpoints.py", "neural/model.py", "utils/validation.py", "utils/workflow_io.py")]
 ENVIRONMENT = [str(PROJECT_ROOT / name) for name in ("pyproject.toml", "uv.lock")]
 
 

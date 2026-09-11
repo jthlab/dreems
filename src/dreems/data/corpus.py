@@ -12,7 +12,8 @@ from typing import Any
 import numpy as np
 from beartype import beartype
 
-from dreems import simulation, simulation_config, workflow_io
+from dreems.data import simulation, simulation_config
+from dreems.utils import workflow_io
 
 
 @beartype

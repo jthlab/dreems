@@ -11,7 +11,10 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from dreems import benchmark_data, cli, datasets, feems_benchmark, h2h, workflow_io
+from dreems import cli
+from dreems.data import datasets
+from dreems.evaluation import benchmark_data, feems_benchmark, h2h
+from dreems.utils import workflow_io
 
 
 @pytest.fixture

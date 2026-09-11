@@ -14,9 +14,10 @@ import numpy as np
 from beartype import beartype
 from jaxtyping import Float, Int, Real, jaxtyped
 
-from dreems import corpus, island_sim, workflow_io
-from dreems.geography import Graph, edge_log_rates_from_surface, feems_triangular_lattice_graph
-from dreems.validation import _integer_array, _real_array
+from dreems.data import corpus, island_sim
+from dreems.data.geography import Graph, edge_log_rates_from_surface, feems_triangular_lattice_graph
+from dreems.utils import workflow_io
+from dreems.utils.validation import _integer_array, _real_array
 
 SURFACE_KINDS = {
     "barrier": "feems_heterogeneous_barrier",

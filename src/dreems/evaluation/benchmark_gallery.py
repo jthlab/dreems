@@ -20,8 +20,8 @@ from beartype import beartype
 from jaxtyping import Float, Int, Real, Shaped, jaxtyped
 from scipy import stats
 
-from .validation import _integer_array, _real_array, validate_graph_arrays
-from .workflow_io import (
+from dreems.utils.validation import _integer_array, _real_array, validate_graph_arrays
+from dreems.utils.workflow_io import (
     _atomic_output,
     json_ready,
     parse_nonnegative_integer,

@@ -7,7 +7,7 @@ import pytest
 from beartype.roar import BeartypeCallHintParamViolation
 from jaxtyping import TypeCheckError
 
-from dreems import island_sim, simulation
+from dreems.data import island_sim, simulation
 
 
 @pytest.fixture

@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from dreems import benchmark_gallery
+from dreems.evaluation import benchmark_gallery
 
 
 def evaluation_rows(offset: float) -> list[dict[str, float | int]]:

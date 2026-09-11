@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from jaxtyping import TypeCheckError
 
-from dreems import losses
+from dreems.training import losses
 
 
 def test_masked_gaussian_nll_checks_array_shapes() -> None:

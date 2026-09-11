@@ -29,8 +29,14 @@ from matplotlib.collections import LineCollection
 from PIL import Image
 from scipy.spatial import cKDTree
 
-from dreems.validation import _integer_array, _real_array, validate_graph_arrays
-from dreems.workflow_io import _atomic_output, load_config, sha256, write_csv, write_json_finite
+from dreems.utils.validation import _integer_array, _real_array, validate_graph_arrays
+from dreems.utils.workflow_io import (
+    _atomic_output,
+    load_config,
+    sha256,
+    write_csv,
+    write_json_finite,
+)
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402

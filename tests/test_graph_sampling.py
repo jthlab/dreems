@@ -7,7 +7,7 @@ import pytest
 from jaxtyping import TypeCheckError
 from shapely.geometry import box
 
-from dreems import geography, motifs
+from dreems.data import geography, motifs
 
 
 @pytest.fixture

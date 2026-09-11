@@ -13,8 +13,9 @@ import numpy as np
 import pytest
 import yaml
 
-from dreems import benchmark_data as archives
-from dreems import feems, workflow_io
+from dreems import feems
+from dreems.evaluation import benchmark_data as archives
+from dreems.utils import workflow_io
 
 
 @pytest.fixture

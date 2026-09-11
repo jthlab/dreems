@@ -11,7 +11,8 @@ from typing import Any
 import numpy as np
 import pytest
 
-from dreems import corpus, simulation_config, workflow_io
+from dreems.data import corpus, simulation_config
+from dreems.utils import workflow_io
 
 
 @pytest.mark.parametrize(

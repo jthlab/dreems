@@ -20,10 +20,11 @@ import numpy as np
 from beartype import beartype
 from jaxtyping import Float
 
-from dreems import calibration, features
-from dreems import model as dreems_model
-from dreems.validation import _integer_array, _real_array
-from dreems.workflow_io import _atomic_output
+from dreems.inference import calibration
+from dreems.neural import features
+from dreems.neural import model as dreems_model
+from dreems.utils.validation import _integer_array, _real_array
+from dreems.utils.workflow_io import _atomic_output
 
 CHECKPOINT_METADATA = "metadata.json"
 CHECKPOINT_PARAMS = "params.eqx"

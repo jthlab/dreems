@@ -10,7 +10,8 @@ import numpy as np
 import pytest
 from jaxtyping import TypeCheckError
 
-from dreems import checkpoints, model, train
+from dreems.neural import checkpoints, model
+from dreems.training import train
 
 
 def toy_training_arrays() -> dict[str, np.ndarray]:

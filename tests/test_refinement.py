@@ -4,8 +4,8 @@ import numpy as np
 import pytest
 from jaxtyping import TypeCheckError
 
-from dreems import features, refinement
-from dreems.refinement import (
+from dreems.inference import refinement
+from dreems.inference.refinement import (
     DREEMSMapRefinementConfig,
     center_matrix,
     covariance_fit,
@@ -17,6 +17,7 @@ from dreems.refinement import (
     refine_edge_log_conductance,
     trust_region_diagnostics,
 )
+from dreems.neural import features
 
 
 def test_covariance_fit_separates_migration_and_q_scales() -> None:

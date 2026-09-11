@@ -20,8 +20,10 @@ def workspace(tmp_path: Path) -> Path:
     project = tmp_path / "project"
     for folder in ("workflow", "src/dreems", "tests"):
         (project / folder).mkdir(parents=True, exist_ok=True)
-    for source in (REPO / "src/dreems").glob("*.py"):
-        shutil.copy2(source, project / "src/dreems" / source.name)
+    for source in (REPO / "src/dreems").rglob("*.py"):
+        destination = project / source.relative_to(REPO)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
     for name in (
         "h2h.Snakefile",
         "real_data_gallery.Snakefile",
@@ -142,11 +144,11 @@ def test_h2h_invalidates_only_the_affected_method(workspace: Path) -> None:
     original_feems_mtime = feems.stat().st_mtime_ns
     for name in (
         "checkpoint.zip",
-        "src/dreems/model.py",
-        "src/dreems/features.py",
-        "src/dreems/inference.py",
-        "src/dreems/calibration.py",
-        "src/dreems/h2h.py",
+        "src/dreems/neural/model.py",
+        "src/dreems/neural/features.py",
+        "src/dreems/inference/api.py",
+        "src/dreems/inference/calibration.py",
+        "src/dreems/evaluation/h2h.py",
     ):
         path = workspace / name
         path.write_bytes(path.read_bytes() + b"\n# dependency change\n")
@@ -156,10 +158,10 @@ def test_h2h_invalidates_only_the_affected_method(workspace: Path) -> None:
         assert "rule feems_cv_fold:" not in planned, name
         run_workflow(workspace, config)
         assert feems.stat().st_mtime_ns == original_feems_mtime
-    plotter = workspace / "src/dreems/benchmark_gallery.py"
+    plotter = workspace / "src/dreems/evaluation/benchmark_gallery.py"
     plotter.write_text(plotter.read_text() + "\n# render change\n")
     assert "Nothing to be done" in run_workflow(workspace, config, dry_run=True)
-    for name in ("feems.py", "feems_benchmark.py"):
+    for name in ("feems.py", "evaluation/feems_benchmark.py"):
         path = workspace / "src/dreems" / name
         path.write_text(path.read_text() + "\n# FEEMS change\n")
         planned = run_workflow(workspace, config, dry_run=True)
@@ -206,11 +208,11 @@ def test_calibration_module_tracks_only_relevant_source(workspace: Path) -> None
     )
     run_workflow(workspace, config)
     assert "Nothing to be done" in run_workflow(workspace, config, dry_run=True)
-    for name in ("feems.py", "benchmark_gallery.py", "simulation.py"):
+    for name in ("feems.py", "evaluation/benchmark_gallery.py", "data/simulation.py"):
         source = workspace / "src/dreems" / name
         source.write_text(source.read_text() + "\n# unrelated edit\n")
         assert "Nothing to be done" in run_workflow(workspace, config, dry_run=True), name
-    source = workspace / "src/dreems/features.py"
+    source = workspace / "src/dreems/neural/features.py"
     source.write_text(source.read_text() + "\n# feature edit\n")
     planned = run_workflow(workspace, config, dry_run=True)
     assert "rule case:" in planned
@@ -277,7 +279,7 @@ def test_promotion_module_does_not_refit_calibration_after_model_edit(workspace:
     )
     run_workflow(workspace, config)
     assert "Nothing to be done" in run_workflow(workspace, config, dry_run=True)
-    source = workspace / "src/dreems/model.py"
+    source = workspace / "src/dreems/neural/model.py"
     source.write_text(source.read_text() + "\n# model edit\n")
     planned = run_workflow(workspace, config, dry_run=True)
     assert "rule promote_surface_gate:" in planned
@@ -329,11 +331,11 @@ def test_real_data_render_parameters_do_not_refit(workspace: Path) -> None:
         assert "rule run_dreems:" not in planned, name
         run_workflow(workspace, config)
         assert (out / "fits/study.npz").stat().st_mtime_ns == fit_time
-    for name in ("simulation.py", "benchmark_gallery.py", "feems.py"):
+    for name in ("data/simulation.py", "evaluation/benchmark_gallery.py", "feems.py"):
         path = workspace / "src/dreems" / name
         path.write_text(path.read_text() + "\n# unrelated change\n")
     assert "Nothing to be done" in run_workflow(workspace, config, dry_run=True)
-    path = workspace / "src/dreems/inference.py"
+    path = workspace / "src/dreems/inference/api.py"
     path.write_text(path.read_text() + "\n# inference change\n")
     planned = run_workflow(workspace, config, dry_run=True)
     assert "rule run_dreems:" in planned
@@ -361,12 +363,12 @@ def test_scenario_simulator_changes_invalidate_generation(workspace: Path) -> No
     stub_rules(workspace, "h2h.Snakefile", ["generate_scenario_case"], outputs, outputs)
     run_workflow(workspace, config)
     assert "Nothing to be done" in run_workflow(workspace, config, dry_run=True)
-    path = workspace / "src/dreems/model.py"
+    path = workspace / "src/dreems/neural/model.py"
     path.write_text(path.read_text() + "\n# not a simulator dependency\n")
     assert "Nothing to be done" in run_workflow(workspace, config, dry_run=True)
     for name in (
-        "src/dreems/island_sim.py",
-        "src/dreems/validation.py",
+        "src/dreems/data/island_sim.py",
+        "src/dreems/utils/validation.py",
         "rust/island_sim/src/lib.rs",
     ):
         path = workspace / name
@@ -424,7 +426,7 @@ def test_snp_module_tracks_evaluation_and_reference_files(workspace: Path) -> No
     assert "--max-examples 3" in planned
     assert "--replicate-offset 0" in planned
     assert "Nothing to be done" in run_workflow(workspace, config, dry_run=True)
-    path = workspace / "src/dreems/calibration.py"
+    path = workspace / "src/dreems/inference/calibration.py"
     path.write_text(path.read_text() + "\n# calibration changed\n")
     planned = run_workflow(workspace, config, dry_run=True)
     assert "rule evaluate_pack:" in planned
@@ -512,9 +514,9 @@ def test_comparison_module_tracks_report_dependencies(workspace: Path) -> None:
     )
     run_workflow(workspace, config)
     assert "Nothing to be done" in run_workflow(workspace, config, dry_run=True)
-    (workspace / "src/dreems/model.py").write_text("# unrelated model edit\n")
+    (workspace / "src/dreems/neural/model.py").write_text("# unrelated model edit\n")
     assert "Nothing to be done" in run_workflow(workspace, config, dry_run=True)
-    for name in ("src/dreems/workflow_io.py", "src/dreems/validation.py", "uv.lock"):
+    for name in ("src/dreems/utils/workflow_io.py", "src/dreems/utils/validation.py", "uv.lock"):
         path = workspace / name
         path.write_text(path.read_text() + "\n# dependency edit\n")
         assert "rule build_scenario_bundle:" in run_workflow(workspace, config, dry_run=True)
@@ -634,7 +636,7 @@ def test_notebook_derivation_does_not_invalidate_base_simulation(workspace: Path
     )
     run_workflow(workspace, config)
     assert "Nothing to be done" in run_workflow(workspace, config, dry_run=True)
-    for name in ("features.py", "genotypes.py"):
+    for name in ("neural/features.py", "data/genotypes.py"):
         path = workspace / "src/dreems" / name
         path.write_text(path.read_text() + "\n# derivation changed\n")
         planned = run_workflow(workspace, config, dry_run=True)

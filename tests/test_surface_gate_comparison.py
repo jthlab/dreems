@@ -6,15 +6,15 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from dreems import surface_gate_comparison as comparison
-from dreems import workflow_io
-from dreems.surface_gate_comparison import (
+from dreems.evaluation import surface_gate_comparison as comparison
+from dreems.evaluation.surface_gate_comparison import (
     build_scenario_bundle,
     edge_metrics,
     projected_alpha,
     select_broad_examples,
     sha256,
 )
+from dreems.utils import workflow_io
 
 
 def test_edge_metrics_and_projection_use_centered_surfaces() -> None:

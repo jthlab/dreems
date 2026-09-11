@@ -31,11 +31,11 @@ PUBLISHED_SOURCES = [
     )
 ]
 INFERENCE_CODE = [str(PROJECT / "src/dreems" / name) for name in (
-    "inference.py", "checkpoints.py", "model.py", "features.py", "linearized.py",
-    "refinement.py", "calibration.py", "validation.py", "metrics.py", "workflow_io.py",
+    "inference/api.py", "neural/checkpoints.py", "neural/model.py", "neural/features.py", "neural/linearized.py",
+    "inference/refinement.py", "inference/calibration.py", "utils/validation.py", "evaluation/metrics.py", "utils/workflow_io.py",
 )]
-RENDER_CODE = [str(PROJECT / "src/dreems" / name) for name in ("validation.py", "workflow_io.py")]
-PROVENANCE_CODE = [str(PROJECT / "src/dreems" / name) for name in ("checkpoints.py", "workflow_io.py")]
+RENDER_CODE = [str(PROJECT / "src/dreems" / name) for name in ("utils/validation.py", "utils/workflow_io.py")]
+PROVENANCE_CODE = [str(PROJECT / "src/dreems" / name) for name in ("neural/checkpoints.py", "utils/workflow_io.py")]
 ENVIRONMENT = [str(PROJECT / "pyproject.toml"), str(PROJECT / "uv.lock")]
 
 

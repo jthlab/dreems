@@ -139,6 +139,7 @@ rule wheel_smoke:
 import dreems
 from importlib.metadata import distributions
 from importlib.util import find_spec
+from pathlib import Path
 
 installed = {{dist.metadata["Name"].lower() for dist in distributions()}}
 unexpected_cuda = sorted(
@@ -146,6 +147,10 @@ unexpected_cuda = sorted(
 )
 assert not unexpected_cuda, unexpected_cuda
 assert find_spec("dreems._island_sim") is None
+package = Path(dreems.__file__).parent
+assert {{path.name for path in package.glob("*.py")}} == {{"__init__.py", "cli.py", "feems.py"}}
+for name in ("data", "neural", "training", "inference", "evaluation", "utils"):
+    assert (package / name / "__init__.py").is_file(), name
 model = dreems.load_model()
 assert model.checkpoint.model["model_name"] == "dreems"
 assert model.checkpoint.model["node_dim"] == 109

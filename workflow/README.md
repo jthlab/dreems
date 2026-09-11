@@ -343,11 +343,11 @@ FEEMS is neither an input to the production model nor part of its training loss.
 
 ## FEEMS Head-To-Head
 
-FEEMS folds and final fits call `dreems.feems_benchmark` directly. They depend on
+FEEMS folds and final fits call `dreems.evaluation.feems_benchmark` directly. They depend on
 the FEEMS adapter, shared input/score utilities, and the locked environment, not
 on the neural model or gallery renderer. DREEMS cases track the checkpoint plus
 feature, inference, refinement, and calibration code. Each method has its own
-Snakemake benchmark file. The combined `python -m dreems.h2h` commands remain
+Snakemake benchmark file. The combined `python -m dreems.evaluation.h2h` commands remain
 available for direct use.
 
 Real-data rendering tracks grid resolution, topography limits, zoom, and DPI as

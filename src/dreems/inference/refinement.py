@@ -19,9 +19,9 @@ from beartype import beartype
 from jaxtyping import Float, Int, Real, jaxtyped
 from scipy.sparse.csgraph import connected_components
 
-from dreems import features
-from dreems.features import centered as centered
-from dreems.features import line_graph_laplacian as line_graph_laplacian
+from dreems.neural import features
+from dreems.neural.features import centered as centered
+from dreems.neural.features import line_graph_laplacian as line_graph_laplacian
 
 
 @beartype

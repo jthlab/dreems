@@ -14,13 +14,13 @@ from beartype import beartype
 from jaxtyping import Float, Int, Shaped, jaxtyped
 from scipy.spatial import cKDTree
 
-from dreems.datasets import (
+from dreems.data.datasets import (
     NODE_DIM,
     OBSERVED_NODE_2_DIM,
     OBSERVED_NODE_DIM,
     create_dataset,
 )
-from dreems.validation import _effective_snp_count, _real_array
+from dreems.utils.validation import _effective_snp_count, _real_array
 
 SAMPLE_ID = "sample_id"
 SAMPLE_LATITUDE = "sample_latitude"

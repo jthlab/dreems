@@ -24,12 +24,12 @@ from pathlib import Path
 import numpy as np
 from IPython.display import display
 
-from dreems.surface_gate_comparison import (
+from dreems.evaluation.surface_gate_comparison import (
     SCENARIO_TRUTHS,
     scenario_aggregate_figure,
     scenario_family_figure,
 )
-from dreems.workflow_io import read_npz
+from dreems.utils.workflow_io import read_npz
 
 BUNDLE_PATH = Path("__SCENARIO_BUNDLE__")
 bundle = read_npz(BUNDLE_PATH)

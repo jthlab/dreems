@@ -15,9 +15,9 @@ import jax
 import numpy as np
 import pytest
 
-from dreems import checkpoints, model
-from dreems.calibration import SDCalibration
-from dreems.workflow_io import sha256, write_json
+from dreems.inference.calibration import SDCalibration
+from dreems.neural import checkpoints, model
+from dreems.utils.workflow_io import sha256, write_json
 
 ROOT = Path(__file__).resolve().parents[1]
 

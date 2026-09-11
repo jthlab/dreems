@@ -11,7 +11,7 @@ import numpy as np
 from beartype import beartype
 from jaxtyping import Float, Shaped, jaxtyped
 
-from dreems.validation import _integer_array
+from dreems.utils.validation import _integer_array
 
 
 @beartype
@@ -380,7 +380,7 @@ def validate_sampling_settings(local: Mapping[str, Any]) -> None:
 @beartype
 def validate_simulation_settings(sim: Mapping[str, Any]) -> None:
     """Validate the complete recipe without drawing randomness or rewriting it."""
-    from dreems.island_sim import _check_ascertainment
+    from dreems.data.island_sim import _check_ascertainment
 
     validate_sampling_settings(sim)
     for key in (

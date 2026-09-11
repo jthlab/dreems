@@ -7,8 +7,8 @@ import pytest
 import yaml
 from shapely.geometry import Polygon
 
-from dreems import geography, motifs, simulation
-from dreems import simulation_config as settings
+from dreems.data import geography, motifs, simulation
+from dreems.data import simulation_config as settings
 
 
 @pytest.mark.parametrize(

@@ -66,7 +66,7 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
-dreems = ["data/*.dreems.zip"]
+"dreems.data" = ["*.dreems.zip"]
 
 [tool.ruff]
 line-length = 100

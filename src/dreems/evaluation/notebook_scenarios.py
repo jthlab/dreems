@@ -24,9 +24,11 @@ import xarray as xr
 from beartype import beartype
 from jaxtyping import Bool, Float, Int, Integer, Real, Shaped, UInt8, jaxtyped
 
-from dreems import corpus, features, genotypes, workflow_io
-from dreems.geography import Graph
-from dreems.validation import _integer_array, _real_array, validate_graph_arrays
+from dreems.data import corpus, genotypes
+from dreems.data.geography import Graph
+from dreems.neural import features
+from dreems.utils import workflow_io
+from dreems.utils.validation import _integer_array, _real_array, validate_graph_arrays
 
 TRUTHS = ("barrier", "anisotropy", "homogeneous")
 MASKS = ("full", "random_10pct", "outer_slabs", "left_missing")

@@ -3,7 +3,7 @@
 from pathlib import Path
 
 import nbformat
-from dreems.workflow_io import _atomic_output, sha256
+from dreems.utils.workflow_io import _atomic_output, sha256
 
 
 PROJECT = Path(workflow.current_basedir).parent.resolve()
@@ -14,7 +14,7 @@ WORKDIR = Path(str(config.get("workdir", OUTDIR / "work"))).expanduser().resolve
 PREPARED = WORKDIR / "feems_scenarios.prepared.ipynb"
 EXECUTED = OUTDIR / "feems_scenarios_sampling_robustness.ipynb"
 HTML = OUTDIR / "feems_scenarios_sampling_robustness.html"
-PACKAGE_SOURCES = sorted(str(path) for path in (PROJECT / "src/dreems").glob("*.py"))
+PACKAGE_SOURCES = sorted(str(path) for path in (PROJECT / "src/dreems").rglob("*.py"))
 ENVIRONMENT = [str(PROJECT / name) for name in ("pyproject.toml", "uv.lock")]
 
 
@@ -31,7 +31,7 @@ rule prepare_notebook:
     input:
         source=str(SOURCE),
         checkpoint=str(CHECKPOINT),
-        writer=str(PROJECT / "src/dreems/workflow_io.py"),
+        writer=str(PROJECT / "src/dreems/utils/workflow_io.py"),
         environment=ENVIRONMENT,
     output:
         temp(str(PREPARED)),

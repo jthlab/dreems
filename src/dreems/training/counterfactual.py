@@ -16,7 +16,7 @@ from jaxtyping import Float, Int, Shaped, jaxtyped
 from scipy.sparse import coo_array
 from scipy.sparse.csgraph import dijkstra
 
-from dreems.validation import _integer_array
+from dreems.utils.validation import _integer_array
 
 COUNTERFACTUAL_MASKS = (
     "anchor",

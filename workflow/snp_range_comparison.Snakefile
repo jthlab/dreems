@@ -4,18 +4,18 @@ import os
 import shlex
 from pathlib import Path
 
-from dreems.workflow_io import parse_nonnegative_integer
+from dreems.utils.workflow_io import parse_nonnegative_integer
 
 PROJECT_ROOT = Path(workflow.current_basedir).parent.resolve()
 ENVIRONMENT = [str(PROJECT_ROOT / name) for name in ("pyproject.toml", "uv.lock")]
 REPORT_CODE = [str(PROJECT_ROOT / "src/dreems" / name) for name in (
-    "benchmark_gallery.py", "workflow_io.py", "validation.py",
+    "evaluation/benchmark_gallery.py", "utils/workflow_io.py", "utils/validation.py",
 )]
 FEATURE_CODE = [str(PROJECT_ROOT / "src/dreems" / name) for name in (
-    "pipeline.py", "features.py", "linearized.py", "validation.py", "workflow_io.py",
+    "training/pipeline.py", "neural/features.py", "neural/linearized.py", "utils/validation.py", "utils/workflow_io.py",
 )]
 EVALUATION_CODE = FEATURE_CODE + [str(PROJECT_ROOT / "src/dreems" / name) for name in (
-    "checkpoints.py", "model.py", "metrics.py", "calibration.py",
+    "neural/checkpoints.py", "neural/model.py", "evaluation/metrics.py", "inference/calibration.py",
 )]
 OUTDIR = Path(config["outdir"]).expanduser().resolve()
 PUBLISH_DIR = Path(config["publish_dir"]).expanduser().resolve()
@@ -156,7 +156,7 @@ rule prepare_pack:
         export OMP_NUM_THREADS={threads}
         export OPENBLAS_NUM_THREADS={threads}
         export MKL_NUM_THREADS={threads}
-        {params.uv} python -m dreems.pipeline prepare-batch \
+        {params.uv} python -m dreems.training.pipeline prepare-batch \
             --config {input.feature_config:q} \
             --inputs {input.raw:q} \
             --output {output.prepared:q} \
@@ -206,7 +206,7 @@ rule evaluate_pack:
         export OMP_NUM_THREADS={threads}
         export OPENBLAS_NUM_THREADS={threads}
         export MKL_NUM_THREADS={threads}
-        {params.uv} python -m dreems.pipeline evaluate \
+        {params.uv} python -m dreems.training.pipeline evaluate \
             --checkpoint {input.checkpoint:q} \
             --inputs {input.prepared:q} \
             --output-dir {params.output_dir:q} \
@@ -222,7 +222,7 @@ rule aggregate_evaluations:
         summaries=lambda wildcards: [
             eval_summary(wildcards.model, pack) for pack in PACKS
         ],
-        code=[str(PROJECT_ROOT / "src/dreems" / name) for name in ("pipeline.py", "workflow_io.py")],
+        code=[str(PROJECT_ROOT / "src/dreems" / name) for name in ("training/pipeline.py", "utils/workflow_io.py")],
         environment=ENVIRONMENT,
     output:
         summary=str(PUBLISH_DIR / "evaluations" / "{model}" / "summary.json"),
@@ -239,7 +239,7 @@ rule aggregate_evaluations:
     shell:
         """
         set -euo pipefail
-        {params.uv} python -m dreems.pipeline aggregate-evaluations \
+        {params.uv} python -m dreems.training.pipeline aggregate-evaluations \
             --inputs {input.summaries:q} \
             --output-dir {params.output_dir:q}
         """
@@ -269,7 +269,7 @@ rule compare_checkpoints:
     shell:
         """
         set -euo pipefail
-        {params.uv} python -m dreems.benchmark_gallery compare-checkpoints \
+        {params.uv} python -m dreems.evaluation.benchmark_gallery compare-checkpoints \
             --old-summary {input.old:q} \
             --new-summary {input.new:q} \
             --metadata {input.metadata:q} \
@@ -300,7 +300,7 @@ rule router_report:
     shell:
         """
         set -euo pipefail
-        {params.uv} python -m dreems.benchmark_gallery router-report \
+        {params.uv} python -m dreems.evaluation.benchmark_gallery router-report \
             --rows {input.rows:q} \
             --threshold {params.threshold} \
             --output-dir {params.output_dir:q}
@@ -340,7 +340,7 @@ rule checkpoint_gallery:
         export OMP_NUM_THREADS={threads}
         export OPENBLAS_NUM_THREADS={threads}
         export MKL_NUM_THREADS={threads}
-        {params.uv} python -m dreems.benchmark_gallery checkpoint-gallery \
+        {params.uv} python -m dreems.evaluation.benchmark_gallery checkpoint-gallery \
             --rows {input.rows:q} \
             --summary {input.summary:q} \
             --selections {input.selections:q} \
@@ -385,7 +385,7 @@ rule router_gallery:
         export OMP_NUM_THREADS={threads}
         export OPENBLAS_NUM_THREADS={threads}
         export MKL_NUM_THREADS={threads}
-        {params.uv} python -m dreems.benchmark_gallery router-gallery \
+        {params.uv} python -m dreems.evaluation.benchmark_gallery router-gallery \
             --rows {input.rows:q} \
             --summary {input.summary:q} \
             --selections {input.selections:q} \
@@ -419,7 +419,7 @@ rule router_h2h_gallery:
     shell:
         """
         set -euo pipefail
-        {params.uv} python -m dreems.benchmark_gallery router-h2h-gallery \
+        {params.uv} python -m dreems.evaluation.benchmark_gallery router-h2h-gallery \
             --reference-gallery {input.reference_gallery:q} \
             --reference-rows {input.reference_rows:q} \
             --threshold {params.threshold} \

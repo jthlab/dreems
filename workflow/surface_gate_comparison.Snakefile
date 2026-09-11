@@ -12,9 +12,9 @@ CORE_CHECKPOINT = Path(str(config["core_checkpoint"])).expanduser().resolve()
 GATED_CHECKPOINT = Path(str(config["gated_checkpoint"])).expanduser().resolve()
 CORE_SCENARIO_BUNDLE = Path(str(config["core_scenario_bundle"])).expanduser().resolve()
 EXAMPLES = range(int(config["example_count"]))
-COMPARISON_CODE = PROJECT_ROOT / "src" / "dreems" / "surface_gate_comparison.py"
-WORKFLOW_IO_CODE = PROJECT_ROOT / "src" / "dreems" / "workflow_io.py"
-SUPPORT_CODE = [str(WORKFLOW_IO_CODE), str(PROJECT_ROOT / "src/dreems/validation.py")]
+COMPARISON_CODE = PROJECT_ROOT / "src" / "dreems" / "evaluation/surface_gate_comparison.py"
+WORKFLOW_IO_CODE = PROJECT_ROOT / "src" / "dreems" / "utils/workflow_io.py"
+SUPPORT_CODE = [str(WORKFLOW_IO_CODE), str(PROJECT_ROOT / "src/dreems/utils/validation.py")]
 ENVIRONMENT = [str(PROJECT_ROOT / name) for name in ("pyproject.toml", "uv.lock")]
 NOTEBOOK_SOURCE = PROJECT_ROOT / "workflow" / "notebooks" / "feems_comparison_surface_gate.md"
 UV_CACHE_DIR = str(config.get("uv_cache_dir") or os.environ.get("UV_CACHE_DIR", "")).strip()
@@ -85,7 +85,7 @@ rule build_scenario_bundle:
     shell:
         """
         set -euo pipefail
-        {params.uv} python -m dreems.surface_gate_comparison scenario-bundle \
+        {params.uv} python -m dreems.evaluation.surface_gate_comparison scenario-bundle \
             --core-bundle {input.core:q} \
             --gated-pattern {params.gated_pattern:q} \
             --gated-checkpoint {input.checkpoint:q} \
@@ -117,7 +117,7 @@ rule render_scenario_gallery:
     shell:
         """
         set -euo pipefail
-        {params.uv} python -m dreems.surface_gate_comparison scenario-gallery \
+        {params.uv} python -m dreems.evaluation.surface_gate_comparison scenario-gallery \
             --bundle {input.bundle:q} \
             --report {input.report:q} \
             --output-dir {output:q}
@@ -154,7 +154,7 @@ rule render_broad_gallery:
     shell:
         """
         set -euo pipefail
-        {params.uv} python -m dreems.surface_gate_comparison broad-gallery \
+        {params.uv} python -m dreems.evaluation.surface_gate_comparison broad-gallery \
             --rows {input.rows:q} \
             --report {input.report:q} \
             --core-pattern {params.core_pattern:q} \
@@ -184,7 +184,7 @@ rule prepare_notebook:
         slurm_account="jonth0",
     run:
         import jupytext
-        from dreems.workflow_io import _atomic_output
+        from dreems.utils.workflow_io import _atomic_output
 
         notebook = jupytext.read(input.source)
         placeholder = 'Path("__SCENARIO_BUNDLE__")'

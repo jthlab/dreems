@@ -20,8 +20,8 @@ import scipy.sparse.linalg as spla
 from beartype import beartype
 from jaxtyping import Float, Int, Real, jaxtyped
 
-from dreems.model import DREEMSTrainArrays
-from dreems.validation import validate_diploid_dosages
+from dreems.neural.model import DREEMSTrainArrays
+from dreems.utils.validation import validate_diploid_dosages
 
 EDGE_CONDITIONER_FEATURE_NAMES = (
     "linearized_resistance_edge_log_centered",
@@ -1456,7 +1456,7 @@ def fit_linearized_resistance_proxy(
     config: Mapping[str, Any],
 ) -> tuple[Float[np.ndarray, "edges"], dict[str, object]]:
     """Run the initializer with checkpoint settings and attach workflow diagnostics."""
-    from dreems.linearized import all_pair_adjoint_conductance_initializer
+    from dreems.neural.linearized import all_pair_adjoint_conductance_initializer
 
     graph = example["graph"]
     edges = np.asarray(graph["edges"], dtype=np.int32)

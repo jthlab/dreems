@@ -14,7 +14,10 @@ from typing import Any
 import numpy as np
 import yaml
 
-from dreems import benchmark_data, checkpoints, feems, metrics, workflow_io
+from dreems import feems
+from dreems.evaluation import benchmark_data, metrics
+from dreems.neural import checkpoints
+from dreems.utils import workflow_io
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 

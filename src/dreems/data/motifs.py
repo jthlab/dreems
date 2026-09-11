@@ -15,7 +15,7 @@ from jaxtyping import Bool, Float, Int, Real, jaxtyped
 from scipy.sparse.csgraph import shortest_path
 from scipy.spatial import cKDTree
 
-from dreems.geography import (
+from dreems.data.geography import (
     Graph,
     build_global_landscape_mesh,
     draw_q_surface,
@@ -31,7 +31,7 @@ from dreems.geography import (
     random_mask,
     standardize,
 )
-from dreems.simulation_config import (
+from dreems.data.simulation_config import (
     _finite_setting,
     _integer_setting,
     _weight_probabilities,

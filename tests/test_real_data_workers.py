@@ -15,7 +15,7 @@ import pytest
 from jaxtyping import TypeCheckError
 from PIL import Image
 
-from dreems import workflow_io
+from dreems.utils import workflow_io
 
 ROOT = Path(__file__).resolve().parents[1]
 WEIGHTS = ROOT / "src/dreems/data/dreems_diffusion_bands.dreems.zip"
