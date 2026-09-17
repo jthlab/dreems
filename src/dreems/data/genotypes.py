@@ -77,7 +77,7 @@ def attach_sample_coordinates(
 
 
 @beartype
-def from_genotype_dataset(
+def from_dataset(
     dataset: xr.Dataset,
     *,
     node_latitude: Shaped[np.ndarray, "nodes"],
@@ -222,11 +222,6 @@ def from_genotype_dataset(
             ),
         }
     )
-
-
-# VCF-Zarr follows the same schema; both public names use one implementation.
-from_vcf_zarr = from_genotype_dataset
-
 
 @beartype
 def _standardized_genotypes(
@@ -421,6 +416,5 @@ def _sample_id_text(value: object) -> str:
 
 __all__ = [
     "attach_sample_coordinates",
-    "from_genotype_dataset",
-    "from_vcf_zarr",
+    "from_dataset",
 ]

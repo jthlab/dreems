@@ -3,12 +3,10 @@
 from dreems.data.datasets import (
     create_dataset,
     infer,
-    validate_dataset,
 )
 from dreems.data.genotypes import (
     attach_sample_coordinates,
-    from_genotype_dataset,
-    from_vcf_zarr,
+    from_dataset,
 )
 from dreems.data.island_sim import (
     IslandCovarianceResult,

@@ -130,14 +130,6 @@ def create_dataset(
         attrs=dataset_attrs,
     )
 
-
-@beartype
-def validate_dataset(dataset: xr.Dataset) -> None:
-    """Check xarray dimensions and the same numeric constraints as NumPy inputs."""
-
-    dataset_to_input(dataset)
-
-
 @beartype
 def dataset_to_input(dataset: xr.Dataset) -> NodeCovarianceInput:
     """Check the xarray schema and construct its validated inference input once."""
@@ -315,5 +307,4 @@ __all__ = [
     "dataset_to_input",
     "infer",
     "result_to_dataset",
-    "validate_dataset",
 ]
