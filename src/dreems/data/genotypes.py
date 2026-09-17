@@ -416,5 +416,5 @@ def _sample_id_text(value: object) -> str:
 
 __all__ = [
     "attach_sample_coordinates",
-    "from_dataset",
+    "from_vcf_zarr",
 ]
