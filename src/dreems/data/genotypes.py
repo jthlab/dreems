@@ -77,7 +77,7 @@ def attach_sample_coordinates(
 
 
 @beartype
-def from_dataset(
+def from_vcf_zarr(
     dataset: xr.Dataset,
     *,
     node_latitude: Shaped[np.ndarray, "nodes"],
