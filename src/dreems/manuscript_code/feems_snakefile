@@ -1,0 +1,68 @@
+CURR_DIR = ""
+OUTPUT_DIR = "manuscript_figures/"
+
+rule feems_fishes:
+     input:
+          "fishes/fishes_genotype_matrix.pkl",
+          "fishes/Allo.coord.txt",
+          "fishes/Allo.boundary.txt"
+     output:
+          OUTPUT_DIR + "fishes_feems/feems_fishes_timing.pkl",
+          OUTPUT_DIR + "fishes_feems/feems_fishes_output.pkl"
+     params:
+          grid_size = 0.18
+     script:
+          CURR_DIR + "feems/feems_fishes.py"
+
+rule feems_wolves:
+     input:
+          "wolves/wolves_data.pkl",
+     output:
+          OUTPUT_DIR + "wolves_feems/feems_wolves_timing.pkl",
+          OUTPUT_DIR + "wolves_feems/feems_wolves_output.pkl"
+     script:
+          CURR_DIR + "feems/feems_wolves.py"
+
+rule feems_ticks:
+     input:
+          "ticks/ticks_genotype_matrix.pkl",
+          "ticks/coord_03.txt",
+          "ticks/polygon_outer.txt"
+     output:
+          OUTPUT_DIR + "ticks_feems/feems_ticks_timing.pkl",
+          OUTPUT_DIR + "ticks_feems/feems_ticks_output.pkl"
+     params:
+          grid_size = 0.38
+     script:
+          CURR_DIR + "feems/feems_ticks.py"
+
+rule feems_ticks_dense:
+     input:
+          "ticks/ticks_genotype_matrix.pkl",
+          "ticks/coord_03.txt",
+          "ticks/polygon_outer.txt"
+     output:
+          OUTPUT_DIR + "ticks_feems/feems_ticks_dense_timing.pkl",
+          OUTPUT_DIR + "ticks_feems/feems_ticks_dense_output.pkl"
+     params:
+          grid_size = 0.20
+     script:
+          CURR_DIR + "feems/feems_ticks.py"
+
+rule feems_application_plots:
+     input:
+          OUTPUT_DIR + "ticks_feems/feems_ticks_output.pkl",
+          OUTPUT_DIR + "wolves_feems/feems_wolves_output.pkl",
+          OUTPUT_DIR + "fishes_feems/feems_fishes_output.pkl",
+          OUTPUT_DIR + "ticks_feems/feems_ticks_dense_output.pkl",
+     output:
+          OUTPUT_DIR + "ticks_feems/feems_ticks_relative_migration_map.pdf",
+          OUTPUT_DIR + "wolves_feems/feems_wolves_relative_migration_map.pdf",
+          OUTPUT_DIR + "fishes_feems/feems_fishes_relative_migration_map.pdf",
+          OUTPUT_DIR + "ticks_feems/feems_ticks_cv.pdf",
+          OUTPUT_DIR + "wolves_feems/feems_wolves_cv.pdf",
+          OUTPUT_DIR + "fishes_feems/feems_fishes_cv.pdf",
+          OUTPUT_DIR + "ticks_feems/feems_ticks_dense_relative_migration_map.pdf",
+          OUTPUT_DIR + "ticks_feems/feems_ticks_dense_cv.pdf",
+     script:
+          CURR_DIR + "feems/feems_application_figure.py"

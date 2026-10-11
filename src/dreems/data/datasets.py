@@ -130,6 +130,7 @@ def create_dataset(
         attrs=dataset_attrs,
     )
 
+
 @beartype
 def dataset_to_input(dataset: xr.Dataset) -> NodeCovarianceInput:
     """Check the xarray schema and construct its validated inference input once."""

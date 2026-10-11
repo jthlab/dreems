@@ -18,7 +18,16 @@ from dreems.data.datasets import (
     NODE_DIM,
     OBSERVED_NODE_2_DIM,
     OBSERVED_NODE_DIM,
+    EDGE_DIM,
+    EDGE_ENDPOINT_DIM,
+    NODE_SAMPLE_COUNT,
+    EFFECTIVE_SNPS,
+    COORDINATE_DIM,
+    SCHEMA_VERSION,
     create_dataset,
+    NODE_POSITION,
+    EDGE_NODE,
+    NODE_COVARIANCE,
 )
 from dreems.utils.validation import _effective_snp_count, _real_array
 
@@ -54,8 +63,8 @@ def attach_sample_coordinates(
         suffix = "" if len(missing) <= 5 else f" and {len(missing) - 5} more"
         raise ValueError(f"sample coordinates are missing for {preview}{suffix}")
 
-    latitude = np.asarray([normalized[identifier][0] for identifier in ids], dtype=np.float64)
-    longitude = np.asarray([normalized[identifier][1] for identifier in ids], dtype=np.float64)
+    latitude = np.asarray([normalized[identifier][1] for identifier in ids], dtype=np.float64)
+    longitude = np.asarray([normalized[identifier][0] for identifier in ids], dtype=np.float64)
     if not np.all(np.isfinite(latitude)) or not np.all(np.isfinite(longitude)):
         raise ValueError("sample latitude and longitude must be finite")
     if np.any(latitude < -90.0) or np.any(latitude > 90.0):
@@ -77,7 +86,7 @@ def attach_sample_coordinates(
 
 
 @beartype
-def from_vcf_zarr(
+def from_dataset(
     dataset: xr.Dataset,
     *,
     node_latitude: Shaped[np.ndarray, "nodes"],
@@ -90,7 +99,8 @@ def from_vcf_zarr(
     effective_snps: Real | None = None,
     call_genotype: str = "call_genotype",
     attrs: Mapping[str, Any] | None = None,
-) -> xr.Dataset:
+): 
+# -> xr.Dataset:
     """Build a DREEMS dataset from sgkit-compatible calls, including opened VCF-Zarr.
 
     Input genotypes must be signed integer allele codes, with fixed positive
@@ -220,6 +230,10 @@ def from_vcf_zarr(
                 node_longitude,
                 {"standard_name": "longitude", "units": "degrees_east"},
             ),
+            "sample_id": dataset["sample_id"],
+            "sample_nodes": sample_nodes,
+            "projection_center_latitude": projection_attrs['projection_center_latitude'],
+            "projection_center_longitude": projection_attrs['projection_center_longitude'],
         }
     )
 
@@ -286,6 +300,123 @@ def _standardized_genotypes(
     )
     return standardized, int(usable_index.size)
 
+def standardized_genotypes_matrix(
+    genotypes: np.ndarray,
+    *,
+    ploidy: int = 2,
+    min_maf: float = 0.05,
+    min_variant_call_rate: float = 0.80,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Filter, impute, and standardize a sample-by-SNP dosage matrix.
+
+    Parameters
+    ----------
+    genotypes
+        Shape (n_samples, n_snps). Entries count minor alleles.
+        Missing genotypes must be represented by np.nan.
+    ploidy
+        Maximum allele count per genotype.
+    min_maf
+        Minimum minor allele frequency.
+    min_variant_call_rate
+        Minimum fraction of samples called at each SNP.
+
+    Returns
+    -------
+    standardized
+        Shape (n_samples, n_retained_snps). Each SNP has mean zero
+        and sample variance one.
+    retained_snps
+        Indices of retained SNPs in the original matrix.
+    """
+    genotypes = np.asarray(genotypes, dtype=float)
+
+    if genotypes.ndim != 2:
+        raise ValueError("genotypes must be a two-dimensional array")
+
+    n_samples, _ = genotypes.shape
+    if n_samples < 2:
+        raise ValueError("at least two samples are required")
+
+    called = np.isfinite(genotypes)
+
+    invalid = called & (
+        (genotypes < 0) | (genotypes > ploidy)
+    )
+    
+    if invalid.any():
+        row, column = np.argwhere(invalid)[0]
+        raise ValueError(
+            f"invalid genotype {genotypes[row, column]} at "
+            f"sample {row}, SNP {column}"
+        )
+
+    called_count = called.sum(axis=0)
+    call_rate = called_count / n_samples
+
+    allele_frequency = np.divide(
+        np.nansum(genotypes, axis=0),
+        ploidy * called_count,
+        out=np.full(genotypes.shape[1], np.nan),
+        where=called_count > 0,
+    )
+    maf = np.minimum(allele_frequency, 1.0 - allele_frequency)
+
+    keep = (
+        (called_count >= 2)
+        & (call_rate >= min_variant_call_rate)
+        & (maf >= min_maf)
+    )
+    retained_snps = np.flatnonzero(keep)
+
+    if retained_snps.size == 0:
+        raise ValueError(
+            "no SNPs remain after call-rate and MAF filtering"
+        )
+
+    filtered = genotypes[:, retained_snps]
+    filtered_called = called[:, retained_snps]
+    # this filtered_called variable isn't completely necessary but it reads nicely, you simply
+    # replace all locations of nans with the imputed value and filtered_called keeps tracks
+    # of the exact location of nans
+
+    # Avoid representing a completely unobserved sample by mean genotypes.
+    samples_with_calls = filtered_called.any(axis=1)
+    if not samples_with_calls.all():
+        missing_samples = np.flatnonzero(~samples_with_calls)
+        raise ValueError(
+            "samples have no called genotypes among retained SNPs; "
+            f"sample indices: {missing_samples[:10].tolist()}"
+        )
+
+    # Mean-impute each SNP.
+    snp_means = np.nanmean(filtered, axis=0) # this computes the mean and completely ignores nans
+    imputed = np.where(filtered_called, filtered, snp_means) 
+
+    # Center and scale each SNP.
+    centered = imputed - imputed.mean(axis=0)
+    standard_deviation = centered.std(axis=0, ddof=1)
+
+    variable = np.isfinite(standard_deviation) & (standard_deviation > 1.0e-8) 
+    if not variable.any():
+        raise ValueError(
+            "no variable SNPs remain after genotype imputation"
+        )
+
+    retained_snps = retained_snps[variable]
+    standardized = centered[:, variable] / standard_deviation[variable]
+
+    standardized_array = xr.DataArray(
+        standardized,
+        dims=("samples", "variants"),
+        coords={
+            "samples": np.arange(standardized.shape[0]),
+            "variants": retained_snps,
+        },
+        name="standardized_genotypes",
+    )
+    
+    return standardized_array, int(standardized.shape[1])
 
 @jaxtyped(typechecker=beartype)
 def _node_covariance(
@@ -416,5 +547,139 @@ def _sample_id_text(value: object) -> str:
 
 __all__ = [
     "attach_sample_coordinates",
-    "from_vcf_zarr",
+    "from_dataset",
 ]
+
+def _real_array(values: Any, *, name: str) -> Float[np.ndarray, "*shape"]:  # noqa: F722
+    """Convert finite real values to float64, rejecting complex data."""
+    array = np.asarray(values)
+    if array.dtype.kind not in "biuf":
+        raise ValueError(f"{name} must contain real numbers")
+    array = array.astype(np.float64, copy=False)
+    if not np.all(np.isfinite(array)):
+        raise ValueError(f"{name} must be finite")
+    return array
+    
+def genotypes_create_dataset(
+    *,
+    sample_coordinates: Mapping[str, tuple[Real, Real]] | None = None,
+    sample_id: str = SAMPLE_ID,
+    node_positions: np.ndarray,
+    edges: np.ndarray,
+    node_covariance: np.ndarray,
+    observed_nodes: np.ndarray | None = None,
+    node_sample_count: np.ndarray,
+    effective_snps: int,
+    coordinate_names: Sequence[str] = ("x", "y"),
+    attrs: Mapping[str, Any] | None = None,
+    sample_nodes: None,
+) -> xr.Dataset:
+    """Create the canonical DREEMS input dataset from numpy arrays.
+
+    ``node_covariance`` is ordered by ``observed_nodes`` rather than all graph
+    nodes. This keeps sparse datasets compact while ``node_sample_count``
+    records sampling precision on the complete graph.
+    """
+
+    positions = np.asarray(node_positions, dtype=np.float64)
+    edge_nodes = np.asarray(edges, dtype=np.int32)
+    covariance = np.asarray(node_covariance, dtype=np.float64)
+    sample_count = np.asarray(node_sample_count)
+    axes = tuple(str(name) for name in coordinate_names)
+    if len(axes) != 2 or len(set(axes)) != 2:
+        raise ValueError("coordinate_names must contain two distinct names")
+    if sample_count.shape != (positions.shape[0],):
+        raise ValueError("node_sample_count must have shape (nodes,)")
+    if not np.all(np.isfinite(sample_count)):
+        raise ValueError("node_sample_count must be finite")
+    if np.any(sample_count < 0) or not np.allclose(sample_count, np.round(sample_count)):
+        raise ValueError("node_sample_count must contain nonnegative integers")
+    sample_count = np.asarray(np.round(sample_count), dtype=np.int64)
+    observed = np.asarray(observed_nodes, dtype=np.int32)
+
+    dataset_attrs = {
+        "dreems_schema": SCHEMA_VERSION,
+        "coordinate_reference_system": "user supplied Cartesian coordinates",
+    }
+    if attrs is not None:
+        dataset_attrs.update(dict(attrs))
+    dataset_attrs["dreems_schema"] = SCHEMA_VERSION
+    dataset = xr.Dataset(
+        data_vars={
+            EDGE_NODE: (
+                (EDGE_DIM, EDGE_ENDPOINT_DIM),
+                edge_nodes,
+                {"long_name": "undirected graph edge endpoints"},
+            ),
+            NODE_COVARIANCE: (
+                (OBSERVED_NODE_DIM, OBSERVED_NODE_2_DIM),
+                covariance,
+                {"long_name": "covariance of SNP-standardized observed-node dosages"},
+            ),
+            NODE_SAMPLE_COUNT: (
+                (NODE_DIM,),
+                sample_count,
+                {"long_name": "number of samples assigned to each graph node"},
+            ),
+            EFFECTIVE_SNPS: (
+                (),
+                np.asarray(int(effective_snps), dtype=np.int64),
+                {"long_name": "effective number of independent SNPs"},
+            ),
+        },
+        coords={
+            "sample_id": ("samples", np.asarray([f"sample_{index}" for index in range(len(sample_coordinates))])),
+            NODE_DIM: np.arange(positions.shape[0], dtype=np.int32),
+            EDGE_DIM: np.arange(edge_nodes.shape[0], dtype=np.int32),
+            EDGE_ENDPOINT_DIM: np.asarray(("source", "target"), dtype=str),
+            COORDINATE_DIM: np.asarray(axes, dtype=str),
+            OBSERVED_NODE_DIM: observed,
+            OBSERVED_NODE_2_DIM: observed,
+        },
+        attrs=dataset_attrs,
+    )
+    
+    if sample_coordinates is not None:
+        dataset = attach_sample_coordinates(
+            dataset,
+            sample_coordinates,
+            sample_id=sample_id,
+        )
+    sample_latitude = _real_array(dataset[SAMPLE_LATITUDE].values, name="sample latitude")
+    sample_longitude = _real_array(dataset[SAMPLE_LONGITUDE].values, name="sample longitude")
+    if np.any(np.abs(sample_latitude) > 90.0):
+        raise ValueError("sample latitude must be between -90 and 90 degrees")
+    node_latitude = node_positions[:,1]
+    node_longitude = node_positions[:,0]
+    node_latitude = _real_array(node_latitude, name="node latitude")
+    node_longitude = _real_array(node_longitude, name="node longitude")
+    _validate_node_geography(node_latitude, node_longitude)
+    node_positions, sample_positions, projection_attrs = _project_local_azimuthal_equidistant(
+        node_latitude=node_latitude,
+        node_longitude=node_longitude,
+        sample_latitude=sample_latitude,
+        sample_longitude=sample_longitude,
+    )
+    dataset = dataset.assign_coords(
+        {            
+            NODE_POSITION: (
+                (NODE_DIM, COORDINATE_DIM),
+                node_positions,
+                {"long_name": "graph node position"},
+            ),
+            "node_latitude": (
+                (NODE_DIM,),
+                node_latitude,
+                {"standard_name": "latitude", "units": "degrees_north"},
+            ),
+            "node_longitude": (
+                (NODE_DIM,),
+                node_longitude,
+                {"standard_name": "longitude", "units": "degrees_east"},
+            ),
+            "sample_nodes": sample_nodes,
+            "projection_center_latitude": projection_attrs['projection_center_latitude'],
+            "projection_center_longitude": projection_attrs['projection_center_longitude'],
+        }
+    )
+    return dataset

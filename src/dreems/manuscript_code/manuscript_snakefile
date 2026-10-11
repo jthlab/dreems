@@ -1,0 +1,108 @@
+CURR_DIR = ""
+OUTPUT_DIR = "manuscript_figures/"
+
+rule wolves:
+     input:
+          CURR_DIR + "wolves/wolves_data.pkl"
+     output:
+          OUTPUT_DIR + "wolves/dreems_wolves_relative_migration_map.pdf",
+          OUTPUT_DIR + "wolves/dreems_wolves_relative_migration_posterior_map.pdf",
+          OUTPUT_DIR + "wolves/dreems_wolves_timing.pkl"
+     script:
+          CURR_DIR + "wolves/wolves.py"
+
+rule fishes:
+     input:
+          CURR_DIR + "fishes/Allo.zarr",
+          CURR_DIR + "fishes/Allo.coord.txt",
+          CURR_DIR + "fishes/Allo.boundary.txt"
+     output:
+          OUTPUT_DIR + "fishes/dreems_fishes_relative_migration_map.pdf",
+          OUTPUT_DIR + "fishes/dreems_fishes_relative_migration_posterior_map.pdf",
+          OUTPUT_DIR + "fishes/dreems_fishes_timing.pkl"
+     params:
+          grid_size = 0.18
+     script:
+          CURR_DIR + "fishes/fishes.py"
+
+rule ticks:
+     input:
+          CURR_DIR + "ticks/ticks.zarr",
+          CURR_DIR + "ticks/Metadata.xlsx",
+          CURR_DIR + "ticks/polygon_outer.txt"
+     output:
+          OUTPUT_DIR + "ticks/dreems_ticks_relative_migration_map.pdf",
+          OUTPUT_DIR + "ticks/dreems_ticks_relative_migration_posterior_map.pdf",
+          OUTPUT_DIR + "ticks/dreems_ticks_timing.pkl"
+     params:
+          grid_size = 0.38
+     script:
+          CURR_DIR + "ticks/ticks.py"
+
+rule ticks_dense:
+     input:
+          CURR_DIR + "ticks/ticks.zarr",
+          CURR_DIR + "ticks/Metadata.xlsx",
+          CURR_DIR + "ticks/polygon_outer.txt"
+     output:
+          OUTPUT_DIR + "ticks/dreems_ticks_dense_relative_migration_map.pdf",
+          OUTPUT_DIR + "ticks/dreems_ticks_dense_relative_migration_posterior_map.pdf",
+          OUTPUT_DIR + "ticks/dreems_ticks_dense_timing.pkl"
+     params:
+          grid_size = 0.20
+     script:
+          CURR_DIR + "ticks/ticks.py"
+
+####### NODE DENSITY EXAMPLE ########
+rule node_density_dense_barrier:
+     output:
+          OUTPUT_DIR + "node_density/dense_barrier.pkl"
+     script:
+          CURR_DIR + "simulations/node_density_dense_barrier.py"
+
+rule node_density_sparse_barrier:
+     output:
+          OUTPUT_DIR + "node_density/sparse_barrier.pkl"
+     script:
+          CURR_DIR + "simulations/node_density_sparse_barrier.py"
+
+rule node_density_dense_anisotropy:
+     output:
+          OUTPUT_DIR + "node_density/dense_anisotropy.pkl"
+     script:
+          CURR_DIR + "simulations/node_density_dense_anisotropy.py"
+
+rule node_density_figure:
+     input:
+          OUTPUT_DIR + "node_density/dense_barrier.pkl",
+          OUTPUT_DIR + "node_density/sparse_barrier.pkl",
+          OUTPUT_DIR + "node_density/dense_anisotropy.pkl"
+     output:
+          OUTPUT_DIR + "node_density/node_density_dense_barrier.pdf",
+          OUTPUT_DIR + "node_density/node_density_sparse_barrier.pdf",
+          OUTPUT_DIR + "node_density/node_density_dense_anisotropy.pdf",
+     script:
+          CURR_DIR + "simulations/node_density_figure.py"
+
+######## POLYPLOIDY ########
+rule four_ploidy:
+     output:
+          OUTPUT_DIR + "polyploidy/four_ploidy.pkl"
+     script:
+          CURR_DIR + "simulations/four_ploidy.py"
+
+rule six_ploidy:
+     output:
+          OUTPUT_DIR + "polyploidy/six_ploidy.pkl"
+     script:
+          CURR_DIR + "simulations/six_ploidy.py"
+
+rule polyploidy_figure:
+     input:
+          OUTPUT_DIR + "polyploidy/four_ploidy.pkl",
+          OUTPUT_DIR + "polyploidy/six_ploidy.pkl",
+     output:
+          OUTPUT_DIR + "polyploidy/four_ploidy.pdf",
+          OUTPUT_DIR + "polyploidy/six_ploidy.pdf",
+     script:
+          CURR_DIR + "simulations/polyploidy_figure.py"
