@@ -26,7 +26,7 @@ def draw_figure_map(positions, edge_nodes, edge_log_migration, sample_count, lin
     # 2. SELECT CONFIGURATION BASED ON 'posterior' FLAG
     config = {
             "title": "Relative migration",
-            "cbar_label": "centered edge log migration",
+            "cbar_label": "centered log migration",
             "cmap": "RdBu",  # Standard reversed colormap for migration
             "norm": TwoSlopeNorm(vmin=-v_limit, vcenter=0.0, vmax=v_limit),
             "values": edge_log_migration,
