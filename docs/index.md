@@ -15,6 +15,7 @@ Visualizing Surfaces <plotting>
 Blacklegged Ticks <blacklegged_ticks>
 Allohistium Fishes <fishes>
 Using FEEMS Inputs <wolves>
+API <api/index>
 ```
 
 ## Indices and tables

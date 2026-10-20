@@ -162,6 +162,30 @@ def from_genotypes(genotypes, sample_coordinates, nodes, edges):
     return direct_data
 
 def dreems_infer_genotypes(genotypes, coord, nodes, edges):
+    """
+    Infer a spatial demographic surface from genotype data and sample coordinates.
+    The genotype data follows the exact same format at FEEMS, where each entry is
+    the count of the minor allele.
+
+    Parameters
+    ----------
+    genotypes : numpy.ndarray
+        Genotype array with samples along the row and snps along the column
+    coord : numpy.ndarray
+        Geographic sample coordinates in degrees, with shape
+        ``(number_of_samples, 2)``. The first column contains longitude
+        and the second contains latitude. Rows must correspond to
+        samples in ``genotypes``.
+    nodes : array-like
+        Spatial network nodes
+    edges : array-like
+        Spatial network edges
+
+    Returns
+    -------
+    surface
+        Inferred spatial demographic surface returned by inference function
+    """
     sample_ids = np.asarray([f"sample_{index}" for index in range(genotypes.shape[0])])
     sample_coordinates = {
         sample_id: (latitude, longitude)
@@ -310,6 +334,25 @@ def create_networkx_graph_from_grid(grid_gdf):
     return G, unique_vertices
 
 def create_grid(polygon_coords, grid_size, pad=10):
+    """
+    Construct a spatial grid graph and display it on a world map.
+
+    Parameters
+    ----------
+    polygon_coords : array-like
+        Coordinates defining the outer polygon boundary.
+        Coordinates should be supplied in (longitude, latitude) pairs.
+    grid_size : scalar
+        Grid resolution parameter. The size is the length of each equilateral triangle on the grid.
+    pad : float, default=10
+        Padding added to each side of the polygon's bounding box when
+        setting the map limits. It is use only for plotting purposes, has nothing to do with grid construction.
+
+    Returns
+    -------
+    G : networkx.Graph
+        Spatial grid graph that will be used to define nodes and edges for inference functions
+    """
     ### FIX: The only reason I need minx, maxx, miny, maxy is for plotting, I should find a way to not need them
     polygon_gdf, grid_gdf, minx, maxx, miny, maxy  = prepare_graph(polygon_coords, grid_size)
     G, sorted_vertices = create_networkx_graph_from_grid(grid_gdf)
@@ -343,6 +386,31 @@ def create_grid(polygon_coords, grid_size, pad=10):
     return G
 
 def dreems_infer(data, sample_coordinates, nodes, edges, maf=0.05, call_rate=0.8):
+    """
+    Infer a spatial demographic surface from a dataset and spatial network.
+
+    Parameters
+    ----------
+    data : xarray.Dataset
+        Input dataset that follows format of zarr array 
+    sample_coordinates : mapping
+        Mapping from sample identifiers to geographic coordinates
+    nodes : numpy.ndarray
+        Geographic network-node coordinates in degrees, with shape
+        ``(number_of_nodes, 2)``. The first column contains longitude
+        and the second contains latitude.
+    edges : array-like
+        Network edge definitions
+    maf : float, default=0.05
+        Minimum minor allele frequency used to filter variants
+    call_rate : float, default=0.8
+        Minimum variant call rate used to filter variants
+
+    Returns
+    -------
+    surface
+        Inferred spatial demographic surface returned by inference function
+    """
     dreems_data = dreems.from_dataset(
         data,
         sample_coordinates = sample_coordinates,

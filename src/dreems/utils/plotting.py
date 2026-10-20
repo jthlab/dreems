@@ -13,18 +13,50 @@ import rasterio
 from rasterio.plot import show
 from scipy.interpolate import griddata
 from scipy.ndimage import gaussian_filter
+import folium
 
 def draw_projected_grid_map(
     surface,
     sample_to_pop=None,
     linewidths=2.5,
     alpha=1.0,
-    limit=1.0,
     map_margin_km=100.0,
     basemap_source=None,
     posterior=False,
     figure_path=None,
 ):
+    """
+    Plot migration edges and sampled nodes on a projected basemap.
+
+    Parameters
+    ----------
+    surface : xarray.Dataset
+        Spatial surface from DREEMS inference functions
+    sample_to_pop : dict, optional
+        Mapping from sample identifiers to population labels
+    linewidths : float or array-like, default=2.5
+        Edge widths 
+    alpha : float, default=1.0
+        Edge opacity, between 0 and 1
+    map_margin_km : float, default=100.0
+        Margin added around the node-coordinate bounds, in kilometers.
+    basemap_source : xyzservices.TileProvider or str, optional
+        Basemap source accepted by ``contextily.add_basemap``.
+        Defaults to ``contextily.providers.Esri.WorldPhysical``.
+    posterior : bool, default=False
+        Boolean indicating whether you want to plot posterior SD.
+    figure_path : str or pathlib.Path, optional
+        Output figure path
+
+    Returns
+    -------
+    None
+        Displays the map and optionally saves it to ``figure_path``.
+
+    Notes
+    -----
+    Function is used to plot the relative effective migration grid surfaces. Please see the tutorial.
+    """
     # surface["node_position"] is assumed to contain x/y in kilometers
     # these are the projected positions
     positions_km = np.asarray(
@@ -45,7 +77,7 @@ def draw_projected_grid_map(
     v_limit = max(
         float(np.max(np.abs(edge_log_migration))),
         0.1,
-    ) * limit
+    )
 
     # ------------------------------------------------------------------
     # Reconstruct the CRS used to create node_position
@@ -120,7 +152,7 @@ def draw_projected_grid_map(
             "cmap": "magma",
             "norm": Normalize(
                 vmin=0.0,
-                vmax=max(float(edge_log_sd.max()), 0.1) * limit,
+                vmax=max(float(edge_log_sd.max()), 0.1),
             ),
             "values": edge_log_sd,
         }
@@ -398,7 +430,6 @@ def generalized_contour_surface(
 def draw_projected_contour_map(
     surface,
     sample_to_pop=None,
-    limit=1.0,
     contour_levels=9,
     contour_linewidth=2.0,
     contour_fill_alpha=0.20,
@@ -415,10 +446,55 @@ def draw_projected_contour_map(
     figure_path=None,
 ):
     """
-    Plot broad generalized contours over a physical basemap.
+    Plot edge log migration or posterior uncertainties on a projected basemap.
 
-    Assumes surface["node_position"] contains projected x/y coordinates
-    in kilometers.
+    Parameters
+    ----------
+    surface : xarray.Dataset
+        Spatial surface from DREEMS inference functions
+    sample_to_pop : dict, optional
+        Mapping from sample identifiers to population labels
+    contour_levels : int, default=9
+        Number of evenly spaced contour levels. Must be at least 2.
+    contour_linewidth : float, default=1.5
+        Width of contour lines in points.
+    contour_fill_alpha : float, default=0.35
+        Opacity of filled contours, between 0 and 1.
+    contour_line_alpha : float, default=0.9
+        Opacity of contour lines, between 0 and 1.
+    smoothing_km : float, default=100.0
+        Gaussian smoothing distance in kilometers
+    grid_size : int, default=350
+        Number of interpolation grid points along each map dimension.
+    map_margin_km : float, default=100.0
+        Margin added around the node-coordinate bounds, in kilometers.
+    basemap_source : xyzservices.TileProvider or str, optional
+        Basemap source accepted by ``contextily.add_basemap``.
+        Defaults to ``contextily.providers.Esri.WorldPhysical``.
+    basemap_alpha : float, default=1.0
+        Basemap opacity, between 0 and 1.
+    show_contour_fill : bool, default=True
+        Whether to display filled contours of the smoothed node values.
+    show_contour_lines : bool, default=True
+        Whether to display contour lines of the smoothed node values.
+    show_axes : bool, default=True
+        Whether to display axes, coordinate labels, and grid lines.
+        Axis tick labels show easting and northing in kilometers.
+    posterior : bool, default=False
+        Boolean that indicates whether you want to plot the posterior SD
+    figure_path : str or pathlib.Path, optional
+        Output figure path
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+        Figure containing the map, colorbar, and optional population legend.
+    ax : matplotlib.axes.Axes
+        Axes containing the basemap, contours, and node markers.
+
+    Notes
+    -----
+    Function is used to plot the relative effective migration contour surfaces. Please see the tutorial.
     """
 
     # 1. PROJECTED COORDINATES
@@ -535,7 +611,7 @@ def draw_projected_contour_map(
         value_limit = max(
             float(np.nanmax(edge_values)),
             0.1,
-        ) * limit
+        )
 
         color_norm = Normalize(
             vmin=0.0,
@@ -559,7 +635,7 @@ def draw_projected_contour_map(
         value_limit = max(
             float(np.nanmax(np.abs(edge_values))),
             0.1,
-        ) * limit
+        )
 
         color_norm = TwoSlopeNorm(
             vmin=-value_limit,
@@ -779,24 +855,70 @@ def draw_projected_node_map(
     figure_path=None,
 ):
     """
-    Plot node log-q means or posterior SDs on a physical basemap.
+    Plot node log-q (where q is the relative effective population size) or posterior uncertainties on a projected basemap.
 
-    Assumptions
-    -----------
-    surface["node_position"] contains projected x/y coordinates in km.
-    Each node-value array has shape (number_of_nodes,).
+    Parameters
+    ----------
+    surface : xarray.Dataset
+        Spatial surface from DREEMS inference functions
+    sample_to_pop : dict, optional
+        Mapping from sample identifiers to population labels
+    posterior : bool, default=False
+        Boolean that indicates whether you want to plot posterior SD
+    contour_levels : int, default=9
+        Number of evenly spaced contour levels. Must be at least 2.
+    contour_linewidth : float, default=1.5
+        Width of contour lines in points.
+    contour_fill_alpha : float, default=0.35
+        Opacity of filled contours, between 0 and 1.
+    contour_line_alpha : float, default=0.9
+        Opacity of contour lines, between 0 and 1.
+    smoothing_km : float, default=100.0
+        Gaussian smoothing distance in kilometers
+    grid_size : int, default=350
+        Number of interpolation grid points along each map dimension.
+    map_margin_km : float, default=100.0
+        Margin added around the node-coordinate bounds, in kilometers.
+    basemap_source : xyzservices.TileProvider or str, optional
+        Basemap source accepted by ``contextily.add_basemap``.
+        Defaults to ``contextily.providers.Esri.WorldPhysical``.
+    basemap_alpha : float, default=1.0
+        Basemap opacity, between 0 and 1.
+    show_contour_fill : bool, default=True
+        Whether to display filled contours of the smoothed node values.
+    show_contour_lines : bool, default=True
+        Whether to display contour lines of the smoothed node values.
+    show_nodes : bool, default=True
+        Whether to display nodes with finite values, colored by their
+        selected log-q statistic.
+    show_sample_nodes : bool, default=False
+        Whether to overlay nodes with positive sample counts.
+    node_size : float, default=50
+        The size of each sampled node
+    show_axes : bool, default=True
+        Whether to display axes, coordinate labels, and grid lines.
+        Axis tick labels show easting and northing in kilometers.
+    vmin : float, optional
+        Lower color limit. Defaults to zero when ``posterior=True``,
+        otherwise to the minimum finite node value.
+    vmax : float, optional
+        Upper color limit. Defaults to the maximum finite node value.
+        If this default equals ``vmin``, it is increased slightly to
+        provide a nonzero color range.
+    figure_path : str or pathlib.Path, optional
+        Output figure path.
 
-    posterior=False: plot surface["node_log_q_mean"].
-    posterior=True:  plot surface["node_log_q_std"].
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+        Figure containing the map, colorbar, and optional population legend.
+    ax : matplotlib.axes.Axes
+        Axes containing the basemap, contours, and node markers.
 
-    show_nodes colors all nodes by the selected value.
-    show_sample_nodes overlays sampled nodes, optionally colored by
-    population using sample_to_pop.
+    Notes
+    -----
+    Function is used to plot the relative effective population size surfaces. Please see the tutorial.
     """
-    if save_figure and figure_path is None:
-        raise ValueError(
-            "figure_path is required when save_figure=True."
-        )
 
     # 1. NODE COORDINATES
     positions_km = np.asarray(
@@ -1105,3 +1227,139 @@ def draw_projected_node_map(
     plt.show()
 
     return fig, ax
+
+def draw_interactive_map(surface, file_path):
+    """
+    Create and save an interactive map of migration edges and sampled nodes.
+
+    Parameters
+    ----------
+    surface : xarray.Dataset
+        Spatial surface from DREEMS inference functions
+    file_path : str or pathlib.Path
+        Output path for the interactive HTML map, such as
+        ``"migration_map.html"``.
+
+    Returns
+    -------
+    None
+        Saves the map to ``file_path``.
+
+    Notes
+    -----
+    Edges are colored using a red-white-blue scale centered at zero.
+    Negative centered log migration values appear red, values near zero
+    appear white, and positive values appear blue. 
+
+    Nodes with positive sample counts are displayed as white circles with
+    black outlines. Circle radii increase linearly with sample count. 
+
+    The map includes OpenTopoMap terrain and OpenStreetMap tile layers,
+    a migration color legend, a layer selector, and tooltips showing edge
+    values and node sample counts. An internet connection is needed to
+    load the background tiles when viewing the saved HTML.
+    """
+    try:
+        positions = np.column_stack((
+            surface["node_longitude"].values,
+            surface["node_latitude"].values,
+        ))
+    except KeyError:
+        positions = surface["node_position"].values
+    edge_nodes = surface["edge_node"].values
+    # edge_log_migration = surface["edge_log_migration_mean"].values
+    edge_log_migration = surface["edge_log_migration_refined"].values
+    sample_count = surface["node_sample_count"].values
+
+    lon = positions[:, 0]
+    lat = positions[:, 1]
+
+    center = [float(np.mean(lat)), float(np.mean(lon))]
+
+    m = folium.Map(
+        location=center,
+        zoom_start=7,
+        tiles=None,
+        control_scale=True,
+    )
+
+    # OpenTopoMap tile layer
+    folium.TileLayer(
+        tiles="https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
+        attr=(
+            "Map data: &copy; OpenStreetMap contributors, "
+            "SRTM | Map style: &copy; OpenTopoMap"
+        ),
+        name="Colored terrain",
+        overlay=False,
+        control=True,
+    ).add_to(m)
+
+    # Fallback layer
+    folium.TileLayer(
+        tiles="OpenStreetMap",
+        name="OpenStreetMap",
+        overlay=False,
+        control=True,
+    ).add_to(m)
+
+    limit = max(float(np.nanmax(np.abs(edge_log_migration))), 0.1)
+
+    colormap = cm.LinearColormap(
+        colors=["#b2182b", "#f7f7f7", "#2166ac"],
+        vmin=-limit,
+        vmax=limit,
+        caption="Centered edge log migration: blue = high, red = low",
+    )
+
+    # 1. Plot Network Edges
+    for edge, value in zip(edge_nodes, edge_log_migration):
+        p0 = positions[edge[0]]
+        p1 = positions[edge[1]]
+    
+        folium.PolyLine(
+            locations=[
+                [float(p0[1]), float(p0[0])],
+                [float(p1[1]), float(p1[0])],
+            ],
+            color=colormap(float(value)),
+            weight=4,
+            opacity=0.9,
+            tooltip=f"Centered edge log migration: {value:.3f}",
+        ).add_to(m)
+
+    # 2. Plot Nodes (Fixed Sizing & Removed Code Duplication)
+    positive_sample_nodes = np.where(sample_count > 0)[0]
+
+    # Pre-calculate min/max for scaling proportional to sample size
+    min_count = float(np.min(sample_count[positive_sample_nodes]))
+    max_count = float(np.max(sample_count[positive_sample_nodes]))
+
+    for i in positive_sample_nodes:
+        p = positions[i]
+        count = float(sample_count[i])
+    
+        # Convert node area in meters so markers scale with geographic map zoom
+        # 5,000 to 25,000 meters radius depending on count
+        if max_count > min_count:
+            geo_radius_meters = 5000 + 20000 * (
+                (count - min_count) / (max_count - min_count)
+            )
+        else:
+            geo_radius_meters = 10000
+    
+        folium.Circle(
+            location=[float(p[1]), float(p[0])],
+            radius=geo_radius_meters,  # Defined in meters on the map surface
+            color="black",
+            weight=1,
+            fill=True,
+            fill_color="white",
+            fill_opacity=0.95,
+            tooltip=f"Node {i}<br>Sample count: {int(count)}",
+        ).add_to(m)
+    
+    colormap.add_to(m)
+    folium.LayerControl().add_to(m)
+    
+    m.save(file_path)

@@ -8,6 +8,8 @@ We will be using the example fish dataset from the [Allohistium fishes tutorial]
 Given a `surface` object, one can create an interactive map that we will save in a file called `fishes.html`.
 
 ```python
+from dreems.plotting import draw_interactive_map
+
 draw_interactive_map(surface, "./fishes.html")
 ```
 
@@ -25,6 +27,8 @@ This interactive map allows you to navigate and explore underlying street networ
 We plot the grid map using [`contextily`](https://contextily.readthedocs.io/en/latest/providers_deepdive.html) basemaps and export the output to `figure_path`. The optional pop_map parameter accepts a dictionary that maps sample identifiers to population labels, enabling population-based color coding. You can omit this parameter and all samples are plotted in a single uniform color. Note: if you provide a `figure_path` you must set `save_figure=True`, the default is `save_figure=False`.
 
 ```python
+from dreems.plotting import draw_projected_grid_map
+
 draw_projected_grid_map(
     surface,
     sample_to_pop=pop_map,
@@ -44,6 +48,8 @@ draw_projected_grid_map(
 One can also plot contour maps and save it to `figure_path`.
 
 ```python
+from dreems.plotting import draw_projected_contour_map
+
 draw_projected_contour_map(
     surface,
     sample_to_pop=pop_map,
@@ -70,6 +76,8 @@ draw_projected_contour_map(
 In addition to providing point estimates of migration rates, we also have posterior SD (standard deviation) plots that quantify the uncertainty associated with these predictions. You can use the two grid and contour map functions above and simply change `posterior=True`. As one would expect, there's greater uncertainty in unsampled regions as shown below:
 
 ```python
+from dreems.plotting import draw_projected_contour_map
+
 draw_projected_contour_map(
     surface,
     sample_to_pop=pop_map,
@@ -132,6 +140,7 @@ We can also plot the estimated relative effective population size (q) for each n
 
 ```python
 from dreems.utils.plotting import draw_projected_node_map
+
 draw_projected_node_map(
     surface,
     sample_to_pop=pop_map,
