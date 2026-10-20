@@ -90,7 +90,7 @@ G = create_grid(outer, grid_size=0.005, pad = 0.01)
 
 ![Michigan dense map](./images/michigan_dense_grid.png)
 
-Once you are satisfied with the density and location of your grid. Extract the `nodes` variable that describes the coordinates of each grid node and `edges` variable that describes how each node of the grid are connected. In general, if your have a sparsely spread out dataset, you should use a sparser grid. If you have samples well spread out across the grid, with high sample size and molecular density, then having a dense grid is appropriate. The `nodes` and `edges` variable will be necessary inputs to DREEMS.
+Once you are satisfied with the density and location of your grid. Extract the `nodes` variable that describes the coordinates of each grid node and `edges` variable that describes how each node of the grid are connected. In general, if you have a sparsely spread out dataset, you should use a sparser grid. If you have samples well spread out across the grid, with high sample size and molecular density, then having a dense grid is appropriate. The `nodes` and `edges` variable will be necessary inputs to DREEMS.
 
 ```python
 nodes = np.array([list(coord) for coord in nx.get_node_attributes(G, 'pos').values()])
@@ -98,7 +98,7 @@ edges = np.array(list(G.edges))
 ```
 
 ## Formatting sample coordinates
-Sample coordinates must be provided as a dictionary that maps sample identifiers to (longitude, latitude). Note that these sample identifiers MUST match those used in the input Zarr file.
+Sample coordinates must be provided as a dictionary that maps sample identifiers to (longitude, latitude) pairs. The sample identifiers MUST match those used in the input Zarr file.
 
 An example of a valid `sample_coordinates` object:
 ```python

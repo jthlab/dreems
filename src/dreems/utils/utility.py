@@ -342,15 +342,15 @@ def create_grid(polygon_coords, grid_size, pad=10):
     plt.show()
     return G
 
-def dreems_infer(data, sample_coordinates, nodes, edges):
+def dreems_infer(data, sample_coordinates, nodes, edges, maf=0.05, call_rate=0.8):
     dreems_data = dreems.from_dataset(
         data,
         sample_coordinates = sample_coordinates,
         node_latitude=nodes[:,1],
         node_longitude=nodes[:,0],
         edges=edges,
-        min_maf=0.05,
-        min_variant_call_rate=0.8,
+        min_maf=maf,
+        min_variant_call_rate=call_rate,
         attrs={"name": "quickstart"},
     )
 

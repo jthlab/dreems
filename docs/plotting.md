@@ -125,3 +125,28 @@ fig, ax = draw_projected_contour_map(
     height="700px"
     style="border: none;">
 </iframe>
+
+## Plotting effective population size (q) map
+
+We can also plot the estimated relative effective population size (q) for each node. However, because q is not the primary parameter of interest in FEEMS/DREEMS, these estimates should be interpreted with caution.  
+
+```python
+from dreems.utils.plotting import draw_projected_node_map
+draw_projected_node_map(
+    surface,
+    sample_to_pop=pop_map,
+    smoothing_km=5.0,
+    contour_levels=15,
+    contour_linewidth=2.0,
+    contour_fill_alpha=0.20,
+    posterior=False
+)
+```
+
+<iframe
+    src="_static/fishes_q.pdf"
+    width="100%"
+    height="700px"
+    style="border: none;">
+</iframe>
+

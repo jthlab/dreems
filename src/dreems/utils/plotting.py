@@ -22,7 +22,6 @@ def draw_projected_grid_map(
     limit=1.0,
     map_margin_km=100.0,
     basemap_source=None,
-    save_figure=False,
     posterior=False,
     figure_path=None,
 ):
@@ -248,7 +247,7 @@ def draw_projected_grid_map(
     ax.set_ylabel("Northing (km)", fontsize=16)
     ax.set_title(config["title"], fontsize=16, pad=10)
 
-    if save_figure and figure_path:
+    if figure_path:
         fig.savefig(
             figure_path,
             bbox_inches="tight",
@@ -412,7 +411,6 @@ def draw_projected_contour_map(
     show_contour_fill=True,
     show_contour_lines=True,
     show_axes=True,
-    save_figure=False,
     posterior=False,
     figure_path=None,
 ):
@@ -746,16 +744,362 @@ def draw_projected_contour_map(
     else:
         ax.set_axis_off()
 
-    if save_figure:
-        if figure_path is None:
-            raise ValueError(
-                "figure_path is required when save_figure=True"
-            )
-
+    if figure_path:
         fig.savefig(
             figure_path,
             bbox_inches="tight",
             dpi=300,
+        )
+
+    plt.show()
+
+    return fig, ax
+
+def draw_projected_node_map(
+    surface,
+    sample_to_pop=None,
+    posterior=False,
+    contour_levels=9,
+    contour_linewidth=1.5,
+    contour_fill_alpha=0.35,
+    contour_line_alpha=0.9,
+    smoothing_km=100.0,
+    grid_size=350,
+    map_margin_km=100.0,
+    basemap_source=None,
+    basemap_alpha=1.0,
+    show_contour_fill=True,
+    show_contour_lines=True,
+    show_nodes=True,
+    show_sample_nodes=False,
+    node_size=50,
+    show_axes=True,
+    vmin=None,
+    vmax=None,
+    figure_path=None,
+):
+    """
+    Plot node log-q means or posterior SDs on a physical basemap.
+
+    Assumptions
+    -----------
+    surface["node_position"] contains projected x/y coordinates in km.
+    Each node-value array has shape (number_of_nodes,).
+
+    posterior=False: plot surface["node_log_q_mean"].
+    posterior=True:  plot surface["node_log_q_std"].
+
+    show_nodes colors all nodes by the selected value.
+    show_sample_nodes overlays sampled nodes, optionally colored by
+    population using sample_to_pop.
+    """
+    if save_figure and figure_path is None:
+        raise ValueError(
+            "figure_path is required when save_figure=True."
+        )
+
+    # 1. NODE COORDINATES
+    positions_km = np.asarray(
+        surface["node_position"].values,
+        dtype=float,
+    )
+
+    if positions_km.ndim != 2 or positions_km.shape[1] != 2:
+        raise ValueError(
+            "surface['node_position'] must have shape (n_nodes, 2)."
+        )
+
+    if not np.all(np.isfinite(positions_km)):
+        raise ValueError("Node positions must all be finite.")
+
+    positions_m = positions_km * 1000.0
+
+    # 2. SELECT NODE VALUES
+    if posterior:
+        value_key = "node_log_q_sd"
+        title = "Posterior uncertainty in node log q"
+        colorbar_label = "Posterior SD of log q"
+        color_map = "magma"
+    else:
+        value_key = "node_log_q_mean"
+        title = "Posterior mean of node log q"
+        colorbar_label = "Posterior mean of log q"
+        color_map = "viridis"
+
+    node_values = np.asarray(
+        surface[value_key].values,
+        dtype=float,
+    )
+
+    if node_values.shape != (len(positions_m),):
+        raise ValueError(
+            f"surface['{value_key}'] must have shape "
+            f"({len(positions_m)},)."
+        )
+
+    finite_nodes = np.isfinite(node_values)
+    finite_values = node_values[finite_nodes]
+
+    if finite_values.size == 0:
+        raise ValueError("No finite node values to plot.")
+
+    # 3. COLOR NORMALIZATION
+    if vmin is None:
+        vmin = 0.0 if posterior else float(finite_values.min())
+
+    if vmax is None:
+        vmax = float(finite_values.max())
+
+        # Handle constant values.
+        if vmax == vmin:
+            vmax = vmin + max(abs(vmin), 1.0) * 1e-6
+
+    if not np.isfinite(vmin) or not np.isfinite(vmax) or vmax <= vmin:
+        raise ValueError("Color limits must be finite, with vmax > vmin.")
+
+    color_norm = Normalize(vmin=vmin, vmax=vmax)
+
+    if contour_levels < 2:
+        raise ValueError("contour_levels must be at least 2.")
+
+    levels = np.linspace(vmin, vmax, contour_levels)
+
+    below = np.any(finite_values < vmin)
+    above = np.any(finite_values > vmax)
+
+    if below and above:
+        colorbar_extend = "both"
+    elif below:
+        colorbar_extend = "min"
+    elif above:
+        colorbar_extend = "max"
+    else:
+        colorbar_extend = "neither"
+
+    # 4. LOCAL AZIMUTHAL-EQUIDISTANT CRS
+    center_lat = float(
+        np.asarray(surface["projection_center_latitude"].values).item()
+    )
+    center_lon = float(
+        np.asarray(surface["projection_center_longitude"].values).item()
+    )
+
+    local_crs = CRS.from_proj4(
+        f"+proj=aeqd "
+        f"+lat_0={center_lat} "
+        f"+lon_0={center_lon} "
+        f"+R=6371008.8 "
+        f"+units=m "
+        f"+no_defs"
+    )
+
+    # 5. INTERPOLATED SURFACE
+    if show_contour_fill or show_contour_lines:
+        grid_x, grid_y, grid_values = generalized_contour_surface(
+            positions=positions_m,
+            node_values=node_values,
+            grid_size=grid_size,
+            smoothing_km=smoothing_km,
+        )
+
+    # 6. FIGURE AND MAP BOUNDS
+    fig, ax = plt.subplots(
+        figsize=(12, 10),
+        constrained_layout=True,
+    )
+
+    x_min, y_min = positions_m.min(axis=0)
+    x_max, y_max = positions_m.max(axis=0)
+    margin_m = map_margin_km * 1000.0
+
+    ax.set_xlim(x_min - margin_m, x_max + margin_m)
+    ax.set_ylim(y_min - margin_m, y_max + margin_m)
+
+    # 7. BASEMAP
+    if basemap_source is None:
+        basemap_source = cx.providers.Esri.WorldPhysical
+
+    cx.add_basemap(
+        ax,
+        crs=local_crs,
+        source=basemap_source,
+        zoom="auto",
+        attribution_size=6,
+        reset_extent=True,
+        alpha=basemap_alpha,
+        zorder=0,
+    )
+
+    # 8. FILLED CONTOURS
+    if show_contour_fill:
+        ax.contourf(
+            grid_x,
+            grid_y,
+            grid_values,
+            levels=levels,
+            cmap=color_map,
+            norm=color_norm,
+            alpha=contour_fill_alpha,
+            extend=colorbar_extend,
+            antialiased=True,
+            zorder=1,
+        )
+
+    # 9. CONTOUR LINES
+    if show_contour_lines:
+        ax.contour(
+            grid_x,
+            grid_y,
+            grid_values,
+            levels=levels,
+            cmap=color_map,
+            norm=color_norm,
+            linewidths=contour_linewidth,
+            alpha=contour_line_alpha,
+            zorder=2,
+        )
+
+    # 10. NODES COLORED BY THEIR VALUES
+    if show_nodes:
+        ax.scatter(
+            positions_m[finite_nodes, 0],
+            positions_m[finite_nodes, 1],
+            c=node_values[finite_nodes],
+            cmap=color_map,
+            norm=color_norm,
+            s=node_size,
+            edgecolor="#333333",
+            linewidth=0.7,
+            zorder=3,
+        )
+
+    # 11. OPTIONAL SAMPLE-NODE OVERLAY
+    if show_sample_nodes:
+        sample_count = np.asarray(
+            surface["node_sample_count"].values,
+        )
+
+        occupied = sample_count > 0
+        occupied_indices = np.flatnonzero(occupied)
+        sample_colors = ["white"] * len(occupied_indices)
+        pop_color_map = {}
+
+        if sample_to_pop:
+            populations = sorted(set(sample_to_pop.values()))
+
+            population_cmap = mpl.colormaps["tab20"].resampled(
+                len(populations)
+            )
+            pop_color_map = {
+                pop: population_cmap(i)
+                for i, pop in enumerate(populations)
+            }
+
+            node_populations = {}
+
+            for sample_id, node_index in zip(
+                surface["sample_id"].values,
+                surface["sample_nodes"].values,
+            ):
+                if sample_id in sample_to_pop:
+                    node_populations.setdefault(
+                        int(node_index), []
+                    ).append(sample_to_pop[sample_id])
+
+            for i, node_index in enumerate(occupied_indices):
+                populations_at_node = node_populations.get(
+                    int(node_index), []
+                )
+
+                if populations_at_node:
+                    majority = Counter(
+                        populations_at_node
+                    ).most_common(1)[0][0]
+
+                    sample_colors[i] = pop_color_map[majority]
+
+        ax.scatter(
+            positions_m[occupied, 0],
+            positions_m[occupied, 1],
+            s=20.0 + 20.0 * sample_count[occupied],
+            c=sample_colors,
+            edgecolor="#333333",
+            linewidth=1.0,
+            zorder=4,
+        )
+
+        if pop_color_map:
+            handles = [
+                plt.Line2D(
+                    [0],
+                    [0],
+                    marker="o",
+                    linestyle="none",
+                    label=population,
+                    markerfacecolor=color,
+                    markeredgecolor="#333333",
+                    markersize=8,
+                )
+                for population, color in pop_color_map.items()
+            ]
+
+            ax.legend(
+                handles=handles,
+                title="Populations",
+                loc="upper right",
+                fontsize=12,
+                title_fontsize=12,
+                framealpha=0.9,
+            )
+
+    # 12. OPAQUE COLORBAR
+    mappable = mpl.cm.ScalarMappable(
+        norm=color_norm,
+        cmap=color_map,
+    )
+    mappable.set_array([])
+
+    cbar = fig.colorbar(
+        mappable,
+        ax=ax,
+        fraction=0.025,
+        pad=0.03,
+        shrink=0.75,
+        extend=colorbar_extend,
+    )
+    cbar.set_label(colorbar_label, fontsize=16)
+    cbar.ax.tick_params(labelsize=14)
+
+    # 13. FORMATTING
+    ax.set_aspect("equal")
+    ax.set_title(title, fontsize=18, pad=10)
+
+    if show_axes:
+        ax.xaxis.set_major_formatter(
+            FuncFormatter(lambda value, _: f"{value / 1000:g}")
+        )
+        ax.yaxis.set_major_formatter(
+            FuncFormatter(lambda value, _: f"{value / 1000:g}")
+        )
+
+        ax.set_xlabel("Easting (km)", fontsize=16)
+        ax.set_ylabel("Northing (km)", fontsize=16)
+        ax.tick_params(axis="both", labelsize=14)
+
+        ax.grid(
+            color="#555555",
+            linewidth=0.4,
+            alpha=0.25,
+        )
+    else:
+        ax.set_axis_off()
+
+    if figure_path:
+        fig.savefig(
+            figure_path,
+            bbox_inches="tight",
+            dpi=300,
+            facecolor="white",
         )
 
     plt.show()
