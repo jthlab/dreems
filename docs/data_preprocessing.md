@@ -2,7 +2,8 @@
 DREEMS requires three mandatory inputs: a grid, sample coordinates, and a zarr array containing LD-pruned SNPs. This tutorial will go over the preprocessing procedure and format for each input. The data should be LD pruned prior to converting to a zarr array. If you are more familiar with `FEEMS`, DREEMS can also accept genotype matrix inputs, please see [`Taking FEEMS Inputs tutorial`](./wolves.md).
 
 ## Creating a zarr array from VCF
-If you already have a compressed VCF file, you may skip the function `pysam.tabix_compress`.
+If you already have a compressed VCF file, you may skip the function `pysam.tabix_compress`. Convert VCF to Zarr with
+[bio2zarr](https://sgkit-dev.github.io/bio2zarr/vcf2zarr/overview.html).
 
 ```python
 import pysam
@@ -109,7 +110,7 @@ sample_coordinates = {'sample_1': (np.float64(-87.53528), np.float64(35.46333)),
 ```
 
 ## Inference
-Now that you have all the necessary inputs, the inference procedure is simply one function. Once you obtain a migration surface, you can visualize it by looking at the [Visualizing Surface tutorial](./plotting.md).
+Now that you have all the necessary inputs, the inference procedure is simply one function. Once you obtain a migration surface, you can visualize it by looking at the [Visualizing Surface tutorial](./plotting.md). To see DREEMS applied on real datasets, please take a look at [Blacklegged Ticks](blacklegged_ticks.md) and [Allohistium Fishes](fishes.md).
 
 ```python
 from dreems.utility import dreems_infer

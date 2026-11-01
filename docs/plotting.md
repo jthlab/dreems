@@ -24,7 +24,7 @@ draw_interactive_map(surface, "./fishes.html")
 This interactive map allows you to navigate and explore underlying street networks, river systems, parks, and natural landscapes. Blue grid areas represent higher relative effective migration, while red areas indicate lower relative effective migration. Sampled nodes are marked with white circles, scaled proportionally to the sample size at each location. You can customize the base map view by hovering over the layer control in the top-right corner to toggle between `OpenStreetMap` and `Colored terrain` (which highlights elevation).
 
 ## Grid maps
-We plot the grid map using [`contextily`](https://contextily.readthedocs.io/en/latest/providers_deepdive.html) basemaps and export the output to `figure_path`. The optional pop_map parameter accepts a dictionary that maps sample identifiers to population labels, enabling population-based color coding. You can omit this parameter and all samples are plotted in a single uniform color. Note: if you provide a `figure_path` you must set `save_figure=True`, the default is `save_figure=False`.
+We plot the grid map using [`contextily`](https://contextily.readthedocs.io/en/latest/providers_deepdive.html) basemaps and export the output to `figure_path`. The optional pop_map parameter accepts a dictionary that maps sample identifiers to population labels, enabling population-based color coding. You can omit this parameter and all samples are plotted in a single uniform color. 
 
 ```python
 from dreems.plotting import draw_projected_grid_map
@@ -32,7 +32,6 @@ from dreems.plotting import draw_projected_grid_map
 draw_projected_grid_map(
     surface,
     sample_to_pop=pop_map,
-    save_figure=True,
     figure_path = "./fishes.pdf"
 )
 ```
@@ -59,7 +58,6 @@ draw_projected_contour_map(
     contour_levels=15,
     map_margin_km=75.0,
     posterior=False,
-    save_figure=True,
     figure_path = "./fishes_contour.pdf"
 )
 ```
@@ -87,7 +85,6 @@ draw_projected_contour_map(
     contour_levels=15,
     map_margin_km=75.0,
     posterior=True,
-    save_figure=True,
     figure_path = "./fishes_posterior_contour.pdf"
 )
 ```
@@ -120,7 +117,6 @@ fig, ax = draw_projected_contour_map(
     contour_levels=15,
     contour_linewidth=2.0,
     contour_fill_alpha=0.20,
-    save_figure=True,
     figure_path="./map_example.pdf",
     posterior=False,
     basemap_source = cx.providers.OpenTopoMap
