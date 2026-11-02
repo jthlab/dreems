@@ -5,13 +5,7 @@ DREEMS Core Functions API Reference
    :no-members:
    :no-special-members:
 
-Grid Creation
--------------
-
 .. autofunction:: dreems.utils.utility.create_grid
-
-Inference
----------
 
 .. autofunction:: dreems.utils.utility.dreems_infer
 

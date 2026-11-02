@@ -5,8 +5,6 @@ Surface Plotting API Reference
    :no-members:
    :no-special-members:
 
-Plotting
-----------
 .. autofunction:: dreems.utils.plotting.draw_interactive_map
 .. autofunction:: dreems.utils.plotting.draw_projected_grid_map
 .. autofunction:: dreems.utils.plotting.draw_projected_contour_map
