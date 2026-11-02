@@ -8,7 +8,6 @@ Surface Plotting API Reference
 .. autofunction:: dreems.utils.plotting.draw_interactive_map
 .. autofunction:: dreems.utils.plotting.draw_projected_grid_map
 .. autofunction:: dreems.utils.plotting.draw_projected_contour_map
-.. autofunction:: dreems.utils.utility.dreems_infer_genotypes
 .. autofunction:: dreems.utils.plotting.draw_projected_node_map
 
 

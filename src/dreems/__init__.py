@@ -6,7 +6,7 @@ from dreems.data.datasets import (
 )
 from dreems.data.genotypes import (
     attach_sample_coordinates,
-    from_vcf_zarr,
+    # from_vcf_zarr,
 )
 from dreems.data.island_sim import (
     IslandCovarianceResult,
