@@ -6,5 +6,5 @@ This page documents the public API of DREEMS
 .. toctree::
    :maxdepth: 2
 
-   inference
-   plotting
+   plotting.rst
+   inference.rst

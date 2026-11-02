@@ -181,6 +181,10 @@ def dreems_infer_genotypes(genotypes, coord, nodes, edges):
     -------
     surface
         Inferred spatial demographic surface returned by inference function
+    
+    Notes
+    -------
+    None
     """
     sample_ids = np.asarray([f"sample_{index}" for index in range(genotypes.shape[0])])
     sample_coordinates = {
@@ -348,6 +352,10 @@ def create_grid(polygon_coords, grid_size, pad=10):
     -------
     G : networkx.Graph
         Spatial grid graph that will be used to define nodes and edges for inference functions
+    
+    Notes
+    -------
+    None
     """
     ### FIX: The only reason I need minx, maxx, miny, maxy is for plotting, I should find a way to not need them
     polygon_gdf, grid_gdf, minx, maxx, miny, maxy  = prepare_graph(polygon_coords, grid_size)
@@ -406,6 +414,10 @@ def dreems_infer(data, sample_coordinates, nodes, edges, maf=0.05, call_rate=0.8
     -------
     surface
         Inferred spatial demographic surface returned by inference function
+    
+    Notes
+    -------
+    None
     """
     dreems_data = dreems.from_dataset(
         data,
