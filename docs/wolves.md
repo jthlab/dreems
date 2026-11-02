@@ -1,12 +1,12 @@
 # Using FEEMS Inputs
 
-For users that are interested in running `FEEMS` and comparing to `DREEMS`, we offer a function that can accept nearly identical inputs as `FEEMS`. `FEEMS` uses a diploid genotype matrix whose entries are the count of the minor alleles with dimensions (number_of_samples, number_of_variants), the sample coordinates (as an array), and the nodes and edges of a grid. To construct a grid, you may follow `FEEMS'` tutorial or see how DREEMS does it by viewing the [data processing tutorial](./data_preprocessing.md), either way is acceptable. 
+For users that are interested in running `FEEMS` and comparing to `DREEMS`, we offer a function that can accept nearly identical inputs as `FEEMS`. `FEEMS` uses a diploid genotype matrix whose entries are the count of the minor alleles with dimensions (number_of_samples, number_of_variants), the sample coordinates (as an array), and the nodes and edges of a grid. To construct a grid, you may follow `FEEMS'` tutorial or see how `DREEMS` does it by viewing the [data processing tutorial](./data_preprocessing.md), either way is acceptable. 
 
 In this example we will examine spatial SNP data for the North American grey wolves, to analyze population gene flow and connectivity across North America. For more details regarding the original migration surface analysis of this dataset please visit:
 
 Joseph Marcus, Wooseok Ha, Rina Foygel Barber, John Novembre (2021) Fast and flexible estimation of effective migration surfaces eLife 10:e61927. [https://doi.org/10.7554/eLife.61927](https://elifesciences.org/articles/61927)
 
-We obtained the datasets from [`FEEMS` github](https://github.com/NovembreLab/feems) and by following their tutorial to obtain the inputs `genotypes`, `coord`, `edges`, and `grid`. We saved evverything into .pkl file for convenience.  
+We obtained the datasets from [`FEEMS` github](https://github.com/NovembreLab/feems) and by following their tutorial to obtain the inputs `genotypes`, `coord`, `edges`, and `grid`. We saved everything into .pkl file for convenience. This file can be found on the `DREEMS` github.  
 
 Users must ensure that the genotypes matrix is LD-pruned, but you can leave missing data as is. DREEMS will automatically impute missing data using the mean. 
 

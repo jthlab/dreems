@@ -8,13 +8,11 @@ import geopandas as gpd
 import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection
 from matplotlib.colors import Normalize, TwoSlopeNorm
-import rasterio
 from rasterio.plot import show
 import dreems
 
 import time
 import branca.colormap as cm
-import folium
 
 import pandas as pd
 from shapely.geometry import Polygon, Point
@@ -23,10 +21,8 @@ from itertools import combinations
 import xarray as xr
 
 import msprime as msp
-import random
 import jax.experimental.sparse as jesp
 import itertools as it
-import tskit
 
 from dreems.data.genotypes import _node_covariance, genotypes_create_dataset, standardized_genotypes_matrix
 

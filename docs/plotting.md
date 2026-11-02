@@ -24,7 +24,7 @@ draw_interactive_map(surface, "./fishes.html")
 This interactive map allows you to navigate and explore underlying street networks, river systems, parks, and natural landscapes. Blue grid areas represent higher relative effective migration, while red areas indicate lower relative effective migration. Sampled nodes are marked with white circles, scaled proportionally to the sample size at each location. You can customize the base map view by hovering over the layer control in the top-right corner to toggle between `OpenStreetMap` and `Colored terrain` (which highlights elevation).
 
 ## Grid maps
-We plot the grid map using [`contextily`](https://contextily.readthedocs.io/en/latest/providers_deepdive.html) basemaps and export the output to `figure_path`. The optional pop_map parameter accepts a dictionary that maps sample identifiers to population labels, enabling population-based color coding. You can omit this parameter and all samples are plotted in a single uniform color. 
+We plot the grid map using [`contextily`](https://contextily.readthedocs.io/en/latest/providers_deepdive.html) basemaps and export the output to `figure_path`. The optional `pop_map` parameter accepts a dictionary that maps sample identifiers to population labels, enabling population-based color coding. You can omit this parameter and all samples are plotted in a single uniform color. 
 
 ```python
 from dreems.plotting import draw_projected_grid_map
@@ -44,7 +44,7 @@ draw_projected_grid_map(
 </iframe>
 
 ## Contour maps
-One can also plot contour maps and save it to `figure_path`.
+One can also plot contour maps and save it to `figure_path`. See the API to further understand each parameter. There are default values implemented but each parameter controls different plotting features for a contour map. 
 
 ```python
 from dreems.plotting import draw_projected_contour_map

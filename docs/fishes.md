@@ -28,7 +28,7 @@ vcf_to_zarr(vcf_gz, "./Allo.zarr")
 ```
 
 ## Load in DREEMS input
-There are three mandatory inputs to DREEMS, a Zarr file, the sample coordinates, and the grid. If you do not have a grid, please see the data preprocessing tutorial on how to construct a grid around your geographic region of interest. 
+There are three mandatory inputs to DREEMS, a Zarr file, the sample coordinates, and the grid. 
 
 ```python
 import xarray as xr

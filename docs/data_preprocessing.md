@@ -1,13 +1,14 @@
 # Data preprocessing
-DREEMS requires three mandatory inputs: a grid, sample coordinates, and a zarr array containing LD-pruned SNPs. This tutorial will go over the preprocessing procedure and format for each input. The data should be LD pruned prior to converting to a zarr array. If you are more familiar with `FEEMS`, DREEMS can also accept genotype matrix inputs, please see [`Taking FEEMS Inputs tutorial`](./wolves.md).
+DREEMS requires three mandatory inputs: a grid, sample coordinates, and a zarr array containing LD-pruned SNPs. This tutorial will go over the preprocessing procedure and format for each input. If you are familiar with FEEMS, DREEMS can also accept genotype matrix inputs, please see [`Taking FEEMS Inputs tutorial`](./wolves.md).
 
 ## Creating a zarr array from VCF
-If you already have a compressed VCF file, you may skip the function `pysam.tabix_compress`. Convert VCF to Zarr with
+Please ensure your data is LD pruned prior to converting to a zarr array. If you already have a compressed VCF file, you may skip the function `pysam.tabix_compress`. Convert VCF to Zarr with
 [bio2zarr](https://sgkit-dev.github.io/bio2zarr/vcf2zarr/overview.html).
 
 ```python
 import pysam
 from sgkit.io.vcf import vcf_to_zarr
+import xarray as xr
 
 vcf_file = "example.vcf"
 vcf_gz = vcf_file + ".gz"
@@ -20,6 +21,9 @@ pysam.tabix_index(vcf_gz, preset="vcf", force=True)
 
 # Convert to zarr file
 vcf_to_zarr(vcf_gz, "./example.zarr")
+
+# open the zarr file
+ds = xr.open_zarr("./example.zarr")
 ```
 
 ## Creating a zarr array from PLINK
@@ -40,11 +44,11 @@ plink2zarr(
 ## Grid creation
 The input for DREEMS requires a user-defined grid over a geographic region. We recommend using a triangular lattice grid. If the user already has a pre-defined grid, then they can pass in a `grid` variable that stores every node coordinate as (longitude, latitude) pairs. For users that do not have an already constructured grid, here's how you can construct one. Please click on [this link](https://www.birdtheme.org/useful/v3tool.html) that will open up a map.
 
-On the map, you can scroll around and zoom in on your region of interest. For example, suppose you are interested in the region around the University of Michigan (Go Blue!). You navigate to Michigan, then click around the region of interest, and form an outer polygon around Ann Arbor. The coordinates of every point will be on the right hand side.
+On the map, you can scroll around to find your region of interest. For example, suppose you are interested in the region around the University of Michigan (Go Blue!). You navigate to Michigan, then click around the region of interest, and form an outer polygon around Ann Arbor. The coordinates of every point will be on the right hand side.
 
 ![google maps](./images/google_maps.png)
 
-Now you can copy the list of coordinates and ask your favorite AI tool to reformat it into an array of coordinate pairs and drop the column of 0's.
+Now copy the list of coordinates and ask your favorite AI tool to reformat it into an array of coordinate pairs and drop the column of 0's.
 
 ```python
 outer = [
@@ -73,16 +77,17 @@ outer = [
 ]
 ```
 
-Now to construct the grid, you must pick a grid size. To do so, you can use the function `draw_grid` to visualize what grid size works best. This function will use the outer polygon and automatically generate a best fitting triangle lattice. The parameter `grid_size` determines the length of each equilateral triangle. If your region spans a small geographic area, then the grid size needs to be small, and vice versa. `pad` is only used for plotting purposes to determine how much you want to zoom out on the figure. 
+Now to construct the grid, you must pick a grid size. To do so, you can use the function `draw_grid` to visualize what grid size works best. This function will use the outer polygon and automatically generate a best fitting triangle lattice. The parameter `grid_size` determines the length of each equilateral triangle. If your region spans a small geographic area, then the grid size needs to be small, and vice versa. 
 
 ```python
+# `pad` is only used for plotting purposes to determine how much you want to zoom out on the figure. 
 G = create_grid(outer, grid_size=0.01, pad = 0.01)
 # Here we created a grid with 147 nodes with 392 edges.
 ```
 
 ![Michigan sparse map](./images/michigan_grid.png)
 
-If you want a much denser grid, all you have to do is make your triangles smaller in `grid_size`.
+If you want a much denser grid, all you have to do is make your triangle length smaller in `grid_size`.
 
 ```python
 G = create_grid(outer, grid_size=0.005, pad = 0.01)

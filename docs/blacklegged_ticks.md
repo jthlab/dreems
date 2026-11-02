@@ -58,15 +58,13 @@ edges = np.array(list(G.edges))
 ```
 
 ## Running DREEMS
-The function `dreems_infer` will internally filter for SNPs with a call rate of greater than 0.8, impute the missing data using the mean, and apply a MAF filtering of 0.05. These preprocessing steps are crucial for migration surface inference. 
+The function `dreems_infer` will internally filter for SNPs with a call rate of greater than 0.8, impute the missing data using the mean, and apply a MAF filtering of 0.05. Please see the API if you wish to override these parameters. These preprocessing steps are crucial for migration surface inference. 
 
 ```python
 from dreems.utility import dreems_infer
 
 surface = dreems_infer(data=ds, sample_coordinates=sample_coordinates, nodes=nodes, edges=edges)
 ```
-
-By default, DREEMS will filter for SNPs with a call rate of greater than 0.8, impute the missing data using the mean, and apply a MAF filtering of 0.05. These preprocessing steps are crucial for migration surface inference. 
 
 ## Plotting surface
 `pop_map` is an optional dictionary mapping individual samples to population labels for population-based color coding. If omitted, all sample points are given a uniform color.

@@ -92,7 +92,7 @@ master_doc = "index"
 
 # General information about the project.
 project = "dreems"
-copyright = "2026, Jiatong Liang and Jonathan Terhorst"
+copyright = "2026, Jiatong Liang, Gideon Bradburd, and Jonathan Terhorst"
 
 # The version info for the project you're documenting, acts as replacement for
 # |version| and |release|, also used in various other places throughout the
